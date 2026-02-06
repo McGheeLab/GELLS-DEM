@@ -1,0 +1,51 @@
+{
+  "n_functional": 60,
+  "n_inert": 60,
+  "functional_radius_mean": 35.0,
+  "functional_radius_std": 5.0,
+  "inert_radius_mean": 50.0,
+  "inert_radius_std": 8.0,
+  "target_packing_fraction": 0.52,
+  "cells_per_granule_mean": 5.0,
+  "cell_diameter": 20.0,
+  "cell_bridge_stiffness": 0.15,
+  "max_bridge_gap": 50.0,
+  "repulsion_stiffness": 1.0,
+  "damping": 1.5,
+  "domain_x": 454.56585779278356,
+  "domain_y": 454.56585779278356,
+  "domain_z": 454.56585779278356,
+  "wall_stiffness": 2.0,
+  "total_time_hours": 72.0,
+  "dt_initial": 0.01,
+  "dt_min": 0.001,
+  "dt_max": 0.5,
+  "max_displacement_fraction": 0.03,
+  "save_interval_hours": 2.0,
+  "output_dir": "./jammed_nonspherical_sim",
+  "auto_calculate_domain": true,
+  "functional_aspect_ratio": [
+    1.0,
+    1.6
+  ],
+  "functional_roundness": [
+    2.0,
+    3.0
+  ],
+  "functional_roughness": [
+    0.2,
+    0.4
+  ],
+  "inert_aspect_ratio": [
+    1.0,
+    1.3
+  ],
+  "inert_roundness": [
+    2.0,
+    2.5
+  ],
+  "inert_roughness": [
+    0.0,
+    0.2
+  ]
+}
