@@ -773,7 +773,7 @@ class Visualizer:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--input', '-i', default='./simulations/Trial10')
+    parser.add_argument('--input', '-i', default='./simulations/Trial12')
     parser.add_argument('--all', '-a', action='store_true')
     parser.add_argument('--phase-map', '-p', action='store_true')
     parser.add_argument('--watch', '-w', action='store_true')
