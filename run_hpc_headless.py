@@ -96,6 +96,32 @@ def load_trial_json(path: str) -> dict:
         if "dt_max_hours" in tm:
             overrides["dt"] = tm["dt_max_hours"]
 
+    # Granule shape (V1.3)
+    if "shape" in t:
+        s = t["shape"]
+        if "enabled" in s:
+            overrides["shape_enabled"] = bool(s["enabled"])
+        if "aspect_ratio_func_mean" in s:
+            overrides["aspect_ratio_func_mean"] = s["aspect_ratio_func_mean"]
+        if "aspect_ratio_func_std" in s:
+            overrides["aspect_ratio_func_std"] = s["aspect_ratio_func_std"]
+        if "aspect_ratio_inert_mean" in s:
+            overrides["aspect_ratio_inert_mean"] = s["aspect_ratio_inert_mean"]
+        if "aspect_ratio_inert_std" in s:
+            overrides["aspect_ratio_inert_std"] = s["aspect_ratio_inert_std"]
+        if "blockiness_func_mean" in s:
+            overrides["blockiness_func_mean"] = s["blockiness_func_mean"]
+        if "blockiness_func_std" in s:
+            overrides["blockiness_func_std"] = s["blockiness_func_std"]
+        if "blockiness_inert_mean" in s:
+            overrides["blockiness_inert_mean"] = s["blockiness_inert_mean"]
+        if "blockiness_inert_std" in s:
+            overrides["blockiness_inert_std"] = s["blockiness_inert_std"]
+        if "drag_scale_rot" in s:
+            overrides["drag_scale_rot"] = s["drag_scale_rot"]
+        if "omega_max" in s:
+            overrides["omega_max"] = s["omega_max"]
+
     return overrides
 
 
@@ -106,7 +132,15 @@ def main():
     parser.add_argument("--trial", type=str, default=None,
                         help="Path to a Trial JSON config file")
     for field_name, field_val in vars(p).items():
-        if isinstance(field_val, (int, float)):
+        if isinstance(field_val, bool):
+            # bool is a subclass of int, so check it first
+            parser.add_argument(
+                f"--{field_name}",
+                type=lambda s: s.lower() in ('true', '1', 'yes'),
+                default=None,
+                metavar='BOOL',
+            )
+        elif isinstance(field_val, (int, float)):
             parser.add_argument(
                 f"--{field_name}",
                 type=type(field_val),
@@ -142,6 +176,9 @@ def main():
     print(f"  Output dir: {os.path.abspath(out_dir)}")
     print(f"  Domain: {p.Lx:.0f} x {p.Ly:.0f} um")
     print(f"  E_modulus={p.E_modulus} kPa, t_total={p.t_total} h, dt={p.dt} h")
+    if hasattr(p, 'shape_enabled') and p.shape_enabled:
+        print(f"  Shape: ON (AR_func={p.aspect_ratio_func_mean}±{p.aspect_ratio_func_std}, "
+              f"block_func={p.blockiness_func_mean}±{p.blockiness_func_std})")
     print_stiffness_info(p)
 
     # Run simulation

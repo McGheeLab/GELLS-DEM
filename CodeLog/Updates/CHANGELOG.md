@@ -8,6 +8,54 @@ MINOR tracks feature additions and improvements.
 
 ---
 
+## [V1.3] - 2026-03-14
+
+### Added
+- **Superellipse granule shapes**: Granules are now parameterised as
+  superellipses `|x/a|^n + |y/b|^n = 1` with per-granule semi-axes (a, b),
+  blockiness exponent (n), and orientation angle (θ). Controlled by
+  `shape_enabled` flag in `Params` (default: `False` for V1.2 backward
+  compatibility). Per-type distributions for aspect ratio and blockiness.
+- **Common normal contact detection**: Newton-Raphson iterative solver for
+  superellipse–superellipse contact. Returns penetration depth, contact normal,
+  contact point, and local curvature radii. Circle fast-path preserves V1.2
+  performance when `shape_enabled=False`.
+- **Superellipse–wall contact**: Boundary sampling method to detect penetration
+  of non-circular granules against domain walls.
+- **Rotational dynamics**: Overdamped angular integration `γ_rot dθ/dt = Σ τ`
+  from off-centre contact forces and friction. Angular velocity cap `omega_max`.
+  Only active for non-circular granules.
+- **Hertz with local curvature**: Contact force uses local radius of curvature
+  at the contact point rather than the global granule radius. Generalises the
+  Hertz, DMT adhesion, and area-dependent friction models to non-circular shapes.
+- **Shape descriptors** (following Liu et al. 2025, Table 1): Per-granule
+  circularity (`4πA/P²`), aspect ratio, elongation, and blockiness. Population
+  statistics (mean, std) added to metrics output.
+- **Superellipse geometry utilities**: `superellipse_area()`, `superellipse_perimeter()`,
+  `superellipse_point()`, `superellipse_normal_vec()`, `superellipse_curvature_radius()`,
+  `superellipse_polygon_pts()`, `superellipse_implicit()`.
+- **New `Params` fields**: `shape_enabled`, `aspect_ratio_func/inert_mean/std`,
+  `blockiness_func/inert_mean/std`, `drag_scale_rot`, `omega_max`.
+- **New `GranuleSystem` arrays**: `a`, `b`, `n_shape`, `theta`, `omega`, `r_bound`,
+  `is_circle` flag.
+
+### Changed
+- **`compute_forces()`** now returns `(F, torques)` tuple instead of just `F`.
+  Torque array is `(N,)` in units of nN·µm.
+- **`step()`** integrates both translational and rotational dynamics.
+- **Wall clamp** uses `r_bound` (bounding circle radius) instead of `r`.
+- **Neighbour search** uses `r_bound` for cutoff distance.
+- **`render_fields()`** uses superellipse implicit function for field profiles
+  when `shape_enabled=True`.
+- **`plot_granules()`** renders `Polygon` patches for superellipses, `Circle`
+  patches for circles.
+- **`compute_metrics()`** uses shape-aware contact detection and area
+  computation for superellipses.
+- **Snapshot tuple** extended with shape arrays (a, b, n_shape, theta) at
+  indices 11–14.
+
+---
+
 ## [V1.2] - 2026-03-14
 
 ### Added

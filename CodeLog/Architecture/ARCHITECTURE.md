@@ -90,6 +90,10 @@ Stores all per-granule arrays:
   - `n_overcrowded` (float64) — cells crawling on top of other cells
 - **Velocity state** (V1.2): `vx`, `vy` (float64) — per-granule velocities from
   previous timestep, used for tangential friction calculation
+- **Shape state** (V1.3): `a`, `b` (float64) — superellipse semi-axes;
+  `n_shape` (float64) — blockiness exponent; `theta` (float64) — orientation angle (rad);
+  `omega` (float64) — angular velocity (rad/h); `r_bound` (float64) — bounding circle
+  radius = max(a, b); `is_circle` (bool) — fast-path flag
 - **Derived masks**: `func_mask`, `inert_mask` (bool arrays)
 - **Particle count**: `N` (int)
 
@@ -165,21 +169,27 @@ Random sequential addition (RSA) with:
 
 ### 2.6 Force Computation — `compute_forces()`
 
-Four force contributions, evaluated per timestep:
+Five force contributions + torques, evaluated per timestep:
 
 | Force | Scope | Law | Key parameters |
 |-------|-------|-----|----------------|
-| **Contact (normal)** | All overlapping pairs | Hertz − DMT: F = (4/3) E* sqrt(R*) delta^1.5 − 2π W R* | `E_modulus`, `poisson_ratio`, `W_adh_*` |
-| **Contact (tangential)** | All overlapping pairs | Area-dependent: F = τ₀ π R* δ tanh(\|v_t\|/v_ref) | `tau_0_*`, `friction_v_ref` |
+| **Contact (normal)** | All overlapping pairs | Hertz − DMT: F = (4/3) E* sqrt(R*_local) delta^1.5 − 2π W R*_local | `E_modulus`, `poisson_ratio`, `W_adh_*` |
+| **Contact (tangential)** | All overlapping pairs | Area-dependent: F = τ₀ π R*_local δ tanh(\|v_t\|/v_ref) | `tau_0_*`, `friction_v_ref` |
+| **Contact torque** (V1.3) | Non-circular granules | τ = (contact_point − centre) × F | Off-centre contacts |
 | **Cell bridging** | Functional-functional, gap in (0, sense_dist), attached cells | Motor-clutch: F = F_mc * n_bridges (stiffness + FA dependent) | `n_motors`, `F_motor_stall`, `n_clutches`, `k_clutch`, `cell_sense_distance` |
-| **Wall** | Granules penetrating boundary | Hertz (sphere vs rigid flat): E*_wall = 2 * E*_gg | `E_modulus`, `poisson_ratio` |
+| **Wall** | Granules penetrating boundary | Hertz (rigid flat): R* = R_local (superellipse) or R_i (circle) | `E_modulus`, `poisson_ratio` |
 | **Active noise** | Functional granules only | Gaussian white noise ~ sqrt(2 gamma T_active / dt) | `T_active` |
+
+**Contact detection (V1.3):** For circles, the fast analytical overlap check `r_i + r_j - d`
+is used. For superellipses, the **common normal method** (Newton-Raphson) finds the contact
+point, penetration depth, and local curvature radii. `R*_local` replaces the global `R*` in
+all Hertz, DMT, and friction formulas.
 
 **Effective moduli:**
 - Granule-granule: `E* = E / [2(1 - nu^2)]`
 - Granule-wall (rigid limit): `E* = E / (1 - nu^2)`
 
-**Neighbour search:** `cKDTree.query_pairs()` with cutoff `2*max_r + cell_sense_distance`.
+**Neighbour search:** `cKDTree.query_pairs()` with cutoff `2*max_r_bound + cell_sense_distance`.
 
 **Cell bridging details (V1.2):**
 - Only attached, non-overcrowded cells can bridge (`n_avail = n_attached - n_overcrowded`)
@@ -328,15 +338,16 @@ and cell-stress visualisation. Retained for reference but not actively maintaine
 
 ## 5. Design Constraints and Assumptions
 
-1. **2D only**: Current engine operates in 2D (circles, not spheres). 3D extension
-   exists in `old/new_dem.py` but is not maintained.
+1. **2D only**: Current engine operates in 2D. 3D extension exists in
+   `old/new_dem.py` but is not maintained.
 2. **Overdamped regime**: No inertial terms. Valid for cell-culture timescales
    (hours) in viscous medium.
-3. **Rigid granules**: Granule radii do not change during simulation. Deformation
+3. **Rigid granules**: Granule shapes do not deform during simulation. Deformation
    effects are captured through the Hertz contact force and volume-conserving
    effective radii for rendering.
-4. **Tangential friction only**: Area-dependent tangential friction is modelled
-   (V1.2). Rotational degrees of freedom are not modelled.
+4. **Superellipse shapes** (V1.3): Granules are parameterised as 2D superellipses
+   `|x/a|^n + |y/b|^n = 1`. Circles (n=2, a=b) are the default. Overdamped
+   rotational dynamics (γ_rot dθ/dt = Σ τ) enabled for non-circular granules.
 5. **Hertz validity**: The contact model assumes small overlaps (delta/R < ~10%).
    The `max_overlap_ratio` metric monitors this assumption.
 6. **Deterministic with seed**: All randomness flows through `numpy.random.Generator`,

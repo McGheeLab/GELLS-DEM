@@ -96,8 +96,10 @@ PHYSICAL PARAMETER MAPPING:
 import numpy as np
 from scipy.spatial import cKDTree
 from scipy.ndimage import label
+from scipy.special import gamma as _gamma
+from scipy.optimize import brentq
 import matplotlib.pyplot as plt
-from matplotlib.patches import Circle
+from matplotlib.patches import Circle, Polygon
 from matplotlib.collections import PatchCollection
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
@@ -178,6 +180,19 @@ class Params:
     save_every_h: float = 2.0       # save interval (hours)
     v_max: float = 20.0             # µm/hr, velocity cap
 
+    # ── Granule shape (V1.3 — superellipses) ──
+    shape_enabled: bool = False                # False = circles (V1.2 compat)
+    aspect_ratio_func_mean: float = 1.0        # a/b ratio for functional granules
+    aspect_ratio_func_std: float = 0.0
+    aspect_ratio_inert_mean: float = 1.0       # a/b ratio for inert granules
+    aspect_ratio_inert_std: float = 0.0
+    blockiness_func_mean: float = 2.0          # n exponent (2=ellipse, >2=blocky)
+    blockiness_func_std: float = 0.0
+    blockiness_inert_mean: float = 2.0
+    blockiness_inert_std: float = 0.0
+    drag_scale_rot: float = 0.05               # rotational drag scaling
+    omega_max: float = 1.0                     # rad/h, angular velocity cap
+
     # ── Rendering ──
     Ngrid: int = 200                # grid for field rendering
     interface_width: float = 3.0    # µm, tanh smoothing
@@ -198,15 +213,32 @@ class Params:
 
 class GranuleSystem:
     """Tracks all granule and per-granule cell state."""
-    def __init__(self, x, y, r, gtype, n_cells):
+    def __init__(self, x, y, r, gtype, n_cells,
+                 a=None, b=None, n_shape=None, theta=None):
         self.x = np.array(x, dtype=np.float64)
         self.y = np.array(y, dtype=np.float64)
-        self.r = np.array(r, dtype=np.float64)
-        self.gtype = np.array(gtype, dtype=int)  # 0=func, 1=inert
+        self.r = np.array(r, dtype=np.float64)   # equivalent radius (area = pi*r^2)
+        self.gtype = np.array(gtype, dtype=int)   # 0=func, 1=inert
         self.n_cells = np.array(n_cells, dtype=np.float64)  # seeded cells
         self.N = len(x)
         self.func_mask = self.gtype == 0
         self.inert_mask = self.gtype == 1
+
+        # ── Shape state (V1.3 — superellipses) ──
+        if a is not None:
+            self.a = np.array(a, dtype=np.float64)           # semi-axis, body x
+            self.b = np.array(b, dtype=np.float64)           # semi-axis, body y
+            self.n_shape = np.array(n_shape, dtype=np.float64)  # blockiness
+            self.theta = np.array(theta, dtype=np.float64)   # orientation (rad)
+            self.is_circle = False
+        else:
+            self.a = self.r.copy()
+            self.b = self.r.copy()
+            self.n_shape = np.full(self.N, 2.0)
+            self.theta = np.zeros(self.N)
+            self.is_circle = True
+        self.r_bound = np.maximum(self.a, self.b)  # bounding circle radius
+        self.omega = np.zeros(self.N)               # angular velocity (rad/h)
 
         # ── Cell state (per granule) ──
         self.n_attached = np.zeros(self.N)       # cells that have attached
@@ -254,6 +286,328 @@ def get_pair_friction_params(gtype_i, gtype_j, p: Params):
         return p.tau_0_ff, p.W_adh_ff
     else:                                    # mixed
         return p.tau_0_if, p.W_adh_if
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Superellipse geometry (V1.3)
+# ══════════════════════════════════════════════════════════════════════
+#
+# A 2D superellipse: |x/a|^n + |y/b|^n = 1
+# Parametric form:
+#   x(t) = a |cos t|^(2/n) sign(cos t)
+#   y(t) = b |sin t|^(2/n) sign(sin t)      t in [0, 2pi)
+
+def superellipse_area(a, b, n):
+    """Exact area of superellipse |x/a|^n + |y/b|^n = 1."""
+    return 4.0 * a * b * _gamma(1.0 + 1.0/n)**2 / _gamma(1.0 + 2.0/n)
+
+
+def superellipse_point(t, a, b, n):
+    """Point (x, y) on superellipse boundary at parameter t (body frame)."""
+    ct, st = np.cos(t), np.sin(t)
+    e = 2.0 / n
+    x = a * np.sign(ct) * np.abs(ct)**e
+    y = b * np.sign(st) * np.abs(st)**e
+    return x, y
+
+
+def superellipse_tangent(t, a, b, n):
+    """Unnormalised tangent vector dx/dt, dy/dt (body frame)."""
+    ct, st = np.cos(t), np.sin(t)
+    e = 2.0 / n
+    # dx/dt = a * (2/n) * |cos t|^(2/n - 1) * sin t  (with signs handled)
+    dxdt = -a * e * np.sign(ct) * np.abs(ct)**(e - 1.0) * st
+    dydt =  b * e * np.sign(st) * np.abs(st)**(e - 1.0) * ct
+    return dxdt, dydt
+
+
+def superellipse_normal_vec(t, a, b, n):
+    """Outward unit normal at parameter t (body frame)."""
+    dxdt, dydt = superellipse_tangent(t, a, b, n)
+    # outward normal = (dy/dt, -dx/dt) normalised
+    nx, ny = dydt, -dxdt
+    mag = np.sqrt(nx*nx + ny*ny)
+    if mag < 1e-30:
+        return 0.0, 0.0
+    return nx / mag, ny / mag
+
+
+def superellipse_curvature_radius(t, a, b, n):
+    """
+    Local radius of curvature R = 1/kappa at parameter t (body frame).
+
+    kappa = |x' y'' - y' x''| / (x'^2 + y'^2)^(3/2)
+    """
+    ct, st = np.cos(t), np.sin(t)
+    e = 2.0 / n
+    eps = 1e-30
+
+    # First derivatives
+    act = np.abs(ct) + eps
+    ast = np.abs(st) + eps
+    dxdt = -a * e * np.sign(ct) * act**(e - 1.0) * st
+    dydt =  b * e * np.sign(st) * ast**(e - 1.0) * ct
+
+    # Second derivatives
+    d2xdt2 = -a * e * (
+        np.sign(ct) * (e - 1.0) * act**(e - 2.0) * st * st
+        + np.sign(ct) * act**(e - 1.0) * ct
+    )
+    d2ydt2 = b * e * (
+        np.sign(st) * (e - 1.0) * ast**(e - 2.0) * ct * ct
+        - np.sign(st) * ast**(e - 1.0) * st
+    )
+
+    num = abs(dxdt * d2ydt2 - dydt * d2xdt2)
+    den = (dxdt**2 + dydt**2)**1.5
+    if den < 1e-30 or num < 1e-30:
+        return max(a, b) * 10.0  # fallback: large radius (nearly flat)
+    return den / num
+
+
+def superellipse_polygon_pts(cx, cy, a, b, n, theta, num_pts=64):
+    """Polygon vertices for rendering a superellipse in world coords."""
+    t = np.linspace(0, 2*np.pi, num_pts, endpoint=False)
+    e = 2.0 / n
+    ct, st = np.cos(t), np.sin(t)
+    bx = a * np.sign(ct) * np.abs(ct)**e
+    by = b * np.sign(st) * np.abs(st)**e
+    # Rotate to world frame
+    cos_th, sin_th = np.cos(theta), np.sin(theta)
+    wx = cx + cos_th * bx - sin_th * by
+    wy = cy + sin_th * bx + cos_th * by
+    return np.column_stack([wx, wy])
+
+
+def superellipse_perimeter(a, b, n, num_pts=256):
+    """Numerical perimeter of a superellipse."""
+    pts = superellipse_polygon_pts(0, 0, a, b, n, 0.0, num_pts)
+    diffs = np.diff(pts, axis=0, append=pts[:1])
+    return float(np.sum(np.sqrt(diffs[:, 0]**2 + diffs[:, 1]**2)))
+
+
+def _world_to_body(px, py, cx, cy, theta):
+    """Transform world point(s) to body frame of granule at (cx,cy,theta)."""
+    dx, dy = px - cx, py - cy
+    cos_th, sin_th = np.cos(theta), np.sin(theta)
+    return cos_th * dx + sin_th * dy, -sin_th * dx + cos_th * dy
+
+
+def _body_to_world(bx, by, cx, cy, theta):
+    """Transform body point(s) to world frame."""
+    cos_th, sin_th = np.cos(theta), np.sin(theta)
+    return cx + cos_th * bx - sin_th * by, cy + sin_th * bx + cos_th * by
+
+
+def superellipse_implicit(px, py, cx, cy, a, b, n, theta):
+    """
+    Evaluate the superellipse implicit function at world point (px, py).
+    Returns value < 1 if inside, = 1 on boundary, > 1 outside.
+    """
+    bx, by = _world_to_body(px, py, cx, cy, theta)
+    return (np.abs(bx) / a)**n + (np.abs(by) / b)**n
+
+
+def _find_closest_param(bx_target, by_target, a, b, n, t_guess=None):
+    """
+    Find parameter t such that the superellipse point is closest to (bx_target, by_target).
+    Used for contact detection. Minimises distance in body frame.
+    """
+    from scipy.optimize import minimize_scalar
+
+    def dist2(t):
+        px, py = superellipse_point(t, a, b, n)
+        return (px - bx_target)**2 + (py - by_target)**2
+
+    if t_guess is not None:
+        # Local search near guess
+        res = minimize_scalar(dist2, bounds=(t_guess - 0.5, t_guess + 0.5),
+                              method='bounded')
+        return res.x % (2 * np.pi)
+
+    # Global search: sample then refine
+    ts = np.linspace(0, 2*np.pi, 64, endpoint=False)
+    d2 = np.array([dist2(t) for t in ts])
+    best = ts[np.argmin(d2)]
+    res = minimize_scalar(dist2, bounds=(best - 0.15, best + 0.15),
+                          method='bounded')
+    return res.x % (2 * np.pi)
+
+
+# ── Contact detection: superellipse–superellipse (common normal) ──
+
+def find_contact_superellipses(xi, yi, ai, bi, ni, thetai,
+                                xj, yj, aj, bj, nj, thetaj):
+    """
+    Common normal contact detection between two superellipses.
+
+    Returns: (in_contact, delta, nx, ny, cx, cy, R_loc_i, R_loc_j)
+        in_contact: bool
+        delta: penetration depth (µm), > 0 if overlapping
+        nx, ny: unit contact normal (from i toward j)
+        cx, cy: contact point (world coords)
+        R_loc_i, R_loc_j: local curvature radii at contact (µm)
+
+    Returns None if no contact (gap > 0).
+    """
+    # Direction between centres
+    dx_c = xj - xi
+    dy_c = yj - yi
+    d_c = np.sqrt(dx_c**2 + dy_c**2)
+    if d_c < 1e-12:
+        return None
+
+    # Unit vector from i to j
+    ux, uy = dx_c / d_c, dy_c / d_c
+
+    # Initial guess: parameter on each surface closest to the line of centres
+    # Transform centre-to-centre direction into each body frame
+    bx_i, by_i = (np.cos(thetai) * ux + np.sin(thetai) * uy,
+                  -np.sin(thetai) * ux + np.cos(thetai) * uy)
+    bx_j, by_j = (np.cos(thetaj) * (-ux) + np.sin(thetaj) * (-uy),
+                  -np.sin(thetaj) * (-ux) + np.cos(thetaj) * (-uy))
+
+    t_i = np.arctan2(by_i, bx_i)
+    t_j = np.arctan2(by_j, bx_j)
+
+    # Newton-Raphson iteration: refine contact parameters
+    # Find points P_i on surface i and P_j on surface j such that the
+    # normal at P_i points toward P_j and vice versa.
+    for iteration in range(12):
+        # Points on each surface (body frame)
+        px_i, py_i = superellipse_point(t_i, ai, bi, ni)
+        px_j, py_j = superellipse_point(t_j, aj, bj, nj)
+
+        # Transform to world frame
+        wx_i, wy_i = _body_to_world(px_i, py_i, xi, yi, thetai)
+        wx_j, wy_j = _body_to_world(px_j, py_j, xj, yj, thetaj)
+
+        # Vector from P_i to P_j
+        dpx = wx_j - wx_i
+        dpy = wy_j - wy_i
+        dp_mag = np.sqrt(dpx**2 + dpy**2)
+        if dp_mag < 1e-12:
+            break
+
+        # Normal at P_i (body frame) then rotate to world
+        nix, niy = superellipse_normal_vec(t_i, ai, bi, ni)
+        cos_ti, sin_ti = np.cos(thetai), np.sin(thetai)
+        nix_w = cos_ti * nix - sin_ti * niy
+        niy_w = sin_ti * nix + cos_ti * niy
+
+        # Normal at P_j (body frame) then rotate to world
+        njx, njy = superellipse_normal_vec(t_j, aj, bj, nj)
+        cos_tj, sin_tj = np.cos(thetaj), np.sin(thetaj)
+        njx_w = cos_tj * njx - sin_tj * njy
+        njy_w = sin_tj * njx + cos_tj * njy
+
+        # Desired: n_i should point along P_i→P_j, n_j should point along P_j→P_i
+        # Error: angle between n_i and (P_i→P_j)
+        target_nx = dpx / dp_mag
+        target_ny = dpy / dp_mag
+
+        # Cross-product errors (should be zero when aligned)
+        err_i = nix_w * target_ny - niy_w * target_nx
+        err_j = njx_w * (-target_ny) - njy_w * (-target_nx)
+
+        if abs(err_i) < 1e-8 and abs(err_j) < 1e-8:
+            break
+
+        # Simple gradient step (damped Newton)
+        t_i -= 0.5 * err_i
+        t_j -= 0.5 * err_j
+
+    # Final contact geometry
+    px_i, py_i = superellipse_point(t_i, ai, bi, ni)
+    px_j, py_j = superellipse_point(t_j, aj, bj, nj)
+    wx_i, wy_i = _body_to_world(px_i, py_i, xi, yi, thetai)
+    wx_j, wy_j = _body_to_world(px_j, py_j, xj, yj, thetaj)
+
+    # Contact normal: from surface point i toward surface point j
+    cpx = wx_j - wx_i
+    cpy = wy_j - wy_i
+    cp_mag = np.sqrt(cpx**2 + cpy**2)
+
+    # Check if P_i is inside body j (overlap)
+    val_j = superellipse_implicit(wx_i, wy_i, xj, yj, aj, bj, nj, thetaj)
+    val_i = superellipse_implicit(wx_j, wy_j, xi, yi, ai, bi, ni, thetai)
+
+    if val_j > 1.0 and val_i > 1.0:
+        # No overlap
+        return None
+
+    # Penetration depth: distance between surface points (with sign)
+    delta = cp_mag
+    if cp_mag < 1e-12:
+        # Coincident surface points — use implicit function for depth estimate
+        delta = max(ai, bi) * (1.0 - val_j**(1.0/nj)) if val_j < 1.0 else 0.01
+
+    # Contact normal (from i toward j, along line of centres as fallback)
+    if cp_mag > 1e-12:
+        nx, ny = cpx / cp_mag, cpy / cp_mag
+    else:
+        nx, ny = ux, uy
+
+    # Contact point: midpoint of the two surface points
+    contact_x = 0.5 * (wx_i + wx_j)
+    contact_y = 0.5 * (wy_i + wy_j)
+
+    # Local curvature radii
+    R_loc_i = superellipse_curvature_radius(t_i, ai, bi, ni)
+    R_loc_j = superellipse_curvature_radius(t_j, aj, bj, nj)
+
+    return (True, delta, nx, ny, contact_x, contact_y, R_loc_i, R_loc_j)
+
+
+# ── Contact detection: superellipse–wall ──
+
+def find_contact_superellipse_wall(xi, yi, ai, bi, ni, thetai,
+                                    wall_pos, wall_axis, wall_sign):
+    """
+    Contact detection between a superellipse and a flat wall.
+
+    wall_axis: 0 = vertical wall (x = wall_pos), 1 = horizontal wall (y = wall_pos)
+    wall_sign: +1 if granule should be to the right/above wall_pos,
+               -1 if granule should be to the left/below wall_pos
+
+    Returns: (penetration, R_local) or None if no contact.
+        penetration: > 0 if overlapping
+        R_local: curvature radius at contact point
+    """
+    # Find the extreme point of the superellipse in the wall-normal direction
+    # Sample boundary and find the point closest to the wall
+    n_sample = 64
+    t_vals = np.linspace(0, 2*np.pi, n_sample, endpoint=False)
+    e = 2.0 / ni
+    ct, st = np.cos(t_vals), np.sin(t_vals)
+    bx = ai * np.sign(ct) * np.abs(ct)**e
+    by = bi * np.sign(st) * np.abs(st)**e
+    cos_th, sin_th = np.cos(thetai), np.sin(thetai)
+    wx = xi + cos_th * bx - sin_th * by
+    wy = yi + sin_th * bx + cos_th * by
+
+    if wall_axis == 0:
+        coords = wx
+    else:
+        coords = wy
+
+    if wall_sign > 0:
+        # Wall at low side: penetration = wall_pos - min(coords)
+        idx = np.argmin(coords)
+        pen = wall_pos - coords[idx]
+    else:
+        # Wall at high side: penetration = max(coords) - wall_pos
+        idx = np.argmax(coords)
+        pen = coords[idx] - wall_pos
+
+    if pen <= 0:
+        return None
+
+    # Refine: local curvature at the contact point
+    t_contact = t_vals[idx]
+    R_local = superellipse_curvature_radius(t_contact, ai, bi, ni)
+
+    return (pen, R_local)
 
 
 def overlap_lens_area(R1, R2, d):
@@ -469,8 +823,16 @@ def generate_packing(p: Params, seed=42) -> GranuleSystem:
 
     print(f"  Target: {n_func} functional (R~{p.R_func_mean:.0f}µm) + "
           f"{n_inert} inert (R~{p.R_inert_mean:.0f}µm)")
+    if p.shape_enabled:
+        print(f"  Shape: functional AR={p.aspect_ratio_func_mean:.2f}±"
+              f"{p.aspect_ratio_func_std:.2f}, n={p.blockiness_func_mean:.1f}±"
+              f"{p.blockiness_func_std:.1f}")
+        print(f"         inert     AR={p.aspect_ratio_inert_mean:.2f}±"
+              f"{p.aspect_ratio_inert_std:.2f}, n={p.blockiness_inert_mean:.1f}±"
+              f"{p.blockiness_inert_std:.1f}")
 
     xs, ys, rs, types = [], [], [], []
+    a_list, b_list, n_shape_list, theta_list = [], [], [], []
     gap = 2.0  # minimum gap between granule surfaces (µm)
 
     # Interleave placement for good mixing
@@ -482,28 +844,62 @@ def generate_packing(p: Params, seed=42) -> GranuleSystem:
 
     for gt in order:
         if gt == 0:
-            r = max(15, rng.normal(p.R_func_mean, p.R_func_std))
+            r_eq = max(15, rng.normal(p.R_func_mean, p.R_func_std))
         else:
-            r = max(20, rng.normal(p.R_inert_mean, p.R_inert_std))
+            r_eq = max(20, rng.normal(p.R_inert_mean, p.R_inert_std))
+
+        # Sample shape parameters
+        if p.shape_enabled:
+            if gt == 0:
+                ar = max(1.0, rng.normal(p.aspect_ratio_func_mean,
+                                         p.aspect_ratio_func_std))
+                n_s = max(1.5, rng.normal(p.blockiness_func_mean,
+                                          p.blockiness_func_std))
+            else:
+                ar = max(1.0, rng.normal(p.aspect_ratio_inert_mean,
+                                         p.aspect_ratio_inert_std))
+                n_s = max(1.5, rng.normal(p.blockiness_inert_mean,
+                                          p.blockiness_inert_std))
+            # Compute semi-axes so superellipse has area = pi * r_eq^2
+            # Initial guess: a = r_eq * sqrt(ar), b = r_eq / sqrt(ar)
+            a0 = r_eq * np.sqrt(ar)
+            b0 = r_eq / np.sqrt(ar)
+            # Correct for exact area
+            target_area = np.pi * r_eq**2
+            actual_area = superellipse_area(a0, b0, n_s)
+            if actual_area > 0:
+                scale = np.sqrt(target_area / actual_area)
+                a_val = a0 * scale
+                b_val = b0 * scale
+            else:
+                a_val, b_val = r_eq, r_eq
+            theta_val = rng.uniform(0, np.pi)
+        else:
+            a_val, b_val, n_s, theta_val = r_eq, r_eq, 2.0, 0.0
+
+        # Bounding radius for overlap check
+        r_bound_val = max(a_val, b_val)
 
         placed = False
         for _ in range(800):
-            cx = rng.uniform(r + gap, p.Lx - r - gap)
-            cy = rng.uniform(r + gap, p.Ly - r - gap)
+            cx = rng.uniform(r_bound_val + gap, p.Lx - r_bound_val - gap)
+            cy = rng.uniform(r_bound_val + gap, p.Ly - r_bound_val - gap)
             ok = True
             for j in range(len(xs)):
                 dx = cx - xs[j]; dy = cy - ys[j]
-                if dx*dx + dy*dy < (r + rs[j] + gap)**2:
+                rj_bound = max(a_list[j], b_list[j]) if p.shape_enabled else rs[j]
+                if dx*dx + dy*dy < (r_bound_val + rj_bound + gap)**2:
                     ok = False; break
             if ok:
                 xs.append(cx); ys.append(cy)
-                rs.append(r); types.append(gt)
+                rs.append(r_eq); types.append(gt)
+                a_list.append(a_val); b_list.append(b_val)
+                n_shape_list.append(n_s); theta_list.append(theta_val)
                 placed = True; break
         if not placed:
             pass  # skip if can't place
 
     # Compute cells per granule (projected-area limited)
-    # Cells start as spheres of diameter cell_diameter → projected area = π(d/2)²
     n_cells = []
     A_cell_sphere = cell_projected_area(0.0, p.cell_diameter, p.cell_height_spread)
     for i in range(len(xs)):
@@ -514,9 +910,22 @@ def generate_packing(p: Params, seed=42) -> GranuleSystem:
         else:
             n_cells.append(0)
 
-    gs = GranuleSystem(xs, ys, rs, types, n_cells)
-    act_f = sum(np.pi*gs.r[gs.func_mask]**2) / domain_area
-    act_i = sum(np.pi*gs.r[gs.inert_mask]**2) / domain_area
+    if p.shape_enabled:
+        gs = GranuleSystem(xs, ys, rs, types, n_cells,
+                           a=a_list, b=b_list, n_shape=n_shape_list,
+                           theta=theta_list)
+    else:
+        gs = GranuleSystem(xs, ys, rs, types, n_cells)
+
+    # Report packing fractions (use actual areas)
+    if p.shape_enabled:
+        areas = np.array([superellipse_area(gs.a[i], gs.b[i], gs.n_shape[i])
+                          for i in range(gs.N)])
+        act_f = float(np.sum(areas[gs.func_mask])) / domain_area
+        act_i = float(np.sum(areas[gs.inert_mask])) / domain_area
+    else:
+        act_f = sum(np.pi*gs.r[gs.func_mask]**2) / domain_area
+        act_i = sum(np.pi*gs.r[gs.inert_mask]**2) / domain_area
     print(f"  Placed: {np.sum(gs.func_mask)} func (φ_f={act_f:.3f}) + "
           f"{np.sum(gs.inert_mask)} inert (φ_i={act_i:.3f})")
     print(f"  Void fraction: {1-act_f-act_i:.3f}")
@@ -528,10 +937,11 @@ def generate_packing(p: Params, seed=42) -> GranuleSystem:
 # Force computation
 # ══════════════════════════════════════════════════════════════════════
 
-def compute_forces(gs: GranuleSystem, p: Params, rng) -> np.ndarray:
+def compute_forces(gs: GranuleSystem, p: Params, rng):
     """
-    Compute all forces on each granule.
-    Returns (N, 2) force array in nN.
+    Compute all forces and torques on each granule.
+    Returns (F, torques) where F is (N, 2) force array in nN and
+    torques is (N,) array in nN·µm.
 
     Contact forces:
       Hertz repulsion:  F = (4/3) E* √R* δ^{3/2}
@@ -542,11 +952,14 @@ def compute_forces(gs: GranuleSystem, p: Params, rng) -> np.ndarray:
       F_fric = τ₀ · A_contact · tanh(|v_t|/v_ref)  opposing relative sliding
       where A_contact = π R* δ  (Hertzian contact area)
 
+    For superellipses, R* uses local curvature at the contact point.
+
     Wall uses Hertz (rigid limit):
-      E* = E / (1-ν²), R* = R_i
+      E* = E / (1-ν²), R* = R_i (circle) or R_local (superellipse)
     """
     N = gs.N
     F = np.zeros((N, 2))
+    torques = np.zeros(N)
     pos = gs.positions()
 
     # ── Precompute effective moduli (Pa) ──
@@ -563,7 +976,7 @@ def compute_forces(gs: GranuleSystem, p: Params, rng) -> np.ndarray:
     }
 
     # ── Neighbour search ──
-    max_r = np.max(gs.r)
+    max_r = float(np.max(gs.r_bound))
     cutoff = 2*max_r + p.L_max
     tree = cKDTree(pos)
     pairs = tree.query_pairs(cutoff, output_type='ndarray')
@@ -577,10 +990,38 @@ def compute_forces(gs: GranuleSystem, p: Params, rng) -> np.ndarray:
             continue
         nx, ny = dx/d, dy/d
 
-        # ── Contact: Hertz repulsion + DMT adhesion + tangential friction ──
-        overlap = gs.r[i] + gs.r[j] - d
-        if overlap > 0:
-            R_eff = gs.r[i] * gs.r[j] / (gs.r[i] + gs.r[j])
+        # ── Contact detection ──
+        if gs.is_circle:
+            # Fast circle path (V1.2 behavior)
+            overlap = gs.r[i] + gs.r[j] - d
+            if overlap > 0:
+                R_eff = gs.r[i] * gs.r[j] / (gs.r[i] + gs.r[j])
+                # Contact point at midpoint of overlap along line of centres
+                contact_x = pos[i,0] + (gs.r[i] - overlap/2) * nx
+                contact_y = pos[i,1] + (gs.r[i] - overlap/2) * ny
+                in_contact = True
+            else:
+                in_contact = False
+                overlap = 0.0
+                R_eff = 0.0
+                contact_x = contact_y = 0.0
+        else:
+            # Superellipse contact (common normal method)
+            result = find_contact_superellipses(
+                pos[i,0], pos[i,1], gs.a[i], gs.b[i], gs.n_shape[i], gs.theta[i],
+                pos[j,0], pos[j,1], gs.a[j], gs.b[j], gs.n_shape[j], gs.theta[j])
+            if result is not None:
+                in_contact = True
+                _, overlap, nx, ny, contact_x, contact_y, R_loc_i, R_loc_j = result
+                R_eff = R_loc_i * R_loc_j / (R_loc_i + R_loc_j)
+            else:
+                in_contact = False
+                overlap = 0.0
+                R_eff = 0.0
+                contact_x = contact_y = 0.0
+
+        # ── Contact forces: Hertz + DMT + friction ──
+        if in_contact and overlap > 0:
             Fc = hertz_contact_force(E_star_gg, R_eff, overlap)
 
             # Pair-type friction/adhesion parameters
@@ -591,8 +1032,20 @@ def compute_forces(gs: GranuleSystem, p: Params, rng) -> np.ndarray:
 
             # Net normal force (positive = repulsive, negative = attractive)
             F_normal = Fc - F_adh
-            F[i,0] -= F_normal * nx; F[i,1] -= F_normal * ny
-            F[j,0] += F_normal * nx; F[j,1] += F_normal * ny
+            Fnx = F_normal * nx
+            Fny = F_normal * ny
+            F[i,0] -= Fnx; F[i,1] -= Fny
+            F[j,0] += Fnx; F[j,1] += Fny
+
+            # Torque from normal force (off-centre contact)
+            if not gs.is_circle:
+                # τ = (contact - centre) × F
+                rci_x = contact_x - pos[i,0]
+                rci_y = contact_y - pos[i,1]
+                rcj_x = contact_x - pos[j,0]
+                rcj_y = contact_y - pos[j,1]
+                torques[i] += rci_x * (-Fny) - rci_y * (-Fnx)
+                torques[j] += rcj_x * Fny - rcj_y * Fnx
 
             # Tangential friction (area-dependent, opposes relative sliding)
             A_contact = np.pi * R_eff * overlap   # Hertzian contact area (µm²)
@@ -608,12 +1061,29 @@ def compute_forces(gs: GranuleSystem, p: Params, rng) -> np.ndarray:
                 F_fric = tau_0 * A_contact * 1e-3 * np.tanh(
                     vt_mag / p.friction_v_ref)
                 tx, ty = vtx / vt_mag, vty / vt_mag
-                F[i,0] += F_fric * tx; F[i,1] += F_fric * ty
-                F[j,0] -= F_fric * tx; F[j,1] -= F_fric * ty
+                Ftx, Fty = F_fric * tx, F_fric * ty
+                F[i,0] += Ftx; F[i,1] += Fty
+                F[j,0] -= Ftx; F[j,1] -= Fty
+
+                # Torque from friction
+                if not gs.is_circle:
+                    torques[i] += rci_x * Fty - rci_y * Ftx
+                    torques[j] += rcj_x * (-Fty) - rcj_y * (-Ftx)
 
         # ── Cell bridging (motor-clutch model, functional–functional) ──
         if gs.gtype[i] == 0 and gs.gtype[j] == 0:
-            gap = d - gs.r[i] - gs.r[j]
+            if gs.is_circle:
+                gap = d - gs.r[i] - gs.r[j]
+            else:
+                # Surface-to-surface gap: negative of overlap (or use bounding)
+                if in_contact:
+                    gap = -overlap
+                else:
+                    # Approximate gap from bounding radii
+                    gap = d - gs.r_bound[i] - gs.r_bound[j]
+                    if gap < 0:
+                        gap = 0.0  # conservative: may be in contact
+
             if 0 < gap < p.cell_sense_distance:
                 # Only attached, non-overcrowded cells can bridge
                 n_avail_i = max(0.0, gs.n_attached[i] - gs.n_overcrowded[i])
@@ -639,18 +1109,36 @@ def compute_forces(gs: GranuleSystem, p: Params, rng) -> np.ndarray:
                         F[i,0] += F_mag * nx; F[i,1] += F_mag * ny
                         F[j,0] -= F_mag * nx; F[j,1] -= F_mag * ny
 
-    # ── Wall repulsion (Hertz, sphere vs rigid flat: R* = R_i) ──
+    # ── Wall repulsion ──
     for i in range(N):
-        r = gs.r[i]
-        for pen, axis, sign in [
-            (r - gs.x[i],            0, +1),   # left
-            (gs.x[i] - (p.Lx - r),   0, -1),   # right
-            (r - gs.y[i],            1, +1),   # bottom
-            (gs.y[i] - (p.Ly - r),   1, -1),   # top
-        ]:
-            if pen > 0:
-                Fw = hertz_contact_force(E_star_gw, r, pen)
-                F[i, axis] += sign * Fw
+        if gs.is_circle:
+            r = gs.r[i]
+            for pen, axis, sign in [
+                (r - gs.x[i],            0, +1),   # left
+                (gs.x[i] - (p.Lx - r),   0, -1),   # right
+                (r - gs.y[i],            1, +1),   # bottom
+                (gs.y[i] - (p.Ly - r),   1, -1),   # top
+            ]:
+                if pen > 0:
+                    Fw = hertz_contact_force(E_star_gw, r, pen)
+                    F[i, axis] += sign * Fw
+        else:
+            # Superellipse wall contact
+            walls = [
+                (0.0,    0, +1),   # left wall at x=0
+                (p.Lx,   0, -1),   # right wall at x=Lx
+                (0.0,    1, +1),   # bottom wall at y=0
+                (p.Ly,   1, -1),   # top wall at y=Ly
+            ]
+            for wall_pos, wall_axis, wall_sign in walls:
+                wresult = find_contact_superellipse_wall(
+                    gs.x[i], gs.y[i], gs.a[i], gs.b[i],
+                    gs.n_shape[i], gs.theta[i],
+                    wall_pos, wall_axis, wall_sign)
+                if wresult is not None:
+                    pen, R_local = wresult
+                    Fw = hertz_contact_force(E_star_gw, R_local, pen)
+                    F[i, wall_axis] += wall_sign * Fw
 
     # ── Active noise on functional granules ──
     if p.T_active > 0:
@@ -661,7 +1149,7 @@ def compute_forces(gs: GranuleSystem, p: Params, rng) -> np.ndarray:
                 F[i,0] += noise_amp * rng.standard_normal()
                 F[i,1] += noise_amp * rng.standard_normal()
 
-    return F
+    return F, torques
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -669,9 +1157,9 @@ def compute_forces(gs: GranuleSystem, p: Params, rng) -> np.ndarray:
 # ══════════════════════════════════════════════════════════════════════
 
 def step(gs: GranuleSystem, p: Params, rng, t: float):
-    """One overdamped Euler step with cell state evolution."""
+    """One overdamped Euler step with cell state evolution and rotation."""
     update_cell_state(gs, p, t)
-    F = compute_forces(gs, p, rng)
+    F, torques = compute_forces(gs, p, rng)
 
     for i in range(gs.N):
         gamma_i = p.drag_scale * gs.r[i]
@@ -686,10 +1174,19 @@ def step(gs: GranuleSystem, p: Params, rng, t: float):
         gs.vy[i] = vy
         gs.x[i] += vx * p.dt
         gs.y[i] += vy * p.dt
+
+        # ── Rotational dynamics (V1.3, superellipses only) ──
+        if not gs.is_circle:
+            gamma_rot = p.drag_scale_rot * (gs.a[i]**2 + gs.b[i]**2) / 2.0
+            if gamma_rot > 1e-20:
+                gs.omega[i] = torques[i] / gamma_rot
+                gs.omega[i] = np.clip(gs.omega[i], -p.omega_max, p.omega_max)
+                gs.theta[i] += gs.omega[i] * p.dt
+
         # Hard wall clamp
-        r = gs.r[i]
-        gs.x[i] = np.clip(gs.x[i], r+0.5, p.Lx-r-0.5)
-        gs.y[i] = np.clip(gs.y[i], r+0.5, p.Ly-r-0.5)
+        rb = gs.r_bound[i]
+        gs.x[i] = np.clip(gs.x[i], rb+0.5, p.Lx-rb-0.5)
+        gs.y[i] = np.clip(gs.y[i], rb+0.5, p.Ly-rb-0.5)
 
     return F
 
@@ -700,9 +1197,9 @@ def step(gs: GranuleSystem, p: Params, rng, t: float):
 
 def render_fields(gs: GranuleSystem, p: Params):
     """
-    Stamp each granule as tanh-profile disk onto grid.
-    Uses volume-conserving effective radii so that overlap area is
-    redistributed rather than lost.
+    Stamp each granule as tanh-profile shape onto grid.
+    For circles: radial profile with volume-conserving effective radii.
+    For superellipses: implicit-function-based signed distance.
     Returns φ_f, φ_i, φ_v arrays of shape (Ngrid, Ngrid).
     """
     Ng = p.Ngrid
@@ -711,20 +1208,36 @@ def render_fields(gs: GranuleSystem, p: Params):
     yg = np.linspace(dx/2, p.Ly - dx/2, Ng)
     X, Y = np.meshgrid(xg, yg, indexing='ij')
 
-    # Volume-conserving radii
-    r_eff, _ = compute_effective_radii(gs)
-
     phi_f = np.zeros((Ng, Ng))
     phi_i = np.zeros((Ng, Ng))
     w = p.interface_width
 
-    for i in range(gs.N):
-        dist = np.sqrt((X - gs.x[i])**2 + (Y - gs.y[i])**2)
-        profile = 0.5 * (1.0 - np.tanh((dist - r_eff[i]) / w))
-        if gs.gtype[i] == 0:
-            phi_f = np.maximum(phi_f, profile)
-        else:
-            phi_i = np.maximum(phi_i, profile)
+    if gs.is_circle:
+        # Volume-conserving radii (V1.2 path)
+        r_eff, _ = compute_effective_radii(gs)
+        for i in range(gs.N):
+            dist = np.sqrt((X - gs.x[i])**2 + (Y - gs.y[i])**2)
+            profile = 0.5 * (1.0 - np.tanh((dist - r_eff[i]) / w))
+            if gs.gtype[i] == 0:
+                phi_f = np.maximum(phi_f, profile)
+            else:
+                phi_i = np.maximum(phi_i, profile)
+    else:
+        # Superellipse implicit function
+        for i in range(gs.N):
+            # Transform grid to body frame
+            bx, by = _world_to_body(X, Y, gs.x[i], gs.y[i], gs.theta[i])
+            # Implicit function value: < 1 inside, > 1 outside
+            se_val = (np.abs(bx) / gs.a[i])**gs.n_shape[i] + \
+                     (np.abs(by) / gs.b[i])**gs.n_shape[i]
+            # Approximate signed distance
+            n_inv = 1.0 / gs.n_shape[i]
+            dist_approx = (se_val**n_inv - 1.0) * gs.r[i]
+            profile = 0.5 * (1.0 - np.tanh(dist_approx / w))
+            if gs.gtype[i] == 0:
+                phi_f = np.maximum(phi_f, profile)
+            else:
+                phi_i = np.maximum(phi_i, profile)
 
     # Prevent total > 1
     total = phi_f + phi_i
@@ -796,9 +1309,9 @@ def compute_metrics(gs, p, phi_f, phi_i, phi_v, t, forces):
 
     # Overlap & contact diagnostics
     pos = gs.positions()
-    max_r = np.max(gs.r)
+    max_rb = float(np.max(gs.r_bound))
     tree = cKDTree(pos)
-    pairs = tree.query_pairs(2 * max_r, output_type='ndarray')
+    pairs = tree.query_pairs(2 * max_rb, output_type='ndarray')
 
     n_contacts = 0
     n_contacts_ff = 0   # functional–functional
@@ -812,10 +1325,17 @@ def compute_metrics(gs, p, phi_f, phi_i, phi_v, t, forces):
         i, j = pairs[idx]
         dx = pos[j,0] - pos[i,0]; dy = pos[j,1] - pos[i,1]
         d = np.sqrt(dx*dx + dy*dy)
-        overlap = gs.r[i] + gs.r[j] - d
+
+        if gs.is_circle:
+            overlap = gs.r[i] + gs.r[j] - d
+        else:
+            result = find_contact_superellipses(
+                pos[i,0], pos[i,1], gs.a[i], gs.b[i], gs.n_shape[i], gs.theta[i],
+                pos[j,0], pos[j,1], gs.a[j], gs.b[j], gs.n_shape[j], gs.theta[j])
+            overlap = result[1] if result is not None else 0.0
+
         if overlap > 0:
             n_contacts += 1
-            # Pair-type contact counts
             ti, tj = gs.gtype[i], gs.gtype[j]
             if ti == 0 and tj == 0:
                 n_contacts_ff += 1
@@ -825,27 +1345,41 @@ def compute_metrics(gs, p, phi_f, phi_i, phi_v, t, forces):
                 n_contacts_if += 1
             R_min = min(gs.r[i], gs.r[j])
             max_overlap_ratio = max(max_overlap_ratio, overlap / R_min)
-            total_overlap_area += overlap_lens_area(gs.r[i], gs.r[j], d)
+            if gs.is_circle:
+                total_overlap_area += overlap_lens_area(gs.r[i], gs.r[j], d)
+            else:
+                # Approximate overlap area for superellipses
+                R_eff = gs.r[i] * gs.r[j] / (gs.r[i] + gs.r[j])
+                total_overlap_area += np.pi * R_eff * overlap
 
     # Bridge count (functional-functional pairs with attached cells in sensing range)
-    cutoff_bridge = 2 * max_r + p.cell_sense_distance
+    cutoff_bridge = 2 * max_rb + p.cell_sense_distance
     pairs_b = tree.query_pairs(cutoff_bridge, output_type='ndarray')
     for idx in range(len(pairs_b)):
         i, j = pairs_b[idx]
         if gs.gtype[i] != 0 or gs.gtype[j] != 0:
             continue
-        # Only count bridges where both granules have attached cells
         n_avail_i = max(0.0, gs.n_attached[i] - gs.n_overcrowded[i])
         n_avail_j = max(0.0, gs.n_attached[j] - gs.n_overcrowded[j])
         if n_avail_i < 0.1 or n_avail_j < 0.1:
             continue
         dx = pos[j,0] - pos[i,0]; dy = pos[j,1] - pos[i,1]
         d = np.sqrt(dx*dx + dy*dy)
-        gap = d - gs.r[i] - gs.r[j]
+        if gs.is_circle:
+            gap = d - gs.r[i] - gs.r[j]
+        else:
+            gap = d - gs.r_bound[i] - gs.r_bound[j]
+            if gap < 0:
+                gap = 0.0
         if 0 < gap < p.cell_sense_distance:
             n_bridges += 1
 
-    total_granule_area = float(np.sum(np.pi * gs.r**2))
+    if gs.is_circle:
+        total_granule_area = float(np.sum(np.pi * gs.r**2))
+    else:
+        total_granule_area = float(sum(
+            superellipse_area(gs.a[i], gs.b[i], gs.n_shape[i])
+            for i in range(gs.N)))
     m['n_contacts'] = n_contacts
     m['n_contacts_ff'] = n_contacts_ff
     m['n_contacts_if'] = n_contacts_if
@@ -854,6 +1388,21 @@ def compute_metrics(gs, p, phi_f, phi_i, phi_v, t, forces):
     m['total_overlap_area'] = float(total_overlap_area)
     m['area_conservation'] = 1.0 - total_overlap_area / total_granule_area
     m['n_bridges'] = n_bridges
+
+    # ── Shape descriptors (V1.3) ──
+    if not gs.is_circle:
+        ar_arr = np.maximum(gs.a, gs.b) / np.minimum(gs.a, gs.b)
+        elong_arr = 1.0 - np.minimum(gs.a, gs.b) / np.maximum(gs.a, gs.b)
+        areas = np.array([superellipse_area(gs.a[i], gs.b[i], gs.n_shape[i])
+                          for i in range(gs.N)])
+        perims = np.array([superellipse_perimeter(gs.a[i], gs.b[i], gs.n_shape[i])
+                           for i in range(gs.N)])
+        circularity = 4.0 * np.pi * areas / (perims**2 + 1e-30)
+        m['shape_aspect_ratio_mean'] = float(np.mean(ar_arr))
+        m['shape_aspect_ratio_std'] = float(np.std(ar_arr))
+        m['shape_elongation_mean'] = float(np.mean(elong_arr))
+        m['shape_circularity_mean'] = float(np.mean(circularity))
+        m['shape_blockiness_mean'] = float(np.mean(gs.n_shape))
 
     # ── Cell state metrics ──
     func = gs.func_mask
@@ -899,12 +1448,14 @@ def run(p=None, seed=42):
         snaps.append((pf.copy(), pi.copy(), pv.copy(),
                        gs.x.copy(), gs.y.copy(), gs.r.copy(), gs.gtype.copy(),
                        gs.n_attached.copy(), gs.spread_fraction.copy(),
-                       gs.fa_maturity.copy(), gs.n_overcrowded.copy()))
+                       gs.fa_maturity.copy(), gs.n_overcrowded.copy(),
+                       gs.a.copy(), gs.b.copy(), gs.n_shape.copy(),
+                       gs.theta.copy()))
         return m
 
     # Initial save (t=0, no cell attachment yet)
     update_cell_state(gs, p, 0.0)
-    F0 = compute_forces(gs, p, rng)
+    F0, _ = compute_forces(gs, p, rng)
     m = save(0.0, F0)
     print(f"\n  {'t(h)':>6} {'f_cl':>5} {'f_lf':>6} {'v_cl':>5} "
           f"{'tissue':>7} {'bridges':>7} {'attach':>7} {'spread':>6} "
@@ -938,7 +1489,7 @@ def run(p=None, seed=42):
 # ══════════════════════════════════════════════════════════════════════
 
 def plot_granules(snaps, hist, p, indices=None):
-    """Plot granule positions as circles at selected times."""
+    """Plot granule positions as circles or superellipses at selected times."""
     if indices is None:
         n = len(snaps)
         indices = sorted(set([0, n//4, n//2, 3*n//4, n-1]))
@@ -947,19 +1498,33 @@ def plot_granules(snaps, hist, p, indices=None):
     if nc == 1: axes = [axes]
 
     for c, si in enumerate(indices):
-        pf, pi, pv, xs, ys, rs, gt = snaps[si][:7]
+        snap = snaps[si]
+        pf, pi, pv, xs, ys, rs, gt = snap[:7]
+        # Shape arrays (V1.3) — default to circles if not present
+        if len(snap) > 11:
+            a_arr, b_arr, ns_arr, th_arr = snap[11], snap[12], snap[13], snap[14]
+            has_shape = True
+        else:
+            has_shape = False
+
         ax = axes[c]; ax.set_xlim(0, p.Lx); ax.set_ylim(0, p.Ly)
         ax.set_aspect('equal')
 
         # Draw granules
         for i in range(len(xs)):
-            if gt[i] == 0:
-                color = 'orangered'; alpha = 0.75
+            color = 'orangered' if gt[i] == 0 else 'steelblue'
+            alpha = 0.75 if gt[i] == 0 else 0.55
+
+            if has_shape and not (a_arr[i] == b_arr[i] and ns_arr[i] == 2.0):
+                # Superellipse patch
+                verts = superellipse_polygon_pts(
+                    xs[i], ys[i], a_arr[i], b_arr[i], ns_arr[i], th_arr[i])
+                patch = Polygon(verts, closed=True, fc=color, ec='k',
+                                lw=0.3, alpha=alpha)
             else:
-                color = 'steelblue'; alpha = 0.55
-            circ = Circle((xs[i], ys[i]), rs[i], fc=color, ec='k',
-                          lw=0.3, alpha=alpha)
-            ax.add_patch(circ)
+                patch = Circle((xs[i], ys[i]), rs[i], fc=color, ec='k',
+                               lw=0.3, alpha=alpha)
+            ax.add_patch(patch)
 
         ax.set_title(f"t = {hist[si]['time']:.1f} h", fontsize=10)
         if c == 0:

@@ -307,8 +307,8 @@ creates three distinct surface-chemistry regimes:
 - **Previous-step velocities**: Friction forces use velocities from the
   previous timestep (explicit scheme). Valid for dt small relative to the
   relaxation timescale.
-- **No rotational friction**: Granules have no rotational degree of freedom
-  in the current 2D model.
+- **Rotational friction**: V1.3 adds rotational degrees of freedom for
+  non-circular granules; torques arise from off-centre contact forces. See §8.
 - **Same bulk modulus**: The contact area calculation uses the same E* for
   all pair types. Only the surface interaction (τ₀, W) varies by pair type.
 
@@ -534,7 +534,245 @@ where γ_i = drag coefficient and ξ_i is stochastic noise.
 
 ---
 
-## 7. Summary of All Parameters by Source
+## 7. Superellipse Granule Shapes
+
+**Introduced in:** V1.3
+
+### 7.1 Primary Reference — Shape Descriptors
+
+> S. Liu, Z. Nie, W. Hu, J. Gong, and P. Lei, "Particle shape effects on
+> macro- and micro-mechanical behaviours of DEM-modelled granular materials,"
+> *Computers and Geotechnics*, vol. 187, 107504, 2025.
+> doi:10.1016/j.compgeo.2025.107504
+
+Comprehensive study of how particle shape affects force chains, fabric
+anisotropy, and macroscopic strength in granular materials. Table 1 provides
+a taxonomy of shape descriptors (sphericity/circularity, roundness, aspect
+ratio, convexity, elongation, roughness) that we adopt for characterising
+our superellipse granules.
+
+**Shape descriptors adopted from Table 1:**
+
+| Descriptor | Definition | Superellipse formula |
+|-----------|------------|---------------------|
+| Circularity | 4πA/P² | `4π × superellipse_area / superellipse_perimeter²` |
+| Aspect ratio | max(a,b)/min(a,b) | Direct from semi-axes |
+| Elongation | 1 − min(a,b)/max(a,b) | Direct from semi-axes |
+| Blockiness | Exponent n | Higher n = more rectangular |
+
+### 7.2 Primary Reference — Superellipse DEM
+
+> G. Delaney, J. E. Hilton, and P. W. Cleary, "Defining random
+> reproducible granular packings," *Physica A*, vol. 389, no. 10,
+> pp. 1929–1936, 2010. doi:10.1016/j.physa.2010.01.003
+
+Demonstrates the use of superellipse/superellipsoid particles in DEM
+simulations for generating reproducible random packings. Establishes
+the superellipse as a practical parameterisation for non-spherical DEM
+particles.
+
+### 7.3 Supporting References
+
+> J. R. Williams and A. P. Pentland, "Superquadrics and modal dynamics
+> for discrete elements in interactive design," *Engineering Computations*,
+> vol. 9, no. 2, pp. 115–127, 1992. doi:10.1108/eb023852
+
+Early application of superquadric (including superellipse) shapes in
+discrete element methods. Establishes the contact detection framework
+for superquadric particles.
+
+> G. Mollon and J. Zhao, "3D generation of realistic granular samples
+> based on random fields theory and Fourier shape descriptors,"
+> *Computer Methods in Applied Mechanics and Engineering*, vol. 279,
+> pp. 46–65, 2014. doi:10.1016/j.cma.2014.06.022
+
+Advanced shape representation methods for granular materials; motivates
+the use of smooth parametric shapes (like superellipses) as a practical
+compromise between circles and fully arbitrary outlines.
+
+### 7.4 Equations Adopted
+
+**Superellipse implicit equation** (body frame):
+
+```
+|x'/a|^n + |y'/b|^n = 1
+```
+
+where (a, b) are semi-axes, n is the blockiness exponent, and (x', y') are
+body-frame coordinates obtained by rotating world coordinates by −θ.
+
+**Special cases:**
+- n = 2, a = b: circle (V1.2 backward compatible)
+- n = 2, a ≠ b: ellipse
+- n > 2: rounded rectangle (blocky hydrogels)
+- n < 2: diamond / pinched shape
+
+**Area** (exact, via Gamma functions):
+
+```
+A = 4ab · Γ(1 + 1/n)² / Γ(1 + 2/n)
+```
+
+For n = 2, a = b = R: A = 4R² · Γ(3/2)² / Γ(2) = 4R² · (√π/2)² / 1 = πR². ✓
+
+**Equivalent radius** (area-preserving):
+
+```
+r_eq = √(A / π)
+```
+
+This preserves drag coefficients, cell capacity, and noise scaling from V1.2.
+
+**Bounding radius:**
+
+```
+r_bound = max(a, b)
+```
+
+Used for broad-phase neighbour search and wall clamping.
+
+**Parametric boundary point:**
+
+```
+x(t) = a · |cos t|^(2/n) · sign(cos t)
+y(t) = b · |sin t|^(2/n) · sign(sin t)
+```
+
+for t ∈ [0, 2π].
+
+**Local radius of curvature** (analytic):
+
+```
+κ(t) = ab / [(a² sin²t + b² cos²t)^{3/2}] · n · |cos t · sin t|^{2/n - 2}
+```
+
+(simplified form; full expression uses parametric derivatives). Used by Hertz
+contact with local curvature (§7.6).
+
+### 7.5 Contact Detection — Common Normal Method
+
+**Why common normal over GJK:** The common normal method produces the exact
+contact normal, penetration depth, contact point, AND local curvature radii
+in a single solve. GJK gives only distance/penetration, requiring additional
+work for normals and curvature.
+
+**Algorithm:** For two superellipses i and j, find parameters (t_i, t_j) such
+that the outward normals at the boundary points are anti-parallel and collinear
+with the line connecting the points. This is a 2-equation nonlinear system
+solved by Newton-Raphson (typically 4-8 iterations).
+
+**Returns:** `(in_contact, δ, n_x, n_y, c_x, c_y, R_loc_i, R_loc_j)` where:
+- δ = penetration depth (positive when overlapping)
+- (n_x, n_y) = contact normal (i → j)
+- (c_x, c_y) = contact point (midpoint of closest boundary points)
+- R_loc_i, R_loc_j = local curvature radii at the contact points
+
+**Circle fast-path:** When both particles have `is_circle = True`, the solver
+is bypassed entirely and the standard `δ = r_i + r_j − d` formula is used.
+This preserves V1.2 performance.
+
+### 7.6 Hertz Contact with Local Curvature
+
+For non-circular granules, the effective radius in the Hertz formula uses
+the local curvature at the contact point rather than the global radius:
+
+```
+R*_local = R_loc_i × R_loc_j / (R_loc_i + R_loc_j)
+F_Hertz = (4/3) E* √R*_local · δ^{3/2}
+```
+
+DMT adhesion and contact area for friction also use R*_local:
+
+```
+F_adh = 2π W R*_local
+A_contact = π R*_local δ
+```
+
+### 7.7 Superellipse–Wall Contact
+
+For wall contacts, a 1D optimisation finds the boundary point of the
+superellipse closest to the wall. Penetration depth is the signed distance
+from this point to the wall plane. Local curvature at the wall contact point
+is used for the Hertz wall force.
+
+### 7.8 Assumptions
+
+- **Convex particles only**: Superellipses with n ≥ 1 are always convex.
+  Non-convex shapes (n < 1) are not supported.
+- **Small overlap**: Hertz theory still assumes δ/R ≪ 1. Local curvature
+  makes this less restrictive (high-curvature contacts have smaller effective
+  R*, producing stiffer response that limits penetration).
+- **Rigid rotation**: Particles rotate as rigid bodies. No deformation-induced
+  shape change.
+- **Independent shape distributions**: Functional and inert granules can have
+  different aspect ratio and blockiness distributions.
+
+### 7.9 Parameter Values
+
+| Parameter | Default | Range | Source |
+|-----------|---------|-------|--------|
+| shape_enabled | False | — | V1.2 backward compatibility |
+| aspect_ratio_func_mean | 1.0 | 1.0–2.0 | Hydrogel microgel AR (Liu 2025 Table 1) |
+| aspect_ratio_func_std | 0.0 | 0.0–0.3 | Polydispersity |
+| blockiness_func_mean | 2.0 | 1.5–4.0 | 2=ellipse, >2=blocky (Liu 2025) |
+| blockiness_func_std | 0.0 | 0.0–0.5 | Polydispersity |
+| drag_scale_rot | 0.05 | 0.01–0.1 | Scaling for rotational drag |
+| omega_max | 1.0 | 0.5–5.0 | rad/h, angular velocity cap |
+
+---
+
+## 8. Overdamped Rotational Dynamics
+
+**Introduced in:** V1.3
+
+### 8.1 Equations Adopted
+
+For non-circular granules, torques arise from contact forces applied at
+off-centre contact points:
+
+```
+τ_i = Σ (c − x_i) × F_contact
+```
+
+where c is the contact point and × denotes the 2D cross product (scalar).
+
+The overdamped angular equation of motion:
+
+```
+γ_rot dθ/dt = Σ τ
+```
+
+where the rotational drag coefficient is:
+
+```
+γ_rot = drag_scale_rot × (a² + b²) / 2
+```
+
+This scales with the second moment of the particle shape (analogous to the
+moment of inertia, but in the overdamped regime drag replaces inertia).
+
+**Integration:**
+
+```
+ω_i = τ_i / γ_rot_i
+ω_i = clip(ω_i, −ω_max, ω_max)
+θ_i += ω_i × dt
+```
+
+### 8.2 Assumptions
+
+- **No angular inertia**: Same overdamped justification as translational
+  dynamics (§6). At the microscale in viscous media, rotational inertia
+  is negligible.
+- **Circles have zero torque**: When a = b and contacts pass through the
+  centre, cross products vanish. The rotational integration is skipped
+  for circle particles as an optimisation.
+- **Angular velocity cap**: Prevents numerical instability from large
+  torque impulses, analogous to the translational velocity cap.
+
+---
+
+## 9. Summary of All Parameters by Source
 
 | Parameter | Value | Unit | Source | Section |
 |-----------|-------|------|--------|---------|
@@ -553,3 +791,8 @@ where γ_i = drag coefficient and ξ_i is stochastic noise.
 | cell_diameter | 20 | µm | Mesenchymal cell diameter | §5 |
 | cell_height_spread | 5 | µm | Spread cell on hydrogel | §5 |
 | t_attach_onset | 3.0 | h | Engler 2006, cell settling time | §5 |
+| shape_enabled | False | — | V1.2 backward compatibility | §7 |
+| aspect_ratio_*_mean | 1.0 | — | Liu 2025 Table 1 | §7 |
+| blockiness_*_mean | 2.0 | — | Liu 2025 (n exponent) | §7 |
+| drag_scale_rot | 0.05 | — | Overdamped rotational scaling | §8 |
+| omega_max | 1.0 | rad/h | Angular velocity cap | §8 |

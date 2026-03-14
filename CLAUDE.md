@@ -6,13 +6,13 @@
 is a 2D overdamped particle dynamics simulator for modelling cell-driven rearrangement
 of hydrogel granular scaffolds. The primary simulation engine is `new_dem_0.py`.
 
-**Current version: V1.2**
+**Current version: V1.3**
 
 ## Repository Layout
 
 ```
 GELLS-DEM/
-├── new_dem_0.py                 # PRIMARY simulation engine (V1.2)
+├── new_dem_0.py                 # PRIMARY simulation engine (V1.3)
 ├── new_dem_visualization.py     # Unified post-processing & visualisation
 ├── new_dem_postprocess.py       # Legacy-compatible post-processing (JSON frames)
 ├── dem_config.json              # Default JSON config (legacy format)
@@ -35,10 +35,19 @@ GELLS-DEM/
 - **Cell lifecycle** (V1.2+): Cells are 20 µm spheres → attach at ~3 h → spread to 5 µm-tall
   ellipsoids (volume conserved) → overcrowded cells crawl on others → bridges form via
   motor-clutch adhesions. See `update_cell_state()`.
+- **Granule shape** (V1.3+): Superellipses `|x/a|^n + |y/b|^n = 1` parameterised by
+  semi-axes (a, b), blockiness exponent (n), and orientation (θ). Circles are the
+  special case a=b, n=2. Enable with `shape_enabled=True`. See `superellipse_*()` functions.
+- **Contact detection** (V1.3+): Common normal method for superellipse–superellipse contact.
+  Newton-Raphson iterative solver. Circle fast-path bypasses solver entirely.
+- **Rotational dynamics** (V1.3+): Overdamped rotation from off-centre contact torques.
+  `γ_rot dθ/dt = Σ τ`. Only active for non-circular granules.
+- **Shape descriptors** (V1.3+, Liu et al. 2025): Circularity, aspect ratio, elongation,
+  blockiness tracked per granule and reported as population statistics.
 - **Volume conservation**: Overlap lens area is tracked and redistributed via effective radii
   for rendering. Forces still use the original (undeformed) radii.
 - **Integration**: Overdamped Euler (no inertia). Velocity cap prevents numerical blowup.
-- **Neighbour search**: `scipy.spatial.cKDTree` with a cutoff of `2*max_r + cell_sense_distance`.
+- **Neighbour search**: `scipy.spatial.cKDTree` with cutoff `2*max_r_bound + cell_sense_distance`.
 
 ## Conventions
 
