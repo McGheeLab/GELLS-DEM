@@ -1,0 +1,30 @@
+# Simulation outputs (large, regenerable)
+simulations/
+*.npy
+*.npz
+*.pkl
+*.h5
+*.hdf5
+
+# Generated images and animations
+*.gif
+*.mp4
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
