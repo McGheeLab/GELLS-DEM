@@ -16,9 +16,15 @@ where γ_i = 6πη R_i is the Stokes drag on granule i.
 
 FORCE LAWS:
 
-(1) Contact repulsion (soft sphere, prevents overlap):
-    F_ij^contact = k_n δ_ij n̂_ij      if δ_ij = R_i+R_j - d_ij > 0
-                 = 0                    otherwise
+(1) Contact repulsion (Hertzian, physically-based stiffness):
+    R*_ij = R_i R_j / (R_i + R_j)              (reduced radius)
+    E*    = E / [2(1 − ν²)]                    (effective modulus, identical materials)
+    F_ij^contact = (4/3) E* √R* δ^{3/2} n̂_ij  if δ_ij = R_i+R_j - d_ij > 0
+                 = 0                            otherwise
+
+    Volume conservation: overlap lens area is tracked per granule and
+    redistributed as an inflated effective radius for rendering:
+        r_eff_i = √(r_i² + ΔA_i / π)
 
 (2) Cell-mediated attraction (functional–functional pairs only):
     gap_ij = d_ij - R_i - R_j                     (surface separation)
@@ -27,8 +33,9 @@ FORCE LAWS:
     F_ij^cell = -k_cell · n_bridges · max(0, gap_ij - L_rest) · n̂_ij
     |F_ij^cell| ≤ F_max · n_bridges                (force cap per bridge)
 
-(3) Wall repulsion (confining boundary):
-    F_wall = k_wall · penetration · n̂_wall        for each boundary
+(3) Wall repulsion (Hertz, sphere against rigid flat):
+    E*_wall = E / (1 − ν²)                         (rigid wall limit)
+    F_wall  = (4/3) E*_wall √R_i · pen^{3/2} n̂     for each boundary
 
 (4) Activity noise (small stochastic kicks on functional granules):
     F_noise ~ √(2 γ_i T_active) · ξ(t)            (cell-driven fluctuations)
@@ -41,7 +48,8 @@ OBSERVABLES (rendered from particle positions at each save step):
     → void topology, functional topology, packing evolution, tissue metrics
 
 PHYSICAL PARAMETER MAPPING:
-    k_n    ~ E_hydrogel · R_eff       (contact stiffness from modulus)
+    E      ~ 1-100 kPa               (hydrogel Young's modulus)
+    ν      ~ 0.4-0.5                  (Poisson's ratio, nearly incompressible)
     k_cell ~ F_cell / L_cell          (cell spring constant, ~nN/µm)
     L_max  ~ 2-5 cell diameters       (max bridging distance)
     η      ~ 1e-3 Pa·s               (culture medium viscosity)
@@ -89,9 +97,9 @@ class Params:
     L_max: float = 60.0             # µm, max bridging gap
     L_rest: float = 12.0            # µm, rest length (~ cell diameter)
 
-    # ── Contact mechanics ──
-    k_contact: float = 50.0         # nN/µm, repulsive stiffness
-    k_wall: float = 80.0            # nN/µm, wall stiffness
+    # ── Contact mechanics (Hertzian) ──
+    E_modulus: float = 10.0         # kPa, Young's modulus of hydrogel
+    poisson_ratio: float = 0.45     # Poisson's ratio (hydrogels ~0.4-0.5)
 
     # ── Drag ──
     eta: float = 1e-3               # Pa·s (water-like medium)
@@ -133,6 +141,93 @@ class GranuleSystem:
 
     def positions(self):
         return np.column_stack([self.x, self.y])
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Hertz contact mechanics
+# ══════════════════════════════════════════════════════════════════════
+
+def hertz_contact_force(E_star_Pa, R_eff_um, delta_um):
+    """
+    Hertzian normal contact force between two elastic spheres.
+
+    F = (4/3) E* √R* δ^{3/2}   [SI: Pa, m, m → N]
+
+    With simulation units (µm, nN):
+        F_nN = (4/3) · E*_Pa · √(R*_µm) · δ_µm^{3/2} · 10⁻³
+    """
+    return (4.0 / 3.0) * E_star_Pa * np.sqrt(R_eff_um) * delta_um**1.5 * 1e-3
+
+
+def overlap_lens_area(R1, R2, d):
+    """
+    Area of the lens-shaped intersection of two 2D circles.
+
+    R1, R2 : radii (µm)
+    d      : centre-to-centre distance (µm)
+    Returns area in µm².
+    """
+    if d >= R1 + R2:
+        return 0.0
+    if d <= abs(R1 - R2):
+        return np.pi * min(R1, R2)**2
+    cos_a1 = np.clip((d*d + R1*R1 - R2*R2) / (2.0 * d * R1), -1, 1)
+    cos_a2 = np.clip((d*d + R2*R2 - R1*R1) / (2.0 * d * R2), -1, 1)
+    arg = (-d + R1 + R2) * (d + R1 - R2) * (d - R1 + R2) * (d + R1 + R2)
+    return R1*R1 * np.arccos(cos_a1) + R2*R2 * np.arccos(cos_a2) \
+           - 0.5 * np.sqrt(max(0.0, arg))
+
+
+def compute_effective_radii(gs):
+    """
+    Volume-conserving effective radii.
+
+    When DEM circles overlap, the lens-shaped intersection is material
+    that is geometrically double-counted.  To conserve 2D area (proxy
+    for 3D volume), each granule's display radius is inflated:
+
+        π r_eff² = π r² + ΔA_i
+
+    where ΔA_i is granule i's share of its total overlap area, split
+    proportionally to r².
+
+    Returns (r_eff, overlap_area_per_granule).
+    """
+    pos = gs.positions()
+    max_r = np.max(gs.r)
+    tree = cKDTree(pos)
+    pairs = tree.query_pairs(2 * max_r, output_type='ndarray')
+
+    overlap_area = np.zeros(gs.N)
+    for idx in range(len(pairs)):
+        i, j = pairs[idx]
+        dx = pos[j, 0] - pos[i, 0]
+        dy = pos[j, 1] - pos[i, 1]
+        d = np.sqrt(dx*dx + dy*dy)
+        if d < gs.r[i] + gs.r[j]:
+            A_lens = overlap_lens_area(gs.r[i], gs.r[j], d)
+            frac_i = gs.r[i]**2 / (gs.r[i]**2 + gs.r[j]**2)
+            overlap_area[i] += frac_i * A_lens
+            overlap_area[j] += (1.0 - frac_i) * A_lens
+
+    r_eff = np.sqrt(gs.r**2 + overlap_area / np.pi)
+    return r_eff, overlap_area
+
+
+def print_stiffness_info(p: Params):
+    """Show expected overlap for the configured modulus."""
+    E_star = (p.E_modulus * 1e3) / (2.0 * (1.0 - p.poisson_ratio**2))
+    R_eff = p.R_func_mean / 2.0  # two same-size functional granules
+    F_typ = p.F_max_per_cell
+
+    coeff = (4.0 / 3.0) * E_star * np.sqrt(R_eff) * 1e-3
+    delta_eq = (F_typ / coeff) ** (2.0 / 3.0)
+
+    print(f"  Material: E = {p.E_modulus} kPa, ν = {p.poisson_ratio}")
+    print(f"    E* = {E_star:.0f} Pa (effective modulus)")
+    print(f"    For F = {F_typ:.0f} nN between R = {p.R_func_mean:.0f} µm granules:")
+    print(f"    → Equilibrium overlap δ = {delta_eq:.2f} µm "
+          f"({delta_eq / p.R_func_mean * 100:.1f}% of R)")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -213,10 +308,20 @@ def compute_forces(gs: GranuleSystem, p: Params, rng) -> np.ndarray:
     """
     Compute all forces on each granule.
     Returns (N, 2) force array in nN.
+
+    Contact uses Hertz theory:
+      F = (4/3) E* √R* δ^{3/2}
+    where E* = E / [2(1-ν²)] for granule-granule (identical materials)
+    and   E* = E / (1-ν²)    for granule-wall   (rigid wall limit).
     """
     N = gs.N
     F = np.zeros((N, 2))
     pos = gs.positions()
+
+    # ── Precompute effective moduli (Pa) ──
+    nu2 = p.poisson_ratio ** 2
+    E_star_gg = (p.E_modulus * 1e3) / (2.0 * (1.0 - nu2))   # granule-granule
+    E_star_gw = (p.E_modulus * 1e3) / (1.0 - nu2)            # granule-wall
 
     # ── Neighbour search ──
     max_r = np.max(gs.r)
@@ -233,10 +338,11 @@ def compute_forces(gs: GranuleSystem, p: Params, rng) -> np.ndarray:
             continue
         nx, ny = dx/d, dy/d
 
-        # ── Contact repulsion ──
+        # ── Contact repulsion (Hertz) ──
         overlap = gs.r[i] + gs.r[j] - d
         if overlap > 0:
-            Fc = p.k_contact * overlap
+            R_eff = gs.r[i] * gs.r[j] / (gs.r[i] + gs.r[j])
+            Fc = hertz_contact_force(E_star_gg, R_eff, overlap)
             F[i,0] -= Fc * nx; F[i,1] -= Fc * ny
             F[j,0] += Fc * nx; F[j,1] += Fc * ny
 
@@ -255,17 +361,18 @@ def compute_forces(gs: GranuleSystem, p: Params, rng) -> np.ndarray:
                     F[i,0] += F_mag * nx; F[i,1] += F_mag * ny
                     F[j,0] -= F_mag * nx; F[j,1] -= F_mag * ny
 
-    # ── Wall repulsion ──
+    # ── Wall repulsion (Hertz, sphere vs rigid flat: R* = R_i) ──
     for i in range(N):
         r = gs.r[i]
-        if gs.x[i] < r:
-            F[i,0] += p.k_wall * (r - gs.x[i])
-        if gs.x[i] > p.Lx - r:
-            F[i,0] -= p.k_wall * (gs.x[i] - (p.Lx - r))
-        if gs.y[i] < r:
-            F[i,1] += p.k_wall * (r - gs.y[i])
-        if gs.y[i] > p.Ly - r:
-            F[i,1] -= p.k_wall * (gs.y[i] - (p.Ly - r))
+        for pen, axis, sign in [
+            (r - gs.x[i],            0, +1),   # left
+            (gs.x[i] - (p.Lx - r),   0, -1),   # right
+            (r - gs.y[i],            1, +1),   # bottom
+            (gs.y[i] - (p.Ly - r),   1, -1),   # top
+        ]:
+            if pen > 0:
+                Fw = hertz_contact_force(E_star_gw, r, pen)
+                F[i, axis] += sign * Fw
 
     # ── Active noise on functional granules ──
     if p.T_active > 0:
@@ -312,6 +419,8 @@ def step(gs: GranuleSystem, p: Params, rng):
 def render_fields(gs: GranuleSystem, p: Params):
     """
     Stamp each granule as tanh-profile disk onto grid.
+    Uses volume-conserving effective radii so that overlap area is
+    redistributed rather than lost.
     Returns φ_f, φ_i, φ_v arrays of shape (Ngrid, Ngrid).
     """
     Ng = p.Ngrid
@@ -320,13 +429,16 @@ def render_fields(gs: GranuleSystem, p: Params):
     yg = np.linspace(dx/2, p.Ly - dx/2, Ng)
     X, Y = np.meshgrid(xg, yg, indexing='ij')
 
+    # Volume-conserving radii
+    r_eff, _ = compute_effective_radii(gs)
+
     phi_f = np.zeros((Ng, Ng))
     phi_i = np.zeros((Ng, Ng))
     w = p.interface_width
 
     for i in range(gs.N):
         dist = np.sqrt((X - gs.x[i])**2 + (Y - gs.y[i])**2)
-        profile = 0.5 * (1.0 - np.tanh((dist - gs.r[i]) / w))
+        profile = 0.5 * (1.0 - np.tanh((dist - r_eff[i]) / w))
         if gs.gtype[i] == 0:
             phi_f = np.maximum(phi_f, profile)
         else:
@@ -400,17 +512,46 @@ def compute_metrics(gs, p, phi_f, phi_i, phi_v, t, forces):
     m['F_max'] = float(np.max(F_mag))
     m['F_func_mean'] = float(np.mean(F_mag[gs.func_mask])) if np.any(gs.func_mask) else 0.0
 
-    # Bridge count
+    # Overlap & contact diagnostics
     pos = gs.positions()
+    max_r = np.max(gs.r)
+    tree = cKDTree(pos)
+    pairs = tree.query_pairs(2 * max_r, output_type='ndarray')
+
+    n_contacts = 0
+    max_overlap_ratio = 0.0
+    total_overlap_area = 0.0
     n_bridges = 0
-    for i in range(gs.N):
-        if gs.gtype[i] != 0: continue
-        for j in range(i+1, gs.N):
-            if gs.gtype[j] != 0: continue
-            d = np.sqrt((pos[i,0]-pos[j,0])**2 + (pos[i,1]-pos[j,1])**2)
-            gap = d - gs.r[i] - gs.r[j]
-            if 0 < gap < p.L_max:
-                n_bridges += 1
+
+    for idx in range(len(pairs)):
+        i, j = pairs[idx]
+        dx = pos[j,0] - pos[i,0]; dy = pos[j,1] - pos[i,1]
+        d = np.sqrt(dx*dx + dy*dy)
+        overlap = gs.r[i] + gs.r[j] - d
+        if overlap > 0:
+            n_contacts += 1
+            R_min = min(gs.r[i], gs.r[j])
+            max_overlap_ratio = max(max_overlap_ratio, overlap / R_min)
+            total_overlap_area += overlap_lens_area(gs.r[i], gs.r[j], d)
+
+    # Bridge count (functional-functional pairs with gap in range)
+    cutoff_bridge = 2 * max_r + p.L_max
+    pairs_b = tree.query_pairs(cutoff_bridge, output_type='ndarray')
+    for idx in range(len(pairs_b)):
+        i, j = pairs_b[idx]
+        if gs.gtype[i] != 0 or gs.gtype[j] != 0:
+            continue
+        dx = pos[j,0] - pos[i,0]; dy = pos[j,1] - pos[i,1]
+        d = np.sqrt(dx*dx + dy*dy)
+        gap = d - gs.r[i] - gs.r[j]
+        if 0 < gap < p.L_max:
+            n_bridges += 1
+
+    total_granule_area = float(np.sum(np.pi * gs.r**2))
+    m['n_contacts'] = n_contacts
+    m['max_overlap_ratio'] = float(max_overlap_ratio)
+    m['total_overlap_area'] = float(total_overlap_area)
+    m['area_conservation'] = 1.0 - total_overlap_area / total_granule_area
     m['n_bridges'] = n_bridges
 
     # Mean functional granule displacement
@@ -456,9 +597,10 @@ def run(p=None, seed=42):
     F0 = compute_forces(gs, p, rng)
     m = save(0.0, F0)
     print(f"\n  {'t(h)':>6} {'f_cl':>5} {'f_lf':>6} {'v_cl':>5} "
-          f"{'tissue':>7} {'bridges':>7} {'disp_f':>7}")
+          f"{'tissue':>7} {'bridges':>7} {'disp_f':>7} {'δ/R%':>6} {'AreaCon':>7}")
     print(f"  {0:6.1f} {m['func_nc']:5d} {m['func_lf']:6.2f} {m['void_nc']:5d} "
-          f"{m['tissue_frac']:7.3f} {m['n_bridges']:7d} {m['disp_func']:7.1f}")
+          f"{m['tissue_frac']:7.3f} {m['n_bridges']:7d} {m['disp_func']:7.1f} "
+          f"{m['max_overlap_ratio']*100:6.1f} {m['area_conservation']:7.4f}")
 
     wall_t0 = timer.time()
     t = 0.0
@@ -470,7 +612,8 @@ def run(p=None, seed=42):
             m = save(t, F)
             print(f"  {t:6.1f} {m['func_nc']:5d} {m['func_lf']:6.2f} "
                   f"{m['void_nc']:5d} {m['tissue_frac']:7.3f} "
-                  f"{m['n_bridges']:7d} {m['disp_func']:7.1f}")
+                  f"{m['n_bridges']:7d} {m['disp_func']:7.1f} "
+                  f"{m['max_overlap_ratio']*100:6.1f} {m['area_conservation']:7.4f}")
 
     elapsed = timer.time() - wall_t0
     print(f"\n  Done in {elapsed:.1f}s ({n_steps} steps, {gs.N} granules)")
@@ -623,6 +766,7 @@ if __name__ == '__main__':
           f"R_inert={p.R_inert_mean:.0f}±{p.R_inert_std:.0f} µm")
     print(f"  Cells/granule={p.n_cells_per_granule}, "
           f"k_cell={p.k_cell}, L_max={p.L_max} µm")
+    print_stiffness_info(p)
     print(f"  Simulation: {p.t_total:.0f} h, dt={p.dt:.2f} h")
 
     hist, snaps, p, gs = run(p)
@@ -650,3 +794,6 @@ if __name__ == '__main__':
     print(f"  Displacement: func={hf['disp_func']:.1f}µm, inert={hf['disp_inert']:.1f}µm")
     print(f"  Tissue: {h0['tissue_frac']:.1%} → {hf['tissue_frac']:.1%}")
     print(f"  Max cluster area: {h0['func_max_area']:.0f} → {hf['func_max_area']:.0f} µm²")
+    print(f"  Contacts: {hf['n_contacts']}, max δ/R = {hf['max_overlap_ratio']*100:.1f}%")
+    print(f"  Area conservation: {hf['area_conservation']:.4f} "
+          f"(overlap area = {hf['total_overlap_area']:.1f} µm²)")
