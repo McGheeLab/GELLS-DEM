@@ -69,6 +69,8 @@ experimentally relevant timescales (24--72 hours).
 | Motor-clutch | `n_motors`, `F_motor_stall`, `n_clutches`, `k_clutch`, `k_on_clutch`, `k_off_clutch` | --, nN, --, nN/um, 1/s, 1/s | Chan & Odde 2008 force model |
 | Cell bridging | `cell_sense_distance`, `F_max_per_cell`, `L_rest` | um, nN, um | Filopodia range, force cap, rest length |
 | Contact mechanics | `E_modulus`, `poisson_ratio` | kPa, -- | Hertzian contact (V1.1) |
+| Friction | `tau_0_ii/if/ff`, `friction_v_ref` | Pa, µm/h | Area-dependent hydrogel friction (V1.2) |
+| Adhesion | `W_adh_ii/if/ff` | J/m² | DMT adhesion by pair type (V1.2) |
 | Drag | `eta`, `drag_scale` | Pa-s, -- | Overdamped dynamics |
 | Noise | `T_active` | nN-um | Active temperature (functional only) |
 | Time | `dt`, `t_total`, `save_every_h`, `v_max` | h, h, h, um/h | Integration control |
@@ -86,6 +88,8 @@ Stores all per-granule arrays:
   - `spread_fraction` (float64, 0–1) — cell morphology: 0=sphere, 1=fully spread ellipsoid
   - `fa_maturity` (float64, 0–1) — focal adhesion maturation state
   - `n_overcrowded` (float64) — cells crawling on top of other cells
+- **Velocity state** (V1.2): `vx`, `vy` (float64) — per-granule velocities from
+  previous timestep, used for tangential friction calculation
 - **Derived masks**: `func_mask`, `inert_mask` (bool arrays)
 - **Particle count**: `N` (int)
 
@@ -165,7 +169,8 @@ Four force contributions, evaluated per timestep:
 
 | Force | Scope | Law | Key parameters |
 |-------|-------|-----|----------------|
-| **Contact** | All overlapping pairs | Hertz: F = (4/3) E* sqrt(R*) delta^1.5 | `E_modulus`, `poisson_ratio` |
+| **Contact (normal)** | All overlapping pairs | Hertz − DMT: F = (4/3) E* sqrt(R*) delta^1.5 − 2π W R* | `E_modulus`, `poisson_ratio`, `W_adh_*` |
+| **Contact (tangential)** | All overlapping pairs | Area-dependent: F = τ₀ π R* δ tanh(\|v_t\|/v_ref) | `tau_0_*`, `friction_v_ref` |
 | **Cell bridging** | Functional-functional, gap in (0, sense_dist), attached cells | Motor-clutch: F = F_mc * n_bridges (stiffness + FA dependent) | `n_motors`, `F_motor_stall`, `n_clutches`, `k_clutch`, `cell_sense_distance` |
 | **Wall** | Granules penetrating boundary | Hertz (sphere vs rigid flat): E*_wall = 2 * E*_gg | `E_modulus`, `poisson_ratio` |
 | **Active noise** | Functional granules only | Gaussian white noise ~ sqrt(2 gamma T_active / dt) | `T_active` |
@@ -220,6 +225,7 @@ Computed at each save step:
 | `packing_func_rich` | Mean packing in functional-rich regions |
 | `F_mean`, `F_max`, `F_func_mean` | Force statistics (nN) |
 | `n_contacts` | Number of overlapping granule pairs |
+| `n_contacts_ff`, `n_contacts_if`, `n_contacts_ii` | Contacts by pair type (V1.2) |
 | `max_overlap_ratio` | Maximum delta/R across all contacts |
 | `total_overlap_area` | Total lens overlap area (um^2) |
 | `area_conservation` | 1 - (overlap_area / total_granule_area) |
@@ -306,6 +312,13 @@ records for experimental sweeps.
 | `new_dem_visualization.py` | Full-featured post-processor: z-stacks, 3D isosurfaces, metric dashboards, animated GIFs. Reads JSON frame files from disk. |
 | `new_dem_postprocess.py` | Lighter post-processor for 2D/3D frame JSONs. Generates slice-bin evolution plots and rotating 3D voxel GIFs. |
 
+### Literature References (`CodeLog/References/`)
+
+`REFERENCES.md` catalogues every paper, equation, assumption, and parameter
+derivation used in the simulation engine. Organised by physical model:
+Hertzian contact (§1), motor-clutch (§2), hydrogel friction (§3), DMT
+adhesion (§4), cell biology (§5), overdamped dynamics (§6).
+
 ### Legacy Code (`old/`)
 
 Archived versions including 3D superellipsoid DEM, Numba-accelerated solvers,
@@ -322,8 +335,8 @@ and cell-stress visualisation. Retained for reference but not actively maintaine
 3. **Rigid granules**: Granule radii do not change during simulation. Deformation
    effects are captured through the Hertz contact force and volume-conserving
    effective radii for rendering.
-4. **No friction**: Only normal contact forces. Tangential/rotational degrees of
-   freedom are not modelled.
+4. **Tangential friction only**: Area-dependent tangential friction is modelled
+   (V1.2). Rotational degrees of freedom are not modelled.
 5. **Hertz validity**: The contact model assumes small overlaps (delta/R < ~10%).
    The `max_overlap_ratio` metric monitors this assumption.
 6. **Deterministic with seed**: All randomness flows through `numpy.random.Generator`,

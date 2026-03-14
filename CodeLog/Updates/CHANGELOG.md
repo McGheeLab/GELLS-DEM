@@ -11,6 +11,44 @@ MINOR tracks feature additions and improvements.
 ## [V1.2] - 2026-03-14
 
 ### Added
+- **HPC support files** for UArizona Puma cluster:
+  - `run_hpc.slurm` — SLURM batch job script for headless simulation runs.
+  - `setup_hpc_env.sh` — One-time environment setup (Python 3.11 venv).
+  - `run_hpc_headless.py` — CLI-driven headless runner that saves figures to
+    disk (no `plt.show()`), with argparse overrides for all `Params` fields.
+  - `CodeLog/Readme/HPC_SETUP.md` — Step-by-step guide for VSCode Remote SSH
+    to UArizona Puma, environment setup, and job submission.
+  - `hpc/generate_hpc_scripts.py` — Generates per-user `setup_env.sh` and
+    `run.slurm` from a JSON config file (e.g. `hpc/Alex.json`).
+  - `hpc/Alex.json` — Example user config for HPC script generation.
+- **Trial batch runner** (`run_all_trials.py`): Runs all Trial JSON configs
+  in `Trials/` either locally (sequential) or on HPC (SLURM array job, one
+  task per trial running in parallel).
+- **Trial JSON loading** in `run_hpc_headless.py`: `--trial` flag maps
+  the legacy nested Trial JSON format to current `Params` fields.
+
+### Added
+- **Area-dependent hydrogel friction** (Gong 2006, Pitenis et al. 2014,
+  Uruena et al. 2018): Tangential friction at granule contacts uses the
+  hydrogel-tribology model `F_fric = τ₀ × A_contact × tanh(|v_t|/v_ref)`,
+  where `A_contact = π R* δ` is the Hertzian contact area. Three pair types
+  with distinct interfacial shear stresses: inert–inert (τ₀=50 Pa, bare
+  Gemini gel), inert–functional (500 Pa, bare vs collagen), functional–
+  functional (2000 Pa, collagen–collagen H-bonding/entanglement).
+- **DMT adhesion** (Derjaguin, Muller, Toporov 1975): Constant attractive
+  normal force during contact `F_adh = 2π W R*`. Work of adhesion varies by
+  pair type: W_ii=0.5, W_if=1.0, W_ff=2.0 mJ/m². Net normal force
+  `F = F_Hertz − F_adh` can be negative (attractive).
+- **`get_pair_friction_params()`**: Helper to look up τ₀ and W by granule
+  pair surface chemistry (bare gel vs collagen-I coated).
+- **Velocity state in `GranuleSystem`**: `vx`, `vy` arrays store per-granule
+  velocities from the previous timestep for friction force calculation.
+- **New parameters in `Params`**: `tau_0_ii/if/ff`, `W_adh_ii/if/ff`,
+  `friction_v_ref`.
+- **Contact-type metrics**: `n_contacts_ff`, `n_contacts_if`, `n_contacts_ii`
+  tracked per save step.
+- **Literature references document**: `CodeLog/References/REFERENCES.md`
+  catalogues all papers, equations, assumptions, and parameter derivations.
 - **Cell lifecycle model**: Cells now follow a biologically motivated lifecycle:
   seeded (spheres, d=20 um) -> attached (~3 h onset, sigmoidal kinetics) ->
   spread (volume-conserving ellipsoid, ~5 um tall) -> bridging (motor-clutch).
@@ -92,8 +130,8 @@ MINOR tracks feature additions and improvements.
   (um^2), `area_conservation` (should stay near 1.0).
 - **Console output columns**: Added `delta/R%` and `AreaCon` columns to the
   per-step status table.
-- **Summary output**: Final summary now reports contact count, max overlap ratio,
-  and area conservation.
+- **Summary output**: Final summary now reports contact count (by pair type),
+  max overlap ratio, area conservation, and friction/adhesion parameters.
 
 ### Changed
 - **Contact force law**: From linear `F = k_contact * delta` to nonlinear

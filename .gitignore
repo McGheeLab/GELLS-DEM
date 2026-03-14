@@ -1,5 +1,6 @@
 # Simulation outputs (large, regenerable)
 simulations/
+results/
 *.npy
 *.npz
 *.pkl

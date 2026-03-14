@@ -55,6 +55,25 @@ FORCE LAWS:
 (4) Activity noise (small stochastic kicks on functional granules):
     F_noise ~ √(2 γ_i T_active) · ξ(t)            (cell-driven fluctuations)
 
+(5) Tangential friction (area-dependent, hydrogel tribology):
+    A_ij   = π R*_ij δ_ij                         (Hertzian contact area)
+    v_t    = (v_j − v_i) − [(v_j − v_i)·n̂] n̂     (relative tangential velocity)
+    F_fric = τ₀ · A_ij · tanh(|v_t|/v_ref) · (−v_t/|v_t|)
+
+    τ₀ depends on pair surface chemistry (Gong 2006, Pitenis 2014):
+        inert–inert (bare Gemini gel):           τ₀ ≈  50 Pa
+        inert–functional (bare–collagen-I):      τ₀ ≈ 500 Pa
+        functional–functional (col-I–col-I):     τ₀ ≈ 2000 Pa
+
+(6) DMT adhesion (constant attractive force during contact):
+    F_adh  = 2π W_adh R*_ij                       (Derjaguin-Muller-Toporov)
+    F_norm = F_contact − F_adh                     (net; can be negative = attractive)
+
+    W_adh depends on pair surface chemistry:
+        inert–inert:             W ≈ 0.5 mJ/m²
+        inert–functional:        W ≈ 1.0 mJ/m²
+        functional–functional:   W ≈ 2.0 mJ/m²
+
 CELL COUNT PER GRANULE (projected-area limited):
     A_cell  = π (d/2)²                                 (sphere projected area)
     n_cells = min(n_input, floor(π R² · coverage / A_cell))
@@ -135,6 +154,17 @@ class Params:
     E_modulus: float = 10.0         # kPa, Young's modulus of hydrogel
     poisson_ratio: float = 0.45     # Poisson's ratio (hydrogels ~0.4-0.5)
 
+    # ── Hydrogel friction (area-dependent, Gong 2006 / Pitenis 2014) ──
+    tau_0_ii: float = 50.0          # Pa, inert-inert shear stress (bare Gemini gel)
+    tau_0_if: float = 500.0         # Pa, inert-functional (bare vs collagen-coated)
+    tau_0_ff: float = 2000.0        # Pa, functional-functional (collagen-collagen)
+    friction_v_ref: float = 1.0     # µm/h, regularisation velocity (tanh smoothing)
+
+    # ── DMT adhesion (Derjaguin-Muller-Toporov) ──
+    W_adh_ii: float = 0.0005       # J/m², inert-inert (bare hydrogel)
+    W_adh_if: float = 0.001        # J/m², inert-functional
+    W_adh_ff: float = 0.002        # J/m², functional-functional (collagen-collagen)
+
     # ── Drag ──
     eta: float = 1e-3               # Pa·s (water-like medium)
     drag_scale: float = 0.05        # nondim scaling for drag coefficient
@@ -184,6 +214,10 @@ class GranuleSystem:
         self.fa_maturity = np.zeros(self.N)      # focal adhesion maturity [0, 1]
         self.n_overcrowded = np.zeros(self.N)    # cells crawling on others
 
+        # ── Velocity state (for tangential friction calculation) ──
+        self.vx = np.zeros(self.N)
+        self.vy = np.zeros(self.N)
+
     def positions(self):
         return np.column_stack([self.x, self.y])
 
@@ -202,6 +236,24 @@ def hertz_contact_force(E_star_Pa, R_eff_um, delta_um):
         F_nN = (4/3) · E*_Pa · √(R*_µm) · δ_µm^{3/2} · 10⁻³
     """
     return (4.0 / 3.0) * E_star_Pa * np.sqrt(R_eff_um) * delta_um**1.5 * 1e-3
+
+
+def get_pair_friction_params(gtype_i, gtype_j, p: Params):
+    """
+    Return (tau_0, W_adhesion) for a granule pair based on surface types.
+
+    Functional granules (type 0) are collagen-I coated; inert (type 1) are
+    bare hydrogel.  Three regimes:
+        inert–inert:           low friction, low adhesion  (bare Gemini gel)
+        inert–functional:      moderate  (asymmetric collagen adsorption)
+        functional–functional: high  (mutual collagen H-bonding/entanglement)
+    """
+    if gtype_i == 1 and gtype_j == 1:       # inert–inert
+        return p.tau_0_ii, p.W_adh_ii
+    elif gtype_i == 0 and gtype_j == 0:     # functional–functional
+        return p.tau_0_ff, p.W_adh_ff
+    else:                                    # mixed
+        return p.tau_0_if, p.W_adh_if
 
 
 def overlap_lens_area(R1, R2, d):
@@ -481,10 +533,17 @@ def compute_forces(gs: GranuleSystem, p: Params, rng) -> np.ndarray:
     Compute all forces on each granule.
     Returns (N, 2) force array in nN.
 
-    Contact uses Hertz theory:
-      F = (4/3) E* √R* δ^{3/2}
-    where E* = E / [2(1-ν²)] for granule-granule (identical materials)
-    and   E* = E / (1-ν²)    for granule-wall   (rigid wall limit).
+    Contact forces:
+      Hertz repulsion:  F = (4/3) E* √R* δ^{3/2}
+      DMT adhesion:     F_adh = 2π W R*  (constant attractive during contact)
+      Net normal:       F_n = F_Hertz − F_adh  (can be negative = attractive)
+
+    Tangential friction (area-dependent, hydrogel tribology):
+      F_fric = τ₀ · A_contact · tanh(|v_t|/v_ref)  opposing relative sliding
+      where A_contact = π R* δ  (Hertzian contact area)
+
+    Wall uses Hertz (rigid limit):
+      E* = E / (1-ν²), R* = R_i
     """
     N = gs.N
     F = np.zeros((N, 2))
@@ -494,6 +553,14 @@ def compute_forces(gs: GranuleSystem, p: Params, rng) -> np.ndarray:
     nu2 = p.poisson_ratio ** 2
     E_star_gg = (p.E_modulus * 1e3) / (2.0 * (1.0 - nu2))   # granule-granule
     E_star_gw = (p.E_modulus * 1e3) / (1.0 - nu2)            # granule-wall
+
+    # ── Friction/adhesion lookup by pair type ──
+    friction_lut = {
+        (0, 0): (p.tau_0_ff, p.W_adh_ff),  # functional–functional
+        (0, 1): (p.tau_0_if, p.W_adh_if),  # mixed
+        (1, 0): (p.tau_0_if, p.W_adh_if),  # mixed
+        (1, 1): (p.tau_0_ii, p.W_adh_ii),  # inert–inert
+    }
 
     # ── Neighbour search ──
     max_r = np.max(gs.r)
@@ -510,13 +577,39 @@ def compute_forces(gs: GranuleSystem, p: Params, rng) -> np.ndarray:
             continue
         nx, ny = dx/d, dy/d
 
-        # ── Contact repulsion (Hertz) ──
+        # ── Contact: Hertz repulsion + DMT adhesion + tangential friction ──
         overlap = gs.r[i] + gs.r[j] - d
         if overlap > 0:
             R_eff = gs.r[i] * gs.r[j] / (gs.r[i] + gs.r[j])
             Fc = hertz_contact_force(E_star_gg, R_eff, overlap)
-            F[i,0] -= Fc * nx; F[i,1] -= Fc * ny
-            F[j,0] += Fc * nx; F[j,1] += Fc * ny
+
+            # Pair-type friction/adhesion parameters
+            tau_0, W_adh = friction_lut[(gs.gtype[i], gs.gtype[j])]
+
+            # DMT adhesion: F_adh = 2π W R* [nN]
+            F_adh = 2.0 * np.pi * W_adh * R_eff * 1e3
+
+            # Net normal force (positive = repulsive, negative = attractive)
+            F_normal = Fc - F_adh
+            F[i,0] -= F_normal * nx; F[i,1] -= F_normal * ny
+            F[j,0] += F_normal * nx; F[j,1] += F_normal * ny
+
+            # Tangential friction (area-dependent, opposes relative sliding)
+            A_contact = np.pi * R_eff * overlap   # Hertzian contact area (µm²)
+            dvx = gs.vx[j] - gs.vx[i]
+            dvy = gs.vy[j] - gs.vy[i]
+            v_dot_n = dvx * nx + dvy * ny
+            vtx = dvx - v_dot_n * nx
+            vty = dvy - v_dot_n * ny
+            vt_mag = np.sqrt(vtx*vtx + vty*vty)
+
+            if vt_mag > 1e-12:
+                # F = τ₀ × A × tanh(|v_t|/v_ref) [Pa × µm² × 1e-3 → nN]
+                F_fric = tau_0 * A_contact * 1e-3 * np.tanh(
+                    vt_mag / p.friction_v_ref)
+                tx, ty = vtx / vt_mag, vty / vt_mag
+                F[i,0] += F_fric * tx; F[i,1] += F_fric * ty
+                F[j,0] -= F_fric * tx; F[j,1] -= F_fric * ty
 
         # ── Cell bridging (motor-clutch model, functional–functional) ──
         if gs.gtype[i] == 0 and gs.gtype[j] == 0:
@@ -588,6 +681,9 @@ def step(gs: GranuleSystem, p: Params, rng, t: float):
         v = np.sqrt(vx*vx + vy*vy)
         if v > p.v_max:
             vx *= p.v_max / v; vy *= p.v_max / v
+        # Store velocities for next step's friction calculation
+        gs.vx[i] = vx
+        gs.vy[i] = vy
         gs.x[i] += vx * p.dt
         gs.y[i] += vy * p.dt
         # Hard wall clamp
@@ -705,6 +801,9 @@ def compute_metrics(gs, p, phi_f, phi_i, phi_v, t, forces):
     pairs = tree.query_pairs(2 * max_r, output_type='ndarray')
 
     n_contacts = 0
+    n_contacts_ff = 0   # functional–functional
+    n_contacts_if = 0   # inert–functional
+    n_contacts_ii = 0   # inert–inert
     max_overlap_ratio = 0.0
     total_overlap_area = 0.0
     n_bridges = 0
@@ -716,6 +815,14 @@ def compute_metrics(gs, p, phi_f, phi_i, phi_v, t, forces):
         overlap = gs.r[i] + gs.r[j] - d
         if overlap > 0:
             n_contacts += 1
+            # Pair-type contact counts
+            ti, tj = gs.gtype[i], gs.gtype[j]
+            if ti == 0 and tj == 0:
+                n_contacts_ff += 1
+            elif ti == 1 and tj == 1:
+                n_contacts_ii += 1
+            else:
+                n_contacts_if += 1
             R_min = min(gs.r[i], gs.r[j])
             max_overlap_ratio = max(max_overlap_ratio, overlap / R_min)
             total_overlap_area += overlap_lens_area(gs.r[i], gs.r[j], d)
@@ -740,6 +847,9 @@ def compute_metrics(gs, p, phi_f, phi_i, phi_v, t, forces):
 
     total_granule_area = float(np.sum(np.pi * gs.r**2))
     m['n_contacts'] = n_contacts
+    m['n_contacts_ff'] = n_contacts_ff
+    m['n_contacts_if'] = n_contacts_if
+    m['n_contacts_ii'] = n_contacts_ii
     m['max_overlap_ratio'] = float(max_overlap_ratio)
     m['total_overlap_area'] = float(total_overlap_area)
     m['area_conservation'] = 1.0 - total_overlap_area / total_granule_area
@@ -837,7 +947,7 @@ def plot_granules(snaps, hist, p, indices=None):
     if nc == 1: axes = [axes]
 
     for c, si in enumerate(indices):
-        pf, pi, pv, xs, ys, rs, gt = snaps[si]
+        pf, pi, pv, xs, ys, rs, gt = snaps[si][:7]
         ax = axes[c]; ax.set_xlim(0, p.Lx); ax.set_ylim(0, p.Ly)
         ax.set_aspect('equal')
 
@@ -999,6 +1109,10 @@ if __name__ == '__main__':
     print(f"  Attach onset={p.t_attach_onset} h, "
           f"sense dist={p.cell_sense_distance} µm")
     print_stiffness_info(p)
+    print(f"  Friction: τ₀_ii={p.tau_0_ii} Pa, τ₀_if={p.tau_0_if} Pa, "
+          f"τ₀_ff={p.tau_0_ff} Pa")
+    print(f"  Adhesion: W_ii={p.W_adh_ii*1e3:.1f}, W_if={p.W_adh_if*1e3:.1f}, "
+          f"W_ff={p.W_adh_ff*1e3:.1f} mJ/m²")
     print(f"  Simulation: {p.t_total:.0f} h, dt={p.dt:.2f} h")
 
     hist, snaps, p, gs = run(p)
@@ -1026,7 +1140,10 @@ if __name__ == '__main__':
     print(f"  Displacement: func={hf['disp_func']:.1f}µm, inert={hf['disp_inert']:.1f}µm")
     print(f"  Tissue: {h0['tissue_frac']:.1%} → {hf['tissue_frac']:.1%}")
     print(f"  Max cluster area: {h0['func_max_area']:.0f} → {hf['func_max_area']:.0f} µm²")
-    print(f"  Contacts: {hf['n_contacts']}, max δ/R = {hf['max_overlap_ratio']*100:.1f}%")
+    print(f"  Contacts: {hf['n_contacts']} total "
+          f"(ff={hf['n_contacts_ff']}, if={hf['n_contacts_if']}, "
+          f"ii={hf['n_contacts_ii']})")
+    print(f"    max δ/R = {hf['max_overlap_ratio']*100:.1f}%")
     print(f"  Area conservation: {hf['area_conservation']:.4f} "
           f"(overlap area = {hf['total_overlap_area']:.1f} µm²)")
     print(f"  Cell state:")

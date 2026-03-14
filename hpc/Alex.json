@@ -1,0 +1,12 @@
+{
+    "netid": "mcgheealex",
+    "group": "mcgheealex",
+    "cluster": "puma",
+    "partition": "standard",
+    "python_module": "python/3.11/3.11.4",
+    "cpus": 4,
+    "mem_gb": 16,
+    "walltime": "04:00:00",
+    "repo_path": "~/GELLS-DEM",
+    "venv_path": "~/gells-dem-env"
+}
