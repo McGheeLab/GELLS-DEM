@@ -6,13 +6,13 @@
 is a 2D overdamped particle dynamics simulator for modelling cell-driven rearrangement
 of hydrogel granular scaffolds. The primary simulation engine is `new_dem_0.py`.
 
-**Current version: V1.1**
+**Current version: V1.2**
 
 ## Repository Layout
 
 ```
 GELLS-DEM/
-├── new_dem_0.py                 # PRIMARY simulation engine (V1.1)
+├── new_dem_0.py                 # PRIMARY simulation engine (V1.2)
 ├── new_dem_visualization.py     # Unified post-processing & visualisation
 ├── new_dem_postprocess.py       # Legacy-compatible post-processing (JSON frames)
 ├── dem_config.json              # Default JSON config (legacy format)
@@ -30,10 +30,15 @@ GELLS-DEM/
 - **Units throughout**: micrometres (length), nanonewtons (force), hours (time), kPa (modulus).
 - **Contact model**: Hertzian (V1.1+). Stiffness is derived from `E_modulus` and `poisson_ratio`,
   NOT set as an arbitrary spring constant. See `hertz_contact_force()`.
+- **Cell force model**: Motor-clutch (V1.2+, Chan & Odde 2008). Cell traction depends on
+  substrate stiffness, replacing the old simple spring. See `motor_clutch_force()`.
+- **Cell lifecycle** (V1.2+): Cells are 20 µm spheres → attach at ~3 h → spread to 5 µm-tall
+  ellipsoids (volume conserved) → overcrowded cells crawl on others → bridges form via
+  motor-clutch adhesions. See `update_cell_state()`.
 - **Volume conservation**: Overlap lens area is tracked and redistributed via effective radii
   for rendering. Forces still use the original (undeformed) radii.
 - **Integration**: Overdamped Euler (no inertia). Velocity cap prevents numerical blowup.
-- **Neighbour search**: `scipy.spatial.cKDTree` with a cutoff of `2*max_r + L_max`.
+- **Neighbour search**: `scipy.spatial.cKDTree` with a cutoff of `2*max_r + cell_sense_distance`.
 
 ## Conventions
 

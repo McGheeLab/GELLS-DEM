@@ -1,6 +1,6 @@
 # GELLS-DEM Architecture Document
 
-**Version:** V1.1
+**Version:** V1.2
 **Last updated:** 2026-03-14
 **Primary source file:** `new_dem_0.py`
 
@@ -31,11 +31,11 @@ experimentally relevant timescales (24--72 hours).
 │  │                                                       │  │
 │  │   ┌──────────────────┐    ┌─────────────────────┐    │  │
 │  │   │ compute_forces() │───▶│     step()           │    │  │
-│  │   │  • Hertz contact │    │  • overdamped Euler  │    │  │
-│  │   │  • cell bridging │    │  • velocity cap      │    │  │
-│  │   │  • wall repulsion│    │  • wall clamp        │    │  │
-│  │   │  • active noise  │    └─────────────────────┘    │  │
-│  │   └──────────────────┘                                │  │
+│  │   │  • Hertz contact │    │  • update_cell_state │    │  │
+│  │   │  • motor-clutch  │    │  • overdamped Euler  │    │  │
+│  │   │  • wall repulsion│    │  • velocity cap      │    │  │
+│  │   │  • active noise  │    │  • wall clamp        │    │  │
+│  │   └──────────────────┘    └─────────────────────┘    │  │                                │  │
 │  │                                                       │  │
 │  │   ┌──────────────────┐    ┌─────────────────────┐    │  │
 │  │   │ render_fields()  │───▶│ compute_metrics()   │    │  │
@@ -64,8 +64,10 @@ experimentally relevant timescales (24--72 hours).
 | Domain | `Lx`, `Ly` | um | Simulation box size |
 | Granule sizes | `R_func_mean/std`, `R_inert_mean/std` | um | Gaussian size distributions |
 | Composition | `phi_f_target`, `phi_i_target` | -- | Target area fractions |
-| Cell properties | `n_cells_per_granule`, `cell_diameter`, `cell_coverage`, `F_max_per_cell` | --, um, --, nN | Cell seeding and force limits |
-| Cell bridging | `k_cell`, `L_max`, `L_rest` | nN/um, um, um | Bridge spring model |
+| Cell geometry | `n_cells_per_granule`, `cell_diameter`, `cell_height_spread`, `cell_coverage` | --, um, um, -- | Cell seeding (20 um spheres, 5 um spread height) |
+| Cell timeline | `t_attach_onset`, `t_attach_half`, `t_spread_duration`, `fa_maturation_rate` | h, h, h, 1/h | Attachment/spreading/FA kinetics |
+| Motor-clutch | `n_motors`, `F_motor_stall`, `n_clutches`, `k_clutch`, `k_on_clutch`, `k_off_clutch` | --, nN, --, nN/um, 1/s, 1/s | Chan & Odde 2008 force model |
+| Cell bridging | `cell_sense_distance`, `F_max_per_cell`, `L_rest` | um, nN, um | Filopodia range, force cap, rest length |
 | Contact mechanics | `E_modulus`, `poisson_ratio` | kPa, -- | Hertzian contact (V1.1) |
 | Drag | `eta`, `drag_scale` | Pa-s, -- | Overdamped dynamics |
 | Noise | `T_active` | nN-um | Active temperature (functional only) |
@@ -78,7 +80,12 @@ Stores all per-granule arrays:
 - **Position**: `x`, `y` (float64)
 - **Radius**: `r` (float64, constant throughout simulation)
 - **Type**: `gtype` (int, 0=functional, 1=inert)
-- **Cell count**: `n_cells` (float64, surface-area limited)
+- **Cell count**: `n_cells` (float64, projected-area limited seeded count)
+- **Cell state** (V1.2):
+  - `n_attached` (float64) — cells that have attached to granule surface
+  - `spread_fraction` (float64, 0–1) — cell morphology: 0=sphere, 1=fully spread ellipsoid
+  - `fa_maturity` (float64, 0–1) — focal adhesion maturation state
+  - `n_overcrowded` (float64) — cells crawling on top of other cells
 - **Derived masks**: `func_mask`, `inert_mask` (bool arrays)
 - **Particle count**: `N` (int)
 
@@ -113,22 +120,53 @@ This ensures total material area is conserved despite DEM overlaps.
 Diagnostic: prints the expected equilibrium overlap for the configured
 modulus and typical cell force. Helps users verify physical meaning.
 
-### 2.4 Packing Generator — `generate_packing()`
+### 2.4 Cell Geometry & Motor-Clutch Model (V1.2)
+
+#### `cell_projected_area(spread_frac, cell_d, cell_h)`
+Projected area of a cell transitioning from sphere to oblate ellipsoid.
+Volume is conserved: `V = (4/3)pi(d/2)^3`. When spread (height `h`), the
+semi-major axis `a = sqrt(d^3 / 4h)` gives a footprint ~4x larger than the
+spherical projection.
+
+#### `max_cells_on_granule(R, cell_proj_area, coverage)`
+Capacity = `floor(pi*R^2 * coverage / A_cell)`. Decreases as cells spread.
+
+#### `motor_clutch_force(E_kPa, p, fa_maturity)`
+Steady-state traction force per cell from Chan & Odde (2008):
+```
+k_sub = pi * E * a_cell / (1-nu^2)     substrate stiffness (nN/um)
+k_opt = n_clutches * k_clutch           clutch ensemble stiffness
+engagement = k_on / (k_on + k_off)      clutch fraction
+F_mc = F_stall * k_sub/(k_sub+k_opt) * engagement * fa_maturity
+```
+Gives ~2 nN on 1 kPa, ~12 nN on 10 kPa, ~21 nN on 100 kPa.
+
+#### `update_cell_state(gs, p, t)`
+Per-step cell lifecycle:
+1. **Attachment**: sigmoidal kinetics after `t_attach_onset` (~3 h)
+2. **Spreading**: linear ramp from sphere to ellipsoid, rate modulated by
+   substrate stiffness (stiffer → faster via motor-clutch mechanotransduction)
+3. **FA maturation**: ramps at `fa_maturation_rate` once spreading begins
+4. **Overcrowding**: when spread footprint exceeds granule capacity, excess
+   cells crawl on top of neighbours
+
+### 2.5 Packing Generator — `generate_packing()`
 
 Random sequential addition (RSA) with:
 - Interleaved placement (inert-functional-inert-...) for spatial mixing.
 - Minimum surface gap of 2 um enforced.
 - Up to 800 random placement attempts per granule.
-- Cell count per functional granule is `min(n_cells_input, surface_limited)`.
+- Cell count per functional granule is `min(n_cells_input, projected_area_cap)`,
+  where the cap uses the spherical cell projected area `pi*(d/2)^2`.
 
-### 2.5 Force Computation — `compute_forces()`
+### 2.6 Force Computation — `compute_forces()`
 
 Four force contributions, evaluated per timestep:
 
 | Force | Scope | Law | Key parameters |
 |-------|-------|-----|----------------|
 | **Contact** | All overlapping pairs | Hertz: F = (4/3) E* sqrt(R*) delta^1.5 | `E_modulus`, `poisson_ratio` |
-| **Cell bridging** | Functional-functional, gap in (0, L_max) | Linear spring with proximity weighting, force cap | `k_cell`, `L_max`, `L_rest`, `F_max_per_cell` |
+| **Cell bridging** | Functional-functional, gap in (0, sense_dist), attached cells | Motor-clutch: F = F_mc * n_bridges (stiffness + FA dependent) | `n_motors`, `F_motor_stall`, `n_clutches`, `k_clutch`, `cell_sense_distance` |
 | **Wall** | Granules penetrating boundary | Hertz (sphere vs rigid flat): E*_wall = 2 * E*_gg | `E_modulus`, `poisson_ratio` |
 | **Active noise** | Functional granules only | Gaussian white noise ~ sqrt(2 gamma T_active / dt) | `T_active` |
 
@@ -136,12 +174,19 @@ Four force contributions, evaluated per timestep:
 - Granule-granule: `E* = E / [2(1 - nu^2)]`
 - Granule-wall (rigid limit): `E* = E / (1 - nu^2)`
 
-**Neighbour search:** `cKDTree.query_pairs()` with cutoff `2*max_r + L_max`.
+**Neighbour search:** `cKDTree.query_pairs()` with cutoff `2*max_r + cell_sense_distance`.
 
-### 2.6 Time Integration — `step()`
+**Cell bridging details (V1.2):**
+- Only attached, non-overcrowded cells can bridge (`n_avail = n_attached - n_overcrowded`)
+- Bridge count: `n_br = sqrt(n_avail_i * n_avail_j) * proximity`
+- Force per cell from `motor_clutch_force()`, averaged FA maturity from both granules
+- Bridges only exert force when gap > L_rest (cells under tension)
 
-Overdamped Euler:
+### 2.7 Time Integration — `step()`
+
 ```
+update_cell_state(gs, p, t)    cell lifecycle (V1.2)
+F = compute_forces(gs, p, rng)
 v_i = F_i / gamma_i           gamma_i = drag_scale * r_i
 |v_i| = min(|v_i|, v_max)     velocity cap for stability
 x_i += v_i * dt
@@ -150,7 +195,7 @@ x_i = clamp(x_i, walls)       hard wall boundary
 
 No inertial terms (overdamped regime appropriate for viscous medium).
 
-### 2.7 Phase Field Rendering — `render_fields()`
+### 2.8 Phase Field Rendering — `render_fields()`
 
 Converts particle positions to continuous fields on an (Ngrid x Ngrid) grid:
 1. Computes volume-conserving effective radii via `compute_effective_radii()`.
@@ -160,7 +205,7 @@ Converts particle positions to continuous fields on an (Ngrid x Ngrid) grid:
 
 Returns `(phi_f, phi_i, phi_v)` where `phi_v = 1 - phi_f - phi_i`.
 
-### 2.8 Metrics — `compute_metrics()`
+### 2.9 Metrics — `compute_metrics()`
 
 Computed at each save step:
 
@@ -178,31 +223,37 @@ Computed at each save step:
 | `max_overlap_ratio` | Maximum delta/R across all contacts |
 | `total_overlap_area` | Total lens overlap area (um^2) |
 | `area_conservation` | 1 - (overlap_area / total_granule_area) |
-| `n_bridges` | Active cell bridges (functional pairs with gap < L_max) |
+| `n_bridges` | Active cell bridges (functional pairs with attached cells in sensing range) |
 | `disp_func`, `disp_inert` | Mean displacement from initial positions (um) |
+| `n_attached_total` | Total attached cells across all functional granules (V1.2) |
+| `n_seeded_total` | Total seeded cells (V1.2) |
+| `mean_spread_frac` | Mean cell spread fraction across functional granules (V1.2) |
+| `mean_fa_maturity` | Mean focal adhesion maturity (V1.2) |
+| `n_overcrowded_total` | Total overcrowded cells (crawling on others) (V1.2) |
 
 Cluster analysis uses `scipy.ndimage.label` on thresholded fields.
 
-### 2.9 Visualisation Functions
+### 2.10 Visualisation Functions
 
 | Function | Output |
 |----------|--------|
 | `plot_granules()` | Circle patches at 5 time snapshots |
 | `plot_fields()` | 3-row (phi_f, phi_i, phi_v) phase field heatmaps |
-| `plot_timeseries()` | 2x3 grid of metric evolution plots |
+| `plot_timeseries()` | 3x3 grid: topology, dynamics, cell state (V1.2) |
 | `plot_composite()` | RGB composite (R=functional, G=void, B=inert) |
 
-### 2.10 Main Simulation Loop — `run()`
+### 2.11 Main Simulation Loop — `run()`
 
 ```
 generate_packing() -> GranuleSystem
+update_cell_state(t=0)   # initial cell state
 for each timestep:
-    compute_forces()
-    step()
+    t += dt
+    step(gs, p, rng, t)     # update_cell_state + compute_forces + integrate
     if save_step:
         render_fields()
         compute_metrics()
-        store snapshot
+        store snapshot (includes cell state arrays)
 return (history, snapshots, params, final_state)
 ```
 
@@ -230,9 +281,10 @@ Params ──▶ generate_packing() ──▶ GranuleSystem
                           plot_composite()
 ```
 
-**Snapshot tuple format:**
+**Snapshot tuple format (V1.2):**
 ```python
-(phi_f, phi_i, phi_v, x_array, y_array, r_array, gtype_array)
+(phi_f, phi_i, phi_v, x_array, y_array, r_array, gtype_array,
+ n_attached_array, spread_fraction_array, fa_maturity_array, n_overcrowded_array)
 ```
 
 ---

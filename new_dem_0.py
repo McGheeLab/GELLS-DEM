@@ -26,12 +26,27 @@ FORCE LAWS:
     redistributed as an inflated effective radius for rendering:
         r_eff_i = √(r_i² + ΔA_i / π)
 
-(2) Cell-mediated attraction (functional–functional pairs only):
-    gap_ij = d_ij - R_i - R_j                     (surface separation)
-    proximity = max(0, 1 - gap_ij / L_max)         (0 at L_max, 1 at contact)
-    n_bridges = √(n_cells_i · n_cells_j) · proximity
-    F_ij^cell = -k_cell · n_bridges · max(0, gap_ij - L_rest) · n̂_ij
-    |F_ij^cell| ≤ F_max · n_bridges                (force cap per bridge)
+(2) Cell-mediated attraction (motor-clutch model, functional–functional only):
+    Cells are initially spheres (d=20 µm).  After ~3 h they attach to the
+    hydrogel via integrin clutches and spread into oblate ellipsoids (~5 µm
+    tall, volume conserved).  If the spread footprint exceeds the granule
+    area, excess cells crawl on top of neighbours.
+
+    Attached cells sense nearby granules within a filopodia range
+    (cell_sense_distance) and form bridges.  Bridge force per cell comes
+    from the motor-clutch model (Chan & Odde 2008):
+
+        k_sub  = π E a / (1−ν²)              (substrate stiffness at cell scale)
+        k_opt  = n_clutches · k_clutch        (clutch ensemble stiffness)
+        engagement = k_on / (k_on + k_off)    (steady-state clutch fraction)
+        F_mc   = F_stall · k_sub/(k_sub+k_opt) · engagement · FA_maturity
+
+    Bridge count and net force:
+        gap_ij = d_ij − R_i − R_j             (surface separation)
+        proximity = 1 − gap/cell_sense_distance
+        n_bridges = √(n_avail_i · n_avail_j) · proximity
+        F_ij^cell = F_mc · n_bridges · n̂_ij   (if gap > L_rest)
+        |F_ij^cell| ≤ F_max · n_bridges       (force cap)
 
 (3) Wall repulsion (Hertz, sphere against rigid flat):
     E*_wall = E / (1 − ν²)                         (rigid wall limit)
@@ -40,8 +55,9 @@ FORCE LAWS:
 (4) Activity noise (small stochastic kicks on functional granules):
     F_noise ~ √(2 γ_i T_active) · ξ(t)            (cell-driven fluctuations)
 
-CELL COUNT PER GRANULE (surface-area limited):
-    n_cells_i = min(n_cells_input, floor(4π R_i² · coverage / A_cell))
+CELL COUNT PER GRANULE (projected-area limited):
+    A_cell  = π (d/2)²                                 (sphere projected area)
+    n_cells = min(n_input, floor(π R² · coverage / A_cell))
 
 OBSERVABLES (rendered from particle positions at each save step):
     φ_f(x), φ_i(x), φ_v(x) = 1 - φ_f - φ_i
@@ -50,9 +66,12 @@ OBSERVABLES (rendered from particle positions at each save step):
 PHYSICAL PARAMETER MAPPING:
     E      ~ 1-100 kPa               (hydrogel Young's modulus)
     ν      ~ 0.4-0.5                  (Poisson's ratio, nearly incompressible)
-    k_cell ~ F_cell / L_cell          (cell spring constant, ~nN/µm)
-    L_max  ~ 2-5 cell diameters       (max bridging distance)
     η      ~ 1e-3 Pa·s               (culture medium viscosity)
+    d_cell = 20 µm                    (initial cell diameter)
+    h_cell = 5 µm                     (spread cell height)
+    n_motors ~ 200, F_stall ~ 2 pN    (myosin motors)
+    n_clutches ~ 75, k_clutch ~ 0.5 nN/µm  (integrin clutches)
+    t_attach ~ 3 h                    (cell attachment onset)
 """
 
 import numpy as np
@@ -86,16 +105,31 @@ class Params:
     phi_f_target: float = 0.25      # functional area fraction target
     phi_i_target: float = 0.20      # inert area fraction target
 
-    # ── Cell properties ──
+    # ── Cell geometry ──
     n_cells_per_granule: int = 8    # cells seeded per functional granule
-    cell_diameter: float = 15.0     # µm
-    cell_coverage: float = 0.6      # max fraction of surface covered
-    F_max_per_cell: float = 50.0    # nN, max force per cell
+    cell_diameter: float = 20.0     # µm, initial spherical cell diameter
+    cell_height_spread: float = 5.0 # µm, height of spread ellipsoidal cell
+    cell_coverage: float = 0.6      # max fraction of granule projected area covered
 
-    # ── Cell bridging ──
-    k_cell: float = 0.8            # nN/µm, cell spring constant
-    L_max: float = 60.0             # µm, max bridging gap
-    L_rest: float = 12.0            # µm, rest length (~ cell diameter)
+    # ── Cell attachment & spreading timeline ──
+    t_attach_onset: float = 3.0     # hours, when cells begin attaching
+    t_attach_half: float = 1.5      # hours after onset for 50% attachment
+    t_spread_duration: float = 3.0  # hours for attached cell to fully spread
+    fa_maturation_rate: float = 0.3 # 1/h, focal adhesion maturation rate
+
+    # ── Motor-clutch model (Chan & Odde 2008) ──
+    n_motors: int = 50              # motor complexes (stress fibers) per cell
+    F_motor_stall: float = 0.5     # nN per complex (500 pN / stress fiber)
+    n_clutches: int = 75            # integrin clutch clusters per cell
+    k_clutch: float = 5.0          # nN/µm, clutch cluster spring constant
+    k_on_clutch: float = 1.0       # 1/s, clutch binding rate
+    k_off_clutch: float = 0.1      # 1/s, baseline clutch unbinding rate
+    F_bond: float = 0.002          # nN (2 pN), characteristic bond rupture force
+
+    # ── Cell sensing & bridging ──
+    cell_sense_distance: float = 40.0  # µm, filopodia sensing range
+    F_max_per_cell: float = 50.0       # nN, absolute max force cap per cell
+    L_rest: float = 5.0                # µm, rest length (~ spread cell thickness)
 
     # ── Contact mechanics (Hertzian) ──
     E_modulus: float = 10.0         # kPa, Young's modulus of hydrogel
@@ -119,6 +153,11 @@ class Params:
     interface_width: float = 3.0    # µm, tanh smoothing
 
     @property
+    def L_max(self):
+        """Max bridging distance equals cell sensing distance."""
+        return self.cell_sense_distance
+
+    @property
     def save_every(self):
         return max(1, int(self.save_every_h / self.dt))
 
@@ -128,16 +167,22 @@ class Params:
 # ══════════════════════════════════════════════════════════════════════
 
 class GranuleSystem:
-    """Tracks all granule state."""
+    """Tracks all granule and per-granule cell state."""
     def __init__(self, x, y, r, gtype, n_cells):
         self.x = np.array(x, dtype=np.float64)
         self.y = np.array(y, dtype=np.float64)
         self.r = np.array(r, dtype=np.float64)
         self.gtype = np.array(gtype, dtype=int)  # 0=func, 1=inert
-        self.n_cells = np.array(n_cells, dtype=np.float64)
+        self.n_cells = np.array(n_cells, dtype=np.float64)  # seeded cells
         self.N = len(x)
         self.func_mask = self.gtype == 0
         self.inert_mask = self.gtype == 1
+
+        # ── Cell state (per granule) ──
+        self.n_attached = np.zeros(self.N)       # cells that have attached
+        self.spread_fraction = np.zeros(self.N)  # 0 = sphere, 1 = fully spread
+        self.fa_maturity = np.zeros(self.N)      # focal adhesion maturity [0, 1]
+        self.n_overcrowded = np.zeros(self.N)    # cells crawling on others
 
     def positions(self):
         return np.column_stack([self.x, self.y])
@@ -231,6 +276,133 @@ def print_stiffness_info(p: Params):
 
 
 # ══════════════════════════════════════════════════════════════════════
+# Cell geometry & motor-clutch model
+# ══════════════════════════════════════════════════════════════════════
+
+def cell_projected_area(spread_frac, cell_d, cell_h):
+    """
+    Projected area of a cell transitioning from sphere to spread ellipsoid.
+
+    Sphere (spread_frac=0):
+        A = π (d/2)²
+
+    Fully spread oblate ellipsoid (spread_frac=1):
+        Volume conserved: V = (4/3)π(d/2)³ = (4/3)π a² (h/2)
+        → a² = d³ / (4h)
+        → A_spread = π a² = π d³ / (4h)
+
+    Interpolates linearly between the two based on spread_frac.
+    """
+    r = cell_d / 2.0
+    A_sphere = np.pi * r ** 2
+
+    V = (4.0 / 3.0) * np.pi * r ** 3
+    c = cell_h / 2.0
+    a2 = 3.0 * V / (4.0 * np.pi * c)  # semi-major axis squared
+    A_spread = np.pi * a2
+
+    return A_sphere + spread_frac * (A_spread - A_sphere)
+
+
+def max_cells_on_granule(R, cell_proj_area, coverage):
+    """Max cells that fit on a granule based on projected area ratio."""
+    A_granule = np.pi * R ** 2
+    return max(1, int(A_granule * coverage / cell_proj_area))
+
+
+def motor_clutch_force(E_kPa, p: Params, fa_maturity_val):
+    """
+    Steady-state traction force per cell from the motor-clutch model.
+
+    Based on Chan & Odde (2008).  For hydrogel substrates (1–100 kPa) we
+    are in the rising portion of the stiffness–force curve:
+
+        F = F_stall · k_sub / (k_sub + k_opt) · engagement · fa_maturity
+
+    where
+        k_sub = π E a / (1−ν²)        substrate stiffness at cell scale
+        k_opt = n_clutches · k_clutch  optimal (clutch ensemble) stiffness
+        engagement = k_on / (k_on + k_off)   steady-state clutch fraction
+
+    Returns force per cell in nN.
+    """
+    # Total motor stall force
+    F_stall = p.n_motors * p.F_motor_stall  # nN
+
+    # Substrate stiffness at cell scale (nN/µm)
+    # k = π E a / (1-ν²),  E [kPa] × a [µm] → kPa·µm = nN/µm
+    a_cell = p.cell_diameter / 2.0
+    k_sub = np.pi * E_kPa * a_cell / (1.0 - p.poisson_ratio ** 2)
+
+    # Clutch ensemble stiffness
+    k_opt = p.n_clutches * p.k_clutch
+
+    # Steady-state engagement fraction
+    engagement = p.k_on_clutch / (p.k_on_clutch + p.k_off_clutch)
+
+    # Motor-clutch force
+    F_mc = F_stall * (k_sub / (k_sub + k_opt)) * engagement * fa_maturity_val
+
+    return min(F_mc, p.F_max_per_cell)
+
+
+def update_cell_state(gs: GranuleSystem, p: Params, t: float):
+    """
+    Advance per-granule cell state for current simulation time.
+
+    Timeline on each functional granule:
+      t < t_attach_onset:          cells sit as spheres, no attachment
+      t ≥ t_attach_onset:          cells attach (sigmoidal, half-time t_attach_half)
+      after attachment:             cells spread (sphere → ellipsoid over t_spread_duration)
+      during/after spreading:       focal adhesions mature at fa_maturation_rate
+      if spread cells overcrowd:    excess cells crawl on top of others
+
+    Stiffness-dependent spreading: stiffer substrates → faster spreading
+    (motor-clutch effect on cell mechanotransduction).
+    """
+    # Stiffness modulates spreading speed
+    a_cell = p.cell_diameter / 2.0
+    k_sub = np.pi * p.E_modulus * a_cell / (1.0 - p.poisson_ratio ** 2)
+    k_opt = p.n_clutches * p.k_clutch
+    stiffness_factor = k_sub / (k_sub + k_opt)  # 0 on very soft, ~1 on stiff
+    # Effective spread duration (faster on stiffer substrates)
+    eff_spread_dur = p.t_spread_duration / max(0.2, stiffness_factor)
+
+    for i in range(gs.N):
+        if gs.gtype[i] != 0:
+            continue
+
+        # ── Attachment (sigmoidal kinetics) ──
+        if t >= p.t_attach_onset:
+            tau = t - p.t_attach_onset
+            frac = 1.0 / (1.0 + np.exp(
+                -3.0 * (tau - p.t_attach_half) / max(0.1, p.t_attach_half)))
+            gs.n_attached[i] = gs.n_cells[i] * frac
+        else:
+            gs.n_attached[i] = 0.0
+
+        # ── Spreading (linear ramp after half-attachment reached) ──
+        if gs.n_attached[i] > 0.5:
+            t_since = max(0.0, t - p.t_attach_onset - p.t_attach_half)
+            gs.spread_fraction[i] = min(1.0, t_since / eff_spread_dur)
+        else:
+            gs.spread_fraction[i] = 0.0
+
+        # ── Focal adhesion maturation ──
+        if gs.spread_fraction[i] > 0.1:
+            t_since_spread = max(0.0, t - (p.t_attach_onset + p.t_attach_half))
+            gs.fa_maturity[i] = min(1.0, t_since_spread * p.fa_maturation_rate)
+        else:
+            gs.fa_maturity[i] = 0.0
+
+        # ── Overcrowding check ──
+        A_cell = cell_projected_area(
+            gs.spread_fraction[i], p.cell_diameter, p.cell_height_spread)
+        cap = max_cells_on_granule(gs.r[i], A_cell, p.cell_coverage)
+        gs.n_overcrowded[i] = max(0.0, gs.n_attached[i] - cap)
+
+
+# ══════════════════════════════════════════════════════════════════════
 # Packing generator (random sequential addition)
 # ══════════════════════════════════════════════════════════════════════
 
@@ -278,14 +450,14 @@ def generate_packing(p: Params, seed=42) -> GranuleSystem:
         if not placed:
             pass  # skip if can't place
 
-    # Compute cells per granule
+    # Compute cells per granule (projected-area limited)
+    # Cells start as spheres of diameter cell_diameter → projected area = π(d/2)²
     n_cells = []
-    cell_area = np.pi * (p.cell_diameter/2)**2
+    A_cell_sphere = cell_projected_area(0.0, p.cell_diameter, p.cell_height_spread)
     for i in range(len(xs)):
         if types[i] == 0:
-            surface = 2 * np.pi * rs[i]  # circumference in 2D
-            max_from_area = int(surface * p.cell_coverage / p.cell_diameter)
-            nc = min(p.n_cells_per_granule, max(1, max_from_area))
+            cap = max_cells_on_granule(rs[i], A_cell_sphere, p.cell_coverage)
+            nc = min(p.n_cells_per_granule, cap)
             n_cells.append(nc)
         else:
             n_cells.append(0)
@@ -346,20 +518,33 @@ def compute_forces(gs: GranuleSystem, p: Params, rng) -> np.ndarray:
             F[i,0] -= Fc * nx; F[i,1] -= Fc * ny
             F[j,0] += Fc * nx; F[j,1] += Fc * ny
 
-        # ── Cell bridging (functional-functional only) ──
+        # ── Cell bridging (motor-clutch model, functional–functional) ──
         if gs.gtype[i] == 0 and gs.gtype[j] == 0:
             gap = d - gs.r[i] - gs.r[j]
-            if 0 < gap < p.L_max:
-                proximity = 1.0 - gap / p.L_max
-                n_br = np.sqrt(gs.n_cells[i] * gs.n_cells[j]) * proximity
-                extension = gap - p.L_rest
-                if extension > 0:
-                    F_mag = p.k_cell * n_br * extension
-                    F_cap = p.F_max_per_cell * n_br
-                    F_mag = min(F_mag, F_cap)
-                    # Attractive: pull i toward j
-                    F[i,0] += F_mag * nx; F[i,1] += F_mag * ny
-                    F[j,0] -= F_mag * nx; F[j,1] -= F_mag * ny
+            if 0 < gap < p.cell_sense_distance:
+                # Only attached, non-overcrowded cells can bridge
+                n_avail_i = max(0.0, gs.n_attached[i] - gs.n_overcrowded[i])
+                n_avail_j = max(0.0, gs.n_attached[j] - gs.n_overcrowded[j])
+
+                if n_avail_i > 0.1 and n_avail_j > 0.1:
+                    # Proximity factor: cells more likely to bridge when close
+                    proximity = 1.0 - gap / p.cell_sense_distance
+
+                    # Number of bridging cells (geometric mean × proximity)
+                    n_br = np.sqrt(n_avail_i * n_avail_j) * proximity
+
+                    # Motor-clutch force per cell (stiffness + FA maturity)
+                    avg_maturity = 0.5 * (gs.fa_maturity[i] + gs.fa_maturity[j])
+                    F_per_cell = motor_clutch_force(p.E_modulus, p, avg_maturity)
+
+                    # Bridge engagement: tension when gap > rest length
+                    if gap > p.L_rest:
+                        F_mag = F_per_cell * n_br
+                        F_cap = p.F_max_per_cell * n_br
+                        F_mag = min(F_mag, F_cap)
+                        # Attractive: pull i toward j
+                        F[i,0] += F_mag * nx; F[i,1] += F_mag * ny
+                        F[j,0] -= F_mag * nx; F[j,1] -= F_mag * ny
 
     # ── Wall repulsion (Hertz, sphere vs rigid flat: R* = R_i) ──
     for i in range(N):
@@ -390,8 +575,9 @@ def compute_forces(gs: GranuleSystem, p: Params, rng) -> np.ndarray:
 # Time integration (overdamped: γ dx/dt = F  →  dx = F/γ · dt)
 # ══════════════════════════════════════════════════════════════════════
 
-def step(gs: GranuleSystem, p: Params, rng):
-    """One overdamped Euler step."""
+def step(gs: GranuleSystem, p: Params, rng, t: float):
+    """One overdamped Euler step with cell state evolution."""
+    update_cell_state(gs, p, t)
     F = compute_forces(gs, p, rng)
 
     for i in range(gs.N):
@@ -534,17 +720,22 @@ def compute_metrics(gs, p, phi_f, phi_i, phi_v, t, forces):
             max_overlap_ratio = max(max_overlap_ratio, overlap / R_min)
             total_overlap_area += overlap_lens_area(gs.r[i], gs.r[j], d)
 
-    # Bridge count (functional-functional pairs with gap in range)
-    cutoff_bridge = 2 * max_r + p.L_max
+    # Bridge count (functional-functional pairs with attached cells in sensing range)
+    cutoff_bridge = 2 * max_r + p.cell_sense_distance
     pairs_b = tree.query_pairs(cutoff_bridge, output_type='ndarray')
     for idx in range(len(pairs_b)):
         i, j = pairs_b[idx]
         if gs.gtype[i] != 0 or gs.gtype[j] != 0:
             continue
+        # Only count bridges where both granules have attached cells
+        n_avail_i = max(0.0, gs.n_attached[i] - gs.n_overcrowded[i])
+        n_avail_j = max(0.0, gs.n_attached[j] - gs.n_overcrowded[j])
+        if n_avail_i < 0.1 or n_avail_j < 0.1:
+            continue
         dx = pos[j,0] - pos[i,0]; dy = pos[j,1] - pos[i,1]
         d = np.sqrt(dx*dx + dy*dy)
         gap = d - gs.r[i] - gs.r[j]
-        if 0 < gap < p.L_max:
+        if 0 < gap < p.cell_sense_distance:
             n_bridges += 1
 
     total_granule_area = float(np.sum(np.pi * gs.r**2))
@@ -554,8 +745,14 @@ def compute_metrics(gs, p, phi_f, phi_i, phi_v, t, forces):
     m['area_conservation'] = 1.0 - total_overlap_area / total_granule_area
     m['n_bridges'] = n_bridges
 
-    # Mean functional granule displacement
-    # (stored as running metric)
+    # ── Cell state metrics ──
+    func = gs.func_mask
+    m['n_attached_total'] = float(np.sum(gs.n_attached[func]))
+    m['n_seeded_total'] = float(np.sum(gs.n_cells[func]))
+    m['mean_spread_frac'] = float(np.mean(gs.spread_fraction[func])) if np.any(func) else 0.0
+    m['mean_fa_maturity'] = float(np.mean(gs.fa_maturity[func])) if np.any(func) else 0.0
+    m['n_overcrowded_total'] = float(np.sum(gs.n_overcrowded[func]))
+
     return m
 
 
@@ -590,30 +787,36 @@ def run(p=None, seed=42):
         m['disp_func'] = df; m['disp_inert'] = di
         hist.append(m)
         snaps.append((pf.copy(), pi.copy(), pv.copy(),
-                       gs.x.copy(), gs.y.copy(), gs.r.copy(), gs.gtype.copy()))
+                       gs.x.copy(), gs.y.copy(), gs.r.copy(), gs.gtype.copy(),
+                       gs.n_attached.copy(), gs.spread_fraction.copy(),
+                       gs.fa_maturity.copy(), gs.n_overcrowded.copy()))
         return m
 
-    # Initial save
+    # Initial save (t=0, no cell attachment yet)
+    update_cell_state(gs, p, 0.0)
     F0 = compute_forces(gs, p, rng)
     m = save(0.0, F0)
     print(f"\n  {'t(h)':>6} {'f_cl':>5} {'f_lf':>6} {'v_cl':>5} "
-          f"{'tissue':>7} {'bridges':>7} {'disp_f':>7} {'δ/R%':>6} {'AreaCon':>7}")
+          f"{'tissue':>7} {'bridges':>7} {'attach':>7} {'spread':>6} "
+          f"{'FA_mat':>6} {'disp_f':>7}")
     print(f"  {0:6.1f} {m['func_nc']:5d} {m['func_lf']:6.2f} {m['void_nc']:5d} "
-          f"{m['tissue_frac']:7.3f} {m['n_bridges']:7d} {m['disp_func']:7.1f} "
-          f"{m['max_overlap_ratio']*100:6.1f} {m['area_conservation']:7.4f}")
+          f"{m['tissue_frac']:7.3f} {m['n_bridges']:7d} "
+          f"{m['n_attached_total']:7.0f} {m['mean_spread_frac']:6.2f} "
+          f"{m['mean_fa_maturity']:6.2f} {m['disp_func']:7.1f}")
 
     wall_t0 = timer.time()
     t = 0.0
     for s in range(1, n_steps + 1):
-        F = step(gs, p, rng)
         t += p.dt
+        F = step(gs, p, rng, t)
 
         if s % p.save_every == 0:
             m = save(t, F)
             print(f"  {t:6.1f} {m['func_nc']:5d} {m['func_lf']:6.2f} "
                   f"{m['void_nc']:5d} {m['tissue_frac']:7.3f} "
-                  f"{m['n_bridges']:7d} {m['disp_func']:7.1f} "
-                  f"{m['max_overlap_ratio']*100:6.1f} {m['area_conservation']:7.4f}")
+                  f"{m['n_bridges']:7d} {m['n_attached_total']:7.0f} "
+                  f"{m['mean_spread_frac']:6.2f} {m['mean_fa_maturity']:6.2f} "
+                  f"{m['disp_func']:7.1f}")
 
     elapsed = timer.time() - wall_t0
     print(f"\n  Done in {elapsed:.1f}s ({n_steps} steps, {gs.N} granules)")
@@ -686,14 +889,14 @@ def plot_fields(snaps, hist, p, indices=None):
 
 def plot_timeseries(hist, p):
     t = [h['time'] for h in hist]
-    fig, ax = plt.subplots(2, 3, figsize=(16, 9))
+    fig, ax = plt.subplots(3, 3, figsize=(16, 13))
 
     # (0,0) Cluster counts
     ax[0,0].plot(t, [h['func_nc'] for h in hist], 'C1-o', ms=3, label='Functional')
     ax[0,0].plot(t, [h['void_nc'] for h in hist], 'C2-s', ms=3, label='Void')
     ax[0,0].plot(t, [h['inert_nc'] for h in hist], 'C0-^', ms=3, label='Inert')
     ax[0,0].set(xlabel='time (h)', ylabel='# clusters',
-                title='Cluster Count (↓ = coalescence)')
+                title='Cluster Count')
     ax[0,0].legend()
 
     # (0,1) Largest cluster fraction
@@ -728,6 +931,31 @@ def plot_timeseries(hist, p):
     ax[1,2].plot(t, [h['func_max_area'] for h in hist], 'C1-', lw=2)
     ax[1,2].set(xlabel='time (h)', ylabel='area (µm²)',
                 title='Largest Functional Cluster Area')
+
+    # (2,0) Cell attachment
+    ax[2,0].plot(t, [h['n_attached_total'] for h in hist], 'C4-', lw=2,
+                 label='Attached')
+    ax[2,0].plot(t, [h['n_seeded_total'] for h in hist], 'C7--', lw=1,
+                 label='Seeded')
+    ax[2,0].axvline(p.t_attach_onset, ls=':', c='gray', lw=0.8, label='Attach onset')
+    ax[2,0].set(xlabel='time (h)', ylabel='# cells',
+                title='Cell Attachment')
+    ax[2,0].legend()
+
+    # (2,1) Spread fraction & FA maturity
+    ax[2,1].plot(t, [h['mean_spread_frac'] for h in hist], 'C5-', lw=2,
+                 label='Spread fraction')
+    ax[2,1].plot(t, [h['mean_fa_maturity'] for h in hist], 'C6--', lw=2,
+                 label='FA maturity')
+    ax[2,1].set(xlabel='time (h)', ylabel='fraction [0–1]',
+                title='Cell Spreading & Focal Adhesion')
+    ax[2,1].set_ylim(-0.05, 1.05)
+    ax[2,1].legend()
+
+    # (2,2) Overcrowding
+    ax[2,2].plot(t, [h['n_overcrowded_total'] for h in hist], 'C3-', lw=2)
+    ax[2,2].set(xlabel='time (h)', ylabel='# cells',
+                title='Overcrowded Cells (crawling on others)')
 
     plt.tight_layout(); return fig
 
@@ -765,7 +993,11 @@ if __name__ == '__main__':
     print(f"  R_func={p.R_func_mean:.0f}±{p.R_func_std:.0f} µm, "
           f"R_inert={p.R_inert_mean:.0f}±{p.R_inert_std:.0f} µm")
     print(f"  Cells/granule={p.n_cells_per_granule}, "
-          f"k_cell={p.k_cell}, L_max={p.L_max} µm")
+          f"d_cell={p.cell_diameter} µm, h_spread={p.cell_height_spread} µm")
+    print(f"  Motor-clutch: {p.n_motors} motors × {p.F_motor_stall*1e3:.0f} pN, "
+          f"{p.n_clutches} clutches, k_c={p.k_clutch} nN/µm")
+    print(f"  Attach onset={p.t_attach_onset} h, "
+          f"sense dist={p.cell_sense_distance} µm")
     print_stiffness_info(p)
     print(f"  Simulation: {p.t_total:.0f} h, dt={p.dt:.2f} h")
 
@@ -797,3 +1029,7 @@ if __name__ == '__main__':
     print(f"  Contacts: {hf['n_contacts']}, max δ/R = {hf['max_overlap_ratio']*100:.1f}%")
     print(f"  Area conservation: {hf['area_conservation']:.4f} "
           f"(overlap area = {hf['total_overlap_area']:.1f} µm²)")
+    print(f"  Cell state:")
+    print(f"    Attached: {hf['n_attached_total']:.0f} / {hf['n_seeded_total']:.0f}")
+    print(f"    Spread: {hf['mean_spread_frac']:.0%}, FA maturity: {hf['mean_fa_maturity']:.0%}")
+    print(f"    Overcrowded: {hf['n_overcrowded_total']:.0f}")

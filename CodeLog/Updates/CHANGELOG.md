@@ -8,6 +8,60 @@ MINOR tracks feature additions and improvements.
 
 ---
 
+## [V1.2] - 2026-03-14
+
+### Added
+- **Cell lifecycle model**: Cells now follow a biologically motivated lifecycle:
+  seeded (spheres, d=20 um) -> attached (~3 h onset, sigmoidal kinetics) ->
+  spread (volume-conserving ellipsoid, ~5 um tall) -> bridging (motor-clutch).
+- **Motor-clutch force model** (Chan & Odde 2008): Replaces the simple linear
+  spring (`k_cell * extension`) with a substrate-stiffness-dependent force model.
+  Force per cell depends on `E_modulus` through `F_mc = F_stall * k_sub/(k_sub + k_opt)
+  * engagement * FA_maturity`, giving ~2 nN on 1 kPa and ~21 nN on 100 kPa substrates.
+- **Projected-area cell placement**: Cell capacity per granule is now computed from
+  the cell's projected area (`pi*(d/2)^2` for spheres) divided into the granule's
+  projected area (`pi*R^2 * coverage`), not circumference.
+- **Cell state arrays in `GranuleSystem`**: `n_attached`, `spread_fraction`,
+  `fa_maturity`, `n_overcrowded` track per-granule cell state each timestep.
+- **Cell geometry functions**: `cell_projected_area()` computes the footprint as
+  cells transition from sphere to oblate ellipsoid (volume conserved).
+  `max_cells_on_granule()` derives capacity from projected area ratio.
+- **`update_cell_state()`**: Per-step cell state evolution with sigmoidal
+  attachment kinetics, stiffness-dependent spreading rate, FA maturation,
+  and overcrowding detection (excess cells crawl on each other).
+- **`motor_clutch_force()`**: Steady-state motor-clutch force per cell with
+  correct unit handling (kPa * um = nN/um for substrate stiffness).
+- **Cell state metrics**: `n_attached_total`, `n_seeded_total`, `mean_spread_frac`,
+  `mean_fa_maturity`, `n_overcrowded_total` tracked at each save step.
+- **Cell state in snapshots**: Snapshots now include `n_attached`, `spread_fraction`,
+  `fa_maturity`, `n_overcrowded` arrays for post-processing.
+- **Cell state timeseries plots**: Third row in `plot_timeseries()` shows
+  attachment, spreading/FA maturity, and overcrowding evolution.
+- **New parameters in `Params`**: `cell_height_spread`, `t_attach_onset`,
+  `t_attach_half`, `t_spread_duration`, `fa_maturation_rate`, `n_motors`,
+  `F_motor_stall`, `n_clutches`, `k_clutch`, `k_on_clutch`, `k_off_clutch`,
+  `F_bond`, `cell_sense_distance`.
+
+### Changed
+- **`cell_diameter`**: Default changed from 15.0 to 20.0 um (measured cell diameter).
+- **`L_rest`**: Default changed from 12.0 to 5.0 um (spread cell thickness).
+- **Cell bridging force**: Only attached, non-overcrowded cells can form bridges.
+  Bridge force is `F_mc * n_bridges` (motor-clutch, not spring-extension).
+- **Bridge metric**: `n_bridges` now only counts pairs where both granules have
+  attached cells, matching the force computation.
+- **`L_max`**: Now a derived property (`= cell_sense_distance`) instead of an
+  independent parameter.
+- **Console output**: Status table now shows `attach`, `spread`, `FA_mat`
+  columns instead of `delta/R%` and `AreaCon`.
+- **`step()` signature**: Now takes `t` (simulation time) to drive cell state.
+- **`plot_timeseries()`**: Expanded from 2x3 to 3x3 grid with cell state row.
+
+### Removed
+- `k_cell` parameter (replaced by motor-clutch model).
+- `L_max` as independent parameter (now derived from `cell_sense_distance`).
+
+---
+
 ## [V1.1] - 2026-03-14
 
 ### Added
