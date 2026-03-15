@@ -11,6 +11,11 @@ results/
 *.gif
 *.mp4
 
+# HPC generated files
+hpc/trial_list.txt
+hpc/run_all_trials.slurm
+slurm_logs/
+
 # Python
 __pycache__/
 *.pyc

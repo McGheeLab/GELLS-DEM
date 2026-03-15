@@ -29,11 +29,41 @@ def load_trial_json(path: str) -> dict:
     """
     Load a Trial JSON and return a dict of Params field overrides.
 
-    Maps the legacy nested trial format to current Params fields.
+    Supports two formats:
+      - **Flat (V1.4+)**: Keys are Params field names directly.
+        Detected by `"_format": "flat"` or any top-level Params key.
+      - **Legacy (V1.3)**: Nested sections (domain, mechanics, shape, etc.).
+        Mapped to Params fields via explicit translation.
     """
     with open(path) as f:
         t = json.load(f)
 
+    # ── Detect format ──
+    params_fields = {f for f in vars(Params()) if not f.startswith('_')}
+    is_flat = (t.get("_format") == "flat" or
+               any(k in params_fields for k in t if not k.startswith('_')))
+
+    if is_flat:
+        return _load_flat(t, params_fields)
+    else:
+        return _load_legacy(t)
+
+
+def _load_flat(t: dict, params_fields: set) -> dict:
+    """Load flat-format Trial JSON: keys map directly to Params fields."""
+    overrides = {}
+    for k, v in t.items():
+        if k.startswith('_'):
+            continue  # skip metadata keys (_name, _description, _format)
+        if k in params_fields:
+            overrides[k] = v
+        else:
+            print(f"  Warning: Trial JSON key '{k}' is not a Params field (ignored)")
+    return overrides
+
+
+def _load_legacy(t: dict) -> dict:
+    """Load legacy nested Trial JSON format (V1.3 and earlier)."""
     overrides = {}
 
     # Domain
@@ -101,26 +131,33 @@ def load_trial_json(path: str) -> dict:
         s = t["shape"]
         if "enabled" in s:
             overrides["shape_enabled"] = bool(s["enabled"])
-        if "aspect_ratio_func_mean" in s:
-            overrides["aspect_ratio_func_mean"] = s["aspect_ratio_func_mean"]
-        if "aspect_ratio_func_std" in s:
-            overrides["aspect_ratio_func_std"] = s["aspect_ratio_func_std"]
-        if "aspect_ratio_inert_mean" in s:
-            overrides["aspect_ratio_inert_mean"] = s["aspect_ratio_inert_mean"]
-        if "aspect_ratio_inert_std" in s:
-            overrides["aspect_ratio_inert_std"] = s["aspect_ratio_inert_std"]
-        if "blockiness_func_mean" in s:
-            overrides["blockiness_func_mean"] = s["blockiness_func_mean"]
-        if "blockiness_func_std" in s:
-            overrides["blockiness_func_std"] = s["blockiness_func_std"]
-        if "blockiness_inert_mean" in s:
-            overrides["blockiness_inert_mean"] = s["blockiness_inert_mean"]
-        if "blockiness_inert_std" in s:
-            overrides["blockiness_inert_std"] = s["blockiness_inert_std"]
-        if "drag_scale_rot" in s:
-            overrides["drag_scale_rot"] = s["drag_scale_rot"]
-        if "omega_max" in s:
-            overrides["omega_max"] = s["omega_max"]
+        for key in ("aspect_ratio_func_mean", "aspect_ratio_func_std",
+                     "aspect_ratio_inert_mean", "aspect_ratio_inert_std",
+                     "blockiness_func_mean", "blockiness_func_std",
+                     "blockiness_inert_mean", "blockiness_inert_std",
+                     "drag_scale_rot", "omega_max",
+                     "aspect_ratio_c_func_mean", "aspect_ratio_c_func_std",
+                     "aspect_ratio_c_inert_mean", "aspect_ratio_c_inert_std",
+                     "blockiness_n2_func_mean", "blockiness_n2_func_std",
+                     "blockiness_n2_inert_mean", "blockiness_n2_inert_std"):
+            if key in s:
+                overrides[key] = s[key]
+
+    # Simulation mode (V1.4)
+    if "mode" in t:
+        overrides["mode"] = t["mode"]
+
+    # 3D domain depth (V1.4)
+    if "domain" in t:
+        d = t["domain"]
+        if "Lz_um" in d:
+            overrides["Lz"] = d["Lz_um"]
+
+    # 3D grid resolution (V1.4)
+    if "output" in t:
+        o = t["output"]
+        if "Ngrid_3d" in o:
+            overrides["Ngrid_3d"] = o["Ngrid_3d"]
 
     return overrides
 
@@ -174,7 +211,13 @@ def main():
     print(f"  GELLS-DEM: Headless HPC Run{trial_label}")
     print("=" * 65)
     print(f"  Output dir: {os.path.abspath(out_dir)}")
-    print(f"  Domain: {p.Lx:.0f} x {p.Ly:.0f} um")
+    mode = getattr(p, 'mode', '2D')
+    if mode == '3D' or mode == '2D-slice':
+        print(f"  Mode: {mode}")
+        print(f"  Domain: {p.Lx:.0f} x {p.Ly:.0f} x {p.Lz:.0f} um")
+    else:
+        print(f"  Mode: 2D")
+        print(f"  Domain: {p.Lx:.0f} x {p.Ly:.0f} um")
     print(f"  E_modulus={p.E_modulus} kPa, t_total={p.t_total} h, dt={p.dt} h")
     if hasattr(p, 'shape_enabled') and p.shape_enabled:
         print(f"  Shape: ON (AR_func={p.aspect_ratio_func_mean}±{p.aspect_ratio_func_std}, "
@@ -196,6 +239,13 @@ def main():
 
     fig4 = plot_composite(snaps, hist, p)
     fig4.savefig(os.path.join(out_dir, "composite.png"), dpi=150, bbox_inches='tight')
+
+    # V1.4 visualization scripts
+    import viz_compaction, viz_percolation, viz_movies, viz_phases
+    viz_compaction.run_all(hist, snaps=snaps, outdir=out_dir)
+    viz_percolation.run_all(hist, outdir=out_dir)
+    viz_movies.run_all(snaps, hist, p, outdir=out_dir)
+    viz_phases.run_all(hist, snaps=snaps, p=p, outdir=out_dir)
 
     plt.close('all')
 

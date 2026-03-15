@@ -1,4 +1,11 @@
 """
+DEPRECATED — Use the V1.4 visualization scripts instead:
+  viz_compaction.py, viz_percolation.py, viz_movies.py, viz_phases.py
+
+These are called automatically by new_dem_0.py, run_all_trials.py,
+and run_hpc_headless.py. This file is retained for legacy compatibility only.
+
+----------------------------------------------------------------------
 Unified Post-Processing for Granular Hydrogel Simulations
 ==========================================================
 Reads ONLY from disk:  *_frame_*.json  +  *_history.json

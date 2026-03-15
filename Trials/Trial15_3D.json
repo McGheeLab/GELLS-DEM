@@ -1,0 +1,77 @@
+{
+    "_name": "trial_3D_compaction_001",
+    "_description": "3D volumetric compaction study with superellipsoid granules",
+    "_format": "flat",
+
+    "mode": "3D",
+
+    "Lx": 800.0,
+    "Ly": 800.0,
+    "Lz": 500.0,
+
+    "R_func_mean": 40.0,
+    "R_func_std": 5.0,
+    "R_inert_mean": 60.0,
+    "R_inert_std": 8.0,
+
+    "phi_f_target": 0.35,
+    "phi_i_target": 0.35,
+
+    "E_modulus": 10.0,
+    "poisson_ratio": 0.45,
+
+    "tau_0_ii": 50.0,
+    "tau_0_if": 500.0,
+    "tau_0_ff": 2000.0,
+    "friction_v_ref": 1.0,
+
+    "W_adh_ii": 0.0005,
+    "W_adh_if": 0.001,
+    "W_adh_ff": 0.002,
+
+    "eta": 1e-3,
+    "drag_scale": 0.05,
+    "T_active": 5.0,
+
+    "n_cells_per_granule": 8,
+    "cell_diameter": 20.0,
+    "cell_height_spread": 5.0,
+    "cell_coverage": 0.4,
+    "cell_sense_distance": 50.0,
+    "F_max_per_cell": 100.0,
+
+    "n_motors": 50,
+    "F_motor_stall": 0.5,
+    "n_clutches": 75,
+    "k_clutch": 5.0,
+
+    "shape_enabled": true,
+    "aspect_ratio_func_mean": 1.2,
+    "aspect_ratio_func_std": 0.15,
+    "aspect_ratio_inert_mean": 1.1,
+    "aspect_ratio_inert_std": 0.1,
+    "blockiness_func_mean": 2.5,
+    "blockiness_func_std": 0.3,
+    "blockiness_inert_mean": 2.2,
+    "blockiness_inert_std": 0.2,
+
+    "aspect_ratio_c_func_mean": 1.0,
+    "aspect_ratio_c_func_std": 0.1,
+    "aspect_ratio_c_inert_mean": 1.0,
+    "aspect_ratio_c_inert_std": 0.05,
+    "blockiness_n2_func_mean": 2.5,
+    "blockiness_n2_func_std": 0.3,
+    "blockiness_n2_inert_mean": 2.2,
+    "blockiness_n2_inert_std": 0.2,
+
+    "dt": 0.5,
+    "t_total": 48.0,
+    "save_every_h": 1.0,
+    "v_max": 20.0,
+
+    "Ngrid_3d": 80,
+    "interface_width": 3.0,
+    "boundary_exclusion": 0.2,
+    "packing_gap": 0.0,
+    "packing_settle_steps": 200
+}

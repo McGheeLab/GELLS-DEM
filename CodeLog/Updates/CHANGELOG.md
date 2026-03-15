@@ -8,6 +8,138 @@ MINOR tracks feature additions and improvements.
 
 ---
 
+## [V1.4.1] - 2026-03-14
+
+### Added
+- **Packing settle phase**: After RSA placement, `_settle_packing_2d()` and
+  `_settle_packing_3d()` run isotropic compression micro-steps (centripetal
+  attraction + Hertz repulsion) to bring granules into contact. Controlled by
+  `Params.packing_settle_steps` (default 200).
+- **Boundary exclusion zone**: `Params.boundary_exclusion` (default 0.2) specifies
+  the fraction of the domain excluded from each edge when computing metrics. Only
+  granules and field voxels in the inner region are used for connectivity, porosity,
+  permeability, and compaction metrics.
+- **Flat Trial JSON format (V1.4+)**: Trial configs can now use a flat key-value
+  format where keys map directly to `Params` field names. Detected by `"_format": "flat"`
+  or presence of Params field names at top level. Legacy nested format still supported.
+- **New Params fields**: `packing_gap` (default 0.0 µm), `boundary_exclusion`
+  (default 0.2), `packing_settle_steps` (default 200).
+- **Example Trial configs**: `Trial15_3D.json`, `Trial16_3D.json` (flat 3D),
+  `Trial17_2D.json` (flat 2D).
+- **HPC result sync script**: `hpc/sync_results.py` — standalone script to check
+  job status and rsync results from the cluster. Supports `--list-only` flag.
+
+### Changed
+- **Packing gap**: Default changed from 2.0 µm to 0.0 µm (`Params.packing_gap`).
+  Granules now start in contact rather than with artificial spacing.
+- **Seed handling**: `run()` default seed changed from 42 to `None` (random).
+  `run_all_trials.py` default `SEED = None`. Each run produces a unique packing.
+  For HPC, a random seed is generated once and embedded in the SLURM script.
+- **`load_trial_json()`**: Now auto-detects flat vs legacy JSON format. Flat format
+  maps keys directly to Params fields; unrecognized keys produce a warning.
+- **`compute_metrics()`**: All field-based metrics (phi means, connectivity, porosity,
+  compaction ratio, Kozeny-Carman) now computed on the inner region after boundary
+  exclusion. Reports `boundary_exclusion` and `n_granules_inner` in metrics dict.
+- **Legacy Trial configs removed**: Deleted Trial1–Trial12 (legacy nested format).
+  Replaced with Trial15–17 using flat format.
+
+### Fixed (HPC Best Practices Audit)
+- **`squeue -r` for array jobs**: All `squeue` calls now use `-r` flag to expand
+  array sub-tasks into individual rows. Without `-r`, `squeue` shows parent array
+  job as single "R" line while any sub-task runs, preventing completion detection.
+- **Removed `--mem` from SLURM directives**: Puma allocates 5 GB/CPU automatically
+  via `--cpus-per-task`. Specifying both `--mem` and `--cpus-per-task` can cause
+  invalid resource requests or redirect to high-memory queues.
+- **`slurm_logs/` directory**: SLURM opens output files before script body executes.
+  Directory is now created during repo sync (`_sync_repo_to_cluster`) instead of
+  inside the script body.
+- **`$HOME` in SLURM scripts**: `venv_path` and `repo_path` now use `$HOME` instead
+  of `~` inside generated SLURM script content. `~` is kept for SSH/rsync commands
+  where the remote shell expands it.
+- **Trial validation**: Array job scripts now validate that `$TRIAL` is non-empty
+  and exit with error if no trial found for the array task ID.
+- **`seff` reminder**: All job completion messages now remind to run `seff JOBID`
+  for CPU/memory efficiency checking.
+- **Per-task progress tracking**: `_wait_and_sync()` rewritten to show
+  `[N done, M running, K pending]` with incremental result sync.
+- **Dead code cleanup**: Removed unused `mem_gb` default from `generate_hpc_scripts.py`.
+
+---
+
+## [V1.4] - 2026-03-14
+
+### Added
+- **Full 3D volumetric simulation**: Three simulation modes controlled by `Params.mode`:
+  `"2D"` (pure V1.3 behavior), `"2D-slice"` (generate 3D packing, slice at z-midplane,
+  run 2D simulation), `"3D"` (full 3D overdamped particle dynamics with volumetric
+  phase fields).
+- **Superellipsoid granule shapes**: 3D analog of superellipses —
+  `(|x/a|^n1 + |y/b|^n1)^(n2/n1) + |z/c|^n2 = 1` with equatorial blockiness (n1),
+  meridional blockiness (n2), and three semi-axes (a, b, c). Spheres are the special
+  case a=b=c, n1=n2=2.
+- **Superellipsoid geometry utilities**: `superellipsoid_volume()` (Jaklic & Leonardis 2000),
+  `superellipsoid_point()`, `superellipsoid_normal()`, `superellipsoid_curvature_radii()`,
+  `superellipsoid_implicit()`, `superellipsoid_implicit_world()`, `superellipsoid_mesh()`.
+- **Quaternion orientation system**: Unit quaternion (w,x,y,z) representation for 3D
+  rotational state. Utilities: `quat_multiply()`, `quat_conjugate()`, `quat_normalize()`,
+  `quat_rotate()`, `quat_rotate_inv()`, `quat_to_rotation_matrix()`, `quat_from_axis_angle()`,
+  `quat_random()`, `quat_integrate()`.
+- **3D packing generator**: `generate_packing_3d()` — random sequential addition in
+  Lx × Ly × Lz box with volume-preserving semi-axis scaling, random quaternion
+  orientation, and bounding-sphere overlap checks.
+- **3D contact detection**: `find_contact_spheres_3d()` for sphere fast-path,
+  `find_contact_superellipsoids_3d()` for general superellipsoid–superellipsoid contact
+  via 4-unknown Newton-Raphson (eta_i, omega_i, eta_j, omega_j).
+- **3D wall contact**: `find_contact_wall_3d()` for 6 wall faces with Hertzian response.
+- **3D force computation**: `compute_forces_3d()` with (N,3) force array, (N,3) torque
+  array, 3D tangential friction, 3D cell bridging, 3D active noise.
+- **3D integration**: Quaternion rotational integration via `quat_integrate()`,
+  3D translational overdamped Euler, 6-face wall clamp.
+- **3D volumetric rendering**: `render_fields_3d()` on Ngrid_3d³ grid with
+  bounding-box clipping per granule for performance.
+- **2D-slice mode**: `slice_superellipsoid_z()` slices a 3D superellipsoid at z-midplane
+  to produce a 2D superellipse cross-section. `generate_packing_2d_slice()` generates
+  3D packing then slices for 2D simulation.
+- **Transport metrics**: `kozeny_carman_permeability()` (K = ε³d²/[180(1−ε)²]),
+  `rcp_fraction_superellipsoid()` (φ_RCP ~ 0.64 + 0.08*(AR−1)), porosity, d_grain_mean,
+  phi_solid, phi_RCP, compaction_ratio, Da_number added to `compute_metrics()`.
+- **Visualization script: `viz_compaction.py`**: Void fraction, packing fraction,
+  compaction ratio, void size distribution, stacked phase evolution.
+- **Visualization script: `viz_percolation.py`**: Kozeny-Carman permeability, Darcy flow
+  rate, porosity with RCP reference, dimensionless groups dashboard (2×3: K, compaction
+  ratio, Darcy number, Peclet, Reynolds, porosity ratio), void connectivity.
+- **Visualization script: `viz_movies.py`**: Rotating 3D isosurface GIF, time-lapse
+  compaction, z-sweep cross-section, composite 2×2. PyVista primary, matplotlib fallback.
+- **Visualization script: `viz_phases.py`**: Three-panel isosurface strip at selected
+  times, phase volume fractions vs time, tri-plane evolution (XY/XZ/YZ midplanes),
+  phase interface area vs time.
+- **Example 3D trial config**: `Trials/Trial13_3D.json` with `"mode": "3D"` and
+  3D-specific fields (Lz_um, aspect_ratio_c_range, blockiness_n2_range, Ngrid_3d).
+- **Optional Numba JIT**: `@njit` decorator for Newton-Raphson solver and geometry
+  functions. Falls back to pure Python/NumPy when Numba unavailable. Controlled by
+  `Params.use_numba`.
+- **New `Params` fields**: `mode`, `Lz`, `aspect_ratio_c_func/inert_mean/std`,
+  `blockiness_n2_func/inert_mean/std`, `omega_max_3d`, `Ngrid_3d`, `use_numba`.
+- **New `GranuleSystem` arrays**: `z`, `vz`, `c`, `n1`, `n2`, `quat` (N,4),
+  `omega_3d` (N,3), mode-aware `positions()`, `is_3d` property.
+
+### Changed
+- **`GranuleSystem`** is now mode-aware: stores `z`, `vz`, `quat`, `omega_3d` in 3D
+  mode; `theta`, `omega` in 2D mode. `r_bound = max(a, b, c)` in 3D.
+- **`compute_forces()`** dispatches to `compute_forces_3d()` in 3D mode. Returns
+  `(F, torques)` where F is (N,3) and torques is (N,3) in 3D.
+- **`step()`** dispatches to 3D integration (quaternion rotation, 6-face clamp) in 3D mode.
+- **`render_fields()`** dispatches to `render_fields_3d()` in 3D mode.
+- **`compute_metrics()`** adds transport metrics (porosity, K, compaction_ratio, etc.)
+  in all modes.
+- **`run()`** dispatches to mode-appropriate packing generator. Snapshots are now dicts
+  (not tuples) with named keys.
+- **`run_hpc_headless.py`** supports `mode`, `Lz`, `Ngrid_3d` from Trial JSON configs.
+- **Console output** shows transport metrics (porosity, K, compaction ratio) per save step.
+- **`compute_displacement()`** handles 3D positions (z0 parameter).
+
+---
+
 ## [V1.3] - 2026-03-14
 
 ### Added

@@ -4,23 +4,23 @@
 #SBATCH --partition=standard
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=16G
+#SBATCH --cpus-per-task=4             # Puma: 5 GB memory per CPU (4 CPUs = 20 GB)
 #SBATCH --time=04:00:00
-#SBATCH --output=gells-dem_%j.out
-#SBATCH --error=gells-dem_%j.err
+#SBATCH --output=slurm_logs/%x_%j.out
+#SBATCH --error=slurm_logs/%x_%j.err
+# NOTE: Do NOT specify both --mem and --cpus-per-task (UA HPC docs).
+#       Puma allocates 5 GB/CPU automatically.
 
 # ── Load Python and activate virtual environment ──
 module load python/3.11/3.11.4
-
-# Activate the project venv (create it first with setup_hpc_env.sh)
-source ~/gells-dem-env/bin/activate
+source $HOME/gells-dem-env/bin/activate
 
 # ── Use non-interactive matplotlib backend (no display on HPC) ──
 export MPLBACKEND=Agg
 
 # ── Run simulation ──
-cd ~/GELLS-DEM
-python3 new_dem_0.py
+cd $HOME/GELLS-DEM
+python3 run_hpc_headless.py --output-dir results
 
-echo "Job finished at $(date)"
+echo "Job $SLURM_JOB_ID finished at $(date)"
+echo "Check efficiency: seff $SLURM_JOB_ID"

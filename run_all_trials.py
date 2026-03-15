@@ -2,22 +2,27 @@
 """
 Run all trials in the Trials/ folder.
 
-Works both locally and on HPC:
-  - Local:  python3 run_all_trials.py
-  - HPC:    python3 run_all_trials.py --hpc
-  - HPC:    python3 run_all_trials.py --hpc --config hpc/Alex.json
-
-Local mode runs each trial sequentially in-process.
-HPC mode generates and submits a SLURM array job (one task per trial).
+Run modes (set RUN_MODE below):
+  1 = Local   — run each trial sequentially in-process
+  2 = HPC     — generate SLURM scripts only (print submit command)
+  3 = HPC     — generate SLURM scripts and auto-submit via sbatch
 """
 
-import argparse
+# ── USER CONFIGURATION ──────────────────────────────────────────────
+RUN_MODE = 3                        # 1 = Local, 2 = HPC, 3 = HPC (custom config)
+TRIALS_DIR = "Trials"               # directory containing trial .json files
+OUTPUT_DIR = "results/trials"       # base output directory
+SEED = None                         # random seed (None = random each run)
+HPC_CONFIG = "hpc/Alex.json"       # HPC user config (used by modes 2 and 3)
+# ────────────────────────────────────────────────────────────────────
+
 import glob
 import json
 import os
 import re
 import subprocess
 import sys
+import time
 
 
 def find_trials(trials_dir: str) -> list:
@@ -34,7 +39,7 @@ def natural_sort_key(path: str):
             for c in re.split(r'(\d+)', name)]
 
 
-def run_local(trials: list, output_base: str, seed: int):
+def run_local(trials: list, output_base: str, seed=None):
     """Run all trials sequentially in the current process."""
     # Import here so matplotlib backend is set
     import matplotlib
@@ -45,6 +50,7 @@ def run_local(trials: list, output_base: str, seed: int):
         Params, run, plot_granules, plot_fields,
         plot_timeseries, plot_composite, print_stiffness_info
     )
+    import viz_compaction, viz_percolation, viz_movies, viz_phases
     import matplotlib.pyplot as plt
 
     os.makedirs(output_base, exist_ok=True)
@@ -65,14 +71,19 @@ def run_local(trials: list, output_base: str, seed: int):
             if hasattr(p, k):
                 setattr(p, k, type(getattr(p, k))(v))
 
-        print(f"  Domain: {p.Lx:.0f} x {p.Ly:.0f} um")
+        mode = getattr(p, 'mode', '2D')
+        if mode == '3D' or mode == '2D-slice':
+            print(f"  Mode: {mode}")
+            print(f"  Domain: {p.Lx:.0f} x {p.Ly:.0f} x {p.Lz:.0f} um")
+        else:
+            print(f"  Domain: {p.Lx:.0f} x {p.Ly:.0f} um")
         print(f"  E_modulus={p.E_modulus} kPa, t_total={p.t_total} h")
         print_stiffness_info(p)
 
         # Run
         hist, snaps, p, gs = run(p, seed=seed)
 
-        # Save figures
+        # Save built-in figures
         for plot_fn, fname in [
             (plot_granules, "granules.png"),
             (plot_fields, "fields.png"),
@@ -84,6 +95,12 @@ def run_local(trials: list, output_base: str, seed: int):
             else:
                 fig = plot_fn(snaps, hist, p)
             fig.savefig(os.path.join(out_dir, fname), dpi=150, bbox_inches='tight')
+
+        # V1.4 visualization scripts
+        viz_compaction.run_all(hist, snaps=snaps, outdir=out_dir)
+        viz_percolation.run_all(hist, outdir=out_dir)
+        viz_movies.run_all(snaps, hist, p, outdir=out_dir)
+        viz_phases.run_all(hist, snaps=snaps, p=p, outdir=out_dir)
 
         plt.close('all')
 
@@ -99,8 +116,12 @@ def run_local(trials: list, output_base: str, seed: int):
     print("=" * 65)
 
 
-def run_hpc(trials: list, output_base: str, seed: int, hpc_config_path: str):
+def run_hpc(trials: list, output_base: str, seed, hpc_config_path: str):
     """Generate and submit a SLURM array job for all trials."""
+    import random as _random
+    if seed is None:
+        seed = _random.randint(0, 2**31 - 1)
+        print(f"  Using random seed: {seed}")
     with open(hpc_config_path) as f:
         hpc = json.load(f)
 
@@ -113,7 +134,12 @@ def run_hpc(trials: list, output_base: str, seed: int, hpc_config_path: str):
             f.write(os.path.basename(t) + "\n")
     print(f"Wrote {trial_list_path} ({len(trials)} trials)")
 
+    # Expand ~ to $HOME for shell compatibility in SLURM scripts
+    venv_path = hpc['venv_path'].replace('~', '$HOME')
+
     # Generate the array SLURM script
+    # NOTE: --cpus-per-task controls memory on Puma (5 GB/CPU).
+    #       Do NOT specify both --mem and --cpus-per-task (UA HPC docs).
     slurm_script = f"""\
 #!/bin/bash
 #SBATCH --job-name=gells-trials
@@ -122,14 +148,13 @@ def run_hpc(trials: list, output_base: str, seed: int, hpc_config_path: str):
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task={hpc.get('cpus', 4)}
-#SBATCH --mem={hpc.get('mem_gb', 16)}G
 #SBATCH --time={hpc.get('walltime', '04:00:00')}
 #SBATCH --array=1-{len(trials)}
-#SBATCH --output=trials_%A_%a.out
-#SBATCH --error=trials_%A_%a.err
+#SBATCH --output=slurm_logs/%x_%A_%a.out
+#SBATCH --error=slurm_logs/%x_%A_%a.err
 
 module load {hpc['python_module']}
-source {hpc['venv_path']}/bin/activate
+source {venv_path}/bin/activate
 export MPLBACKEND=Agg
 
 cd {repo_path}
@@ -138,7 +163,13 @@ cd {repo_path}
 TRIAL=$(sed -n "${{SLURM_ARRAY_TASK_ID}}p" hpc/trial_list.txt)
 TRIAL_NAME="${{TRIAL%.json}}"
 
+if [ -z "$TRIAL" ]; then
+    echo "ERROR: No trial found for array task $SLURM_ARRAY_TASK_ID"
+    exit 1
+fi
+
 echo "=== Array task $SLURM_ARRAY_TASK_ID: $TRIAL ==="
+echo "Node: $(hostname), CPUs: $SLURM_CPUS_ON_NODE, Start: $(date)"
 
 python3 run_hpc_headless.py \\
     --trial "Trials/$TRIAL" \\
@@ -155,34 +186,144 @@ echo "Task $SLURM_ARRAY_TASK_ID ($TRIAL) finished at $(date)"
 
     print(f"\nSLURM array job: {len(trials)} tasks")
     print(f"Each trial runs independently on its own node.")
-    print(f"\nTo submit:")
-    print(f"  sbatch {slurm_path}")
-    print(f"\nOr to submit now from your local machine:")
-    print(f"  rsync this repo to the cluster, then:")
-    print(f"  ssh {hpc['netid']}@hpc.arizona.edu")
-    print(f"  cd {repo_path} && sbatch hpc/run_all_trials.slurm")
-    print(f"\nMonitor: squeue --user {hpc['netid']}")
     print(f"Results will be in {output_base}/<TrialName>/")
+
+    return slurm_path
+
+
+def _sync_repo_to_cluster(hpc_config_path: str):
+    """Rsync local repo to cluster so HPC has latest code and trial configs."""
+    with open(hpc_config_path) as f:
+        hpc = json.load(f)
+    netid = hpc["netid"]
+    repo_path = hpc["repo_path"]
+    filexfer = f"{netid}@filexfer.hpc.arizona.edu"
+    local_repo = os.path.dirname(os.path.abspath(__file__))
+
+    print("  Syncing repo to cluster...")
+    # Ensure remote directories exist (filexfer has shared storage access)
+    subprocess.run(
+        ["ssh", filexfer, f"mkdir -p {repo_path} {repo_path}/slurm_logs"],
+        capture_output=True, timeout=30)
+    # Rsync via filexfer (UA HPC docs: always use filexfer for transfers)
+    result = subprocess.run([
+        "rsync", "-ravz", "--delete",
+        "--exclude", "__pycache__",
+        "--exclude", ".git",
+        "--exclude", "*.pyc",
+        "--exclude", "results/",
+        "--exclude", "simulations/",
+        "--exclude", "slurm_logs/",
+        local_repo + "/",
+        f"{filexfer}:{repo_path}/"
+    ], capture_output=True, text=True, timeout=120)
+    if result.returncode == 0:
+        print("  Repo synced.")
+    else:
+        print(f"  rsync warning: {result.stderr.strip()}")
+
+
+def _wait_and_sync(netid: str, repo_path: str, job_id: str, n_tasks: int):
+    """Poll HPC array job status per-task, sync results when all done.
+
+    Uses `squeue -r` to expand array tasks so we can track individual
+    sub-job completion (UA HPC docs: -r flag shows each array element).
+    """
+    ssh_base = f"{netid}@hpc.arizona.edu"
+    poll_interval = 30
+    synced_already = False
+
+    while True:
+        time.sleep(poll_interval)
+        try:
+            # Use -r to expand array tasks into individual rows
+            r = subprocess.run(
+                ["ssh", ssh_base,
+                 f"ssh shell.hpc.arizona.edu 'squeue -r -j {job_id} -h 2>/dev/null'"],
+                capture_output=True, text=True, timeout=30)
+            output = r.stdout.strip()
+            if not output:
+                print(f"\n  All {n_tasks} tasks complete!")
+                break
+
+            # Parse individual array task lines
+            lines = output.strip().splitlines()
+            running = []
+            pending = []
+            for line in lines:
+                parts = line.split()
+                if len(parts) >= 6:
+                    task_id = parts[0]   # e.g. "21470754_1"
+                    state = parts[4]     # R, PD, CG, etc.
+                    elapsed = parts[5]
+                    if state == "R":
+                        running.append((task_id, elapsed))
+                    elif state == "PD":
+                        pending.append(task_id)
+
+            n_active = len(running) + len(pending)
+            n_done = n_tasks - n_active
+
+            status_parts = []
+            if n_done > 0:
+                status_parts.append(f"{n_done} done")
+            if running:
+                status_parts.append(f"{len(running)} running")
+            if pending:
+                status_parts.append(f"{len(pending)} pending")
+
+            # Show elapsed time from longest-running task
+            elapsed_str = ""
+            if running:
+                elapsed_str = f" ({running[0][1]})"
+
+            print(f"  [{', '.join(status_parts)}]{elapsed_str}")
+
+            # Incremental sync: when some tasks have finished, sync partial results
+            if n_done > 0 and not synced_already:
+                synced_already = True
+                print(f"  Syncing {n_done} completed results...")
+                _do_sync(netid, repo_path)
+
+        except subprocess.TimeoutExpired:
+            print(f"  (poll timed out, retrying...)")
+        except Exception as e:
+            print(f"  (poll error: {e}, retrying...)")
+
+    # Final sync
+    print(f"\n  Final sync of all results...")
+    _do_sync(netid, repo_path)
+    print(f"\n  Tip: Check resource efficiency with 'seff {job_id}' on the cluster.")
+
+
+def _do_sync(netid: str, repo_path: str):
+    """Rsync results from cluster to local."""
+    remote = f"{netid}@filexfer.hpc.arizona.edu:{repo_path}/results/"
+    local = OUTPUT_DIR
+    os.makedirs(local, exist_ok=True)
+    try:
+        result = subprocess.run(
+            ["rsync", "-avz", remote, f"{local}/"],
+            capture_output=True, text=True, timeout=300)
+        if result.returncode == 0:
+            # Count transferred files
+            lines = result.stdout.strip().splitlines()
+            n_files = sum(1 for l in lines if not l.endswith('/') and
+                         not l.startswith('sent ') and not l.startswith('total ') and
+                         not l.startswith('receiving'))
+            print(f"  Synced to {os.path.abspath(local)}/ ({n_files} files)")
+        else:
+            print(f"  rsync warning: {result.stderr.strip()}")
+    except subprocess.TimeoutExpired:
+        print(f"  Sync timed out — try: python3 hpc/sync_results.py")
+    except Exception as e:
+        print(f"  Sync failed: {e}")
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Run all Trial JSON configs in the Trials/ folder"
-    )
-    parser.add_argument("--trials-dir", default="Trials",
-                        help="Directory containing trial .json files")
-    parser.add_argument("--output-dir", default="results/trials",
-                        help="Base output directory")
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--hpc", action="store_true",
-                        help="Generate SLURM array job instead of running locally")
-    parser.add_argument("--config", default="hpc/Alex.json",
-                        help="HPC user config for --hpc mode")
-    args = parser.parse_args()
-
-    trials = find_trials(args.trials_dir)
+    trials = find_trials(TRIALS_DIR)
     if not trials:
-        print(f"No .json files found in {args.trials_dir}/")
+        print(f"No .json files found in {TRIALS_DIR}/")
         sys.exit(1)
 
     print(f"Found {len(trials)} trials:")
@@ -190,10 +331,58 @@ def main():
         print(f"  {os.path.basename(t)}")
     print()
 
-    if args.hpc:
-        run_hpc(trials, args.output_dir, args.seed, args.config)
+    if RUN_MODE == 1:
+        print("Mode 1: Running locally (sequential)\n")
+        run_local(trials, OUTPUT_DIR, SEED)
+    elif RUN_MODE == 2:
+        print(f"Mode 2: Generating HPC SLURM job (config: {HPC_CONFIG})\n")
+        slurm_path = run_hpc(trials, OUTPUT_DIR, SEED, HPC_CONFIG)
+        print(f"\nTo submit:\n  sbatch {slurm_path}")
+    elif RUN_MODE == 3:
+        print(f"Mode 3: Generating and submitting HPC SLURM job (config: {HPC_CONFIG})\n")
+        slurm_path = run_hpc(trials, OUTPUT_DIR, SEED, HPC_CONFIG)
+        # Sync repo to cluster so HPC has latest code + trial configs
+        _sync_repo_to_cluster(HPC_CONFIG)
+        # Submit via SSH to the cluster
+        with open(HPC_CONFIG) as f:
+            hpc = json.load(f)
+        netid = hpc["netid"]
+        repo_path = hpc["repo_path"]
+        remote_cmd = f"cd {repo_path} && sbatch {slurm_path}"
+        ssh_cmd = ["ssh", f"{netid}@hpc.arizona.edu",
+                   f"ssh shell.hpc.arizona.edu '{remote_cmd}'"]
+        print(f"\nSubmitting via SSH to {netid}@shell.hpc.arizona.edu...")
+        try:
+            result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=30)
+            if result.stdout.strip():
+                print(f"  {result.stdout.strip()}")
+            if result.returncode != 0:
+                print(f"  sbatch error: {result.stderr.strip()}")
+            else:
+                # Extract job ID
+                job_id = None
+                for word in result.stdout.strip().split():
+                    if word.isdigit():
+                        job_id = word
+                        break
+
+                if job_id:
+                    print(f"\n  Waiting for job {job_id}... (Ctrl+C to stop waiting)")
+                    print(f"  You can always sync later: python3 hpc/sync_results.py\n")
+                    try:
+                        _wait_and_sync(netid, repo_path, job_id, len(trials))
+                    except KeyboardInterrupt:
+                        print(f"\n\n  Stopped waiting. Job {job_id} is still running on the cluster.")
+                        print(f"  Sync when ready:  python3 hpc/sync_results.py")
+                else:
+                    print(f"\n  Sync when ready:  python3 hpc/sync_results.py")
+        except FileNotFoundError:
+            print("  ssh not found.")
+        except subprocess.TimeoutExpired:
+            print("  SSH timed out — check VPN connection.")
     else:
-        run_local(trials, args.output_dir, args.seed)
+        print(f"Invalid RUN_MODE={RUN_MODE}. Set to 1, 2, or 3.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

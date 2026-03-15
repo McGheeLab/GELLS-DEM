@@ -85,7 +85,6 @@ def load_config(path: str) -> dict:
     cfg.setdefault("cluster", "puma")
     cfg.setdefault("partition", "standard")
     cfg.setdefault("cpus", 4)
-    cfg.setdefault("mem_gb", 16)
     cfg.setdefault("walltime", "04:00:00")
     return cfg
 
@@ -95,10 +94,11 @@ def load_config(path: str) -> dict:
 # ══════════════════════════════════════════════════════════════════════
 
 def generate_setup_env(cfg: dict) -> str:
+    venv_path = cfg['venv_path'].replace('~', '$HOME')
     return f"""\
 #!/bin/bash
 # Auto-generated environment setup for {cfg['netid']}
-# Run ONCE on a compute node:
+# Run ONCE on a compute node (UA HPC: install software on compute nodes, not login nodes):
 #   interactive -a {cfg['group']} -n {cfg['cpus']} -t 1:00:00
 #   bash setup_env.sh
 
@@ -108,16 +108,16 @@ echo "=== Setting up GELLS-DEM environment for {cfg['netid']} ==="
 
 module load {cfg['python_module']}
 
-python3 -m venv --system-site-packages {cfg['venv_path']}
-source {cfg['venv_path']}/bin/activate
+python3 -m venv --system-site-packages {venv_path}
+source {venv_path}/bin/activate
 
 pip install --upgrade pip
 pip install numpy scipy matplotlib
 
 echo ""
-echo "=== Environment ready at {cfg['venv_path']} ==="
+echo "=== Environment ready at {venv_path} ==="
 echo "To activate:"
-echo "  module load {cfg['python_module']} && source {cfg['venv_path']}/bin/activate"
+echo "  module load {cfg['python_module']} && source {venv_path}/bin/activate"
 echo "To submit a job:"
 echo "  sbatch run.slurm"
 """
@@ -125,6 +125,10 @@ echo "  sbatch run.slurm"
 
 def generate_run_slurm(cfg: dict, sim_args: str = "") -> str:
     run_cmd_str = f"python3 run_hpc_headless.py --output-dir results {sim_args}".rstrip()
+    venv_path = cfg['venv_path'].replace('~', '$HOME')
+    repo_path = cfg['repo_path'].replace('~', '$HOME')
+    # NOTE: Do NOT specify both --mem and --cpus-per-task (UA HPC docs).
+    #       Puma allocates 5 GB/CPU automatically.
     return f"""\
 #!/bin/bash
 #SBATCH --job-name=gells-dem
@@ -133,28 +137,29 @@ def generate_run_slurm(cfg: dict, sim_args: str = "") -> str:
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task={cfg['cpus']}
-#SBATCH --mem={cfg['mem_gb']}G
 #SBATCH --time={cfg['walltime']}
-#SBATCH --output=gells-dem_%j.out
-#SBATCH --error=gells-dem_%j.err
+#SBATCH --output=slurm_logs/%x_%j.out
+#SBATCH --error=slurm_logs/%x_%j.err
 
 # ── Load Python and activate virtual environment ──
 module load {cfg['python_module']}
-source {cfg['venv_path']}/bin/activate
+source {venv_path}/bin/activate
 
 # ── Use non-interactive matplotlib backend (no display on HPC) ──
 export MPLBACKEND=Agg
 
 # ── Run simulation ──
-cd {cfg['repo_path']}
+cd {repo_path}
 {run_cmd_str}
 
-echo "Job finished at $(date)"
+echo "Job $SLURM_JOB_ID finished at $(date)"
+echo "Check efficiency: seff $SLURM_JOB_ID"
 """
 
 
 def generate_setup_env_slurm(cfg: dict, setup_script_remote: str) -> str:
     """SLURM job that runs the environment setup on a compute node."""
+    repo_path = cfg['repo_path'].replace('~', '$HOME')
     return f"""\
 #!/bin/bash
 #SBATCH --job-name=gells-setup
@@ -163,11 +168,11 @@ def generate_setup_env_slurm(cfg: dict, setup_script_remote: str) -> str:
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
-#SBATCH --mem=4G
 #SBATCH --time=00:30:00
-#SBATCH --output=gells-setup_%j.out
-#SBATCH --error=gells-setup_%j.err
+#SBATCH --output=slurm_logs/%x_%j.out
+#SBATCH --error=slurm_logs/%x_%j.err
 
+mkdir -p {repo_path}/slurm_logs
 bash {setup_script_remote}
 echo "Environment setup finished at $(date)"
 """
@@ -232,7 +237,7 @@ def detect_repo_on_cluster(cfg: dict) -> bool:
 def detect_venv_on_cluster(cfg: dict) -> bool:
     """Check if the Python venv already exists on the cluster."""
     target = f"{cfg['netid']}@{FILEXFER}"
-    venv_marker = f"{cfg['venv_path']}/bin/activate"
+    venv_marker = cfg['venv_path'].replace('~', '$HOME') + "/bin/activate"
     try:
         ok, _ = ssh_quiet(target, f"test -f {venv_marker} && echo yes")
         return ok
@@ -357,7 +362,7 @@ def submit_env_setup(cfg: dict, setup_path_local: str):
     if result.returncode == 0 and result.stdout.strip():
         print(f"  {result.stdout.strip()}")
         print("  Environment will be ready when the job completes.")
-        print(f"  Check: ssh {netid}@{BASTION} 'ssh shell.hpc.arizona.edu squeue -u {netid}'")
+        print(f"  Check: ssh {netid}@{BASTION} 'ssh shell.hpc.arizona.edu squeue -r -u {netid}'")
     else:
         stderr = result.stderr.strip() if result.stderr else ""
         print(f"  Could not auto-submit setup job. {stderr}")
@@ -490,7 +495,7 @@ def main():
   Or submit a batch job:
     cd {cfg['repo_path']}
     sbatch run.slurm
-    squeue --user {cfg['netid']}
+    squeue -r --user {cfg['netid']}
 """)
 
     print("=" * 60)

@@ -1,0 +1,206 @@
+Ready for review
+Select text to add comments on the plan
+GELLS-DEM V1.4: Full 3D Volumetric Simulation
+Context
+GELLS-DEM V1.3 is a 2D overdamped particle dynamics simulator with superellipse granule shapes. The primary goal of V1.4 is to upgrade to a full 3D volumetric simulation to model compaction, percolation, and transport through granular hydrogel scaffolds. This enables physically meaningful predictions of void-space evolution, permeability (Darcy/Kozeny-Carman), and phase connectivity that cannot be captured in 2D.
+
+Key Decisions (from user input)
+Single file: All simulation physics stays in new_dem_0.py (~3000+ lines)
+3D rendering: PyVista primary when available, matplotlib fallback
+Three modes: "2D" (pure V1.3), "2D-slice" (generate 3D, slice at midplane), "3D" (full volumetric)
+Scale target: 500-1000 granules -- needs vectorized contact detection and Numba JIT for Newton-Raphson solver
+Scope
+What changes
+new_dem_0.py - Upgrade from 2D to 3D: Params, GranuleSystem, packing, forces, integration, rendering, metrics
+Trial JSON format - Add "mode": "2D"/"2D-slice"/"3D", 3D domain/shape fields
+4 new visualization scripts - Each type in its own file (PyVista + matplotlib fallback)
+New physics metrics - Kozeny-Carman, Darcy's law, RCP, dimensionless groups
+Performance: Vectorized contact detection, optional Numba JIT for 500-1000 granule scale
+Documentation - CLAUDE.md, CHANGELOG.md, ARCHITECTURE.md, README.md
+What stays the same
+All existing 2D behavior when mode="2D" (full backward compat)
+Units: micrometres, nanonewtons, hours, kPa
+Motor-clutch cell model, Hertz contact, DMT adhesion, area friction
+run() API: returns (hist, snaps, p, gs)
+Implementation Plan
+Phase 1: Core 3D Infrastructure in new_dem_0.py
+1a. Quaternion utilities (new section)
+quat_multiply, quat_rotate, quat_rotate_inv, quat_to_rotation_matrix, quat_from_axis_angle, quat_normalize, quat_integrate
+1b. Superellipsoid geometry (new section, 3D analogs of superellipse functions)
+Equation: (|x/a|^n1 + |y/b|^n1)^(n2/n1) + |z/c|^n2 = 1
+superellipsoid_volume(a,b,c,n1,n2) - exact via Beta function
+superellipsoid_point(eta,omega,a,b,c,n1,n2) - parametric surface
+superellipsoid_normal(eta,omega,a,b,c,n1,n2) - outward unit normal
+superellipsoid_curvature_radii(eta,omega,a,b,c,n1,n2) - for Hertz R_eff
+superellipsoid_implicit(px,py,pz,cx,cy,cz,a,b,c,n1,n2,quat) - inside/outside test
+superellipsoid_mesh(...) - triangle mesh for rendering
+1c. Extend Params dataclass
+New fields (all with defaults preserving V1.3 behavior):
+
+mode: str = "2D"                    # "2D", "2D-slice", or "3D"
+Lz: float = 800.0                   # domain depth (3D / 2D-slice)
+aspect_ratio_c_func_mean/std        # c/a ratio for functional granules
+aspect_ratio_c_inert_mean/std       # c/a ratio for inert granules
+blockiness_n2_func_mean/std         # meridional blockiness
+blockiness_n2_inert_mean/std
+Ngrid_3d: int = 80                  # 3D grid resolution
+omega_max_3d: float = 1.0           # angular velocity cap per axis
+1d. Extend GranuleSystem
+Add z coordinate, vz velocity, c semi-axis, n1/n2 blockiness
+Add quat (N,4) quaternion array, omega_3d (N,3) angular velocity for 3D mode
+mode attribute determines 2D vs 3D code paths
+positions() returns (N,2) in 2D or (N,3) in 3D
+r_bound = max(a, b, c) in 3D
+Phase 2: 3D Packing and Contact Detection
+2a. generate_packing_3d()
+3D random sequential addition in Lx x Ly x Lz box
+Superellipsoid volume = (4/3) pi * r_eq^3 for equivalent radius
+Scale semi-axes (a,b,c) to match target volume
+Random quaternion orientation
+Bounding-sphere overlap check for placement
+2b. find_contact_superellipsoids() - 3D common normal method
+Newton-Raphson with 4 unknowns (eta_i, omega_i, eta_j, omega_j)
+Sphere fast-path when is_circle=True
+Returns (in_contact, delta, nx, ny, nz, cx, cy, cz, R_eff)
+2c. find_contact_superellipsoid_wall_3d() - 6 wall faces
+Phase 3: 3D Forces and Integration
+3a. Extend compute_forces()
+Force array: (N,3) in 3D, (N,2) in 2D
+Torque array: (N,3) in 3D, (N,) in 2D
+3D tangential friction, 3D noise, 3D cell bridging
+6 walls instead of 4
+3b. Extend step()
+3D translational: dx, dy, dz = F/gamma * dt
+Quaternion rotational: quat_integrate(q, omega, dt)
+3D velocity cap, 6-face wall clamp
+Phase 4: 3D Rendering and Metrics
+4a. render_fields_3d()
+3D phase fields on Ngrid_3d^3 grid
+Bounding-box clipping per granule for performance
+Superellipsoid implicit function + tanh profile
+Mode-aware dispatch in render_fields()
+4b. Extend compute_metrics() for 3D
+3D connectivity (scipy.ndimage.label works on 3D arrays natively)
+New metrics: Kozeny-Carman permeability, compaction ratio, Darcy number
+Volume conservation (replaces area conservation in 3D)
+Phase 5: 2D-Slice Mode (mode="2D-slice")
+Explicit third mode: "2D" = pure V1.3, "2D-slice" = generate 3D then slice, "3D" = full volumetric.
+
+slice_superellipsoid_z() - Slice 3D superellipsoid at z-midplane to get 2D cross-section:
+
+Transform z-plane to body frame via quaternion
+Compute z-term: |z_body/c|^n2
+Cross-section semi-axes: a_2d = a * (1-z_term)^(1/n2), same for b
+Cross-section blockiness: n_2d = n1 (equatorial preserved)
+Projected orientation from quaternion
+Workflow: generate 3D packing -> slice at z=Lz/2 -> create 2D GranuleSystem -> run 2D simulation
+
+Phase 6: Update run() and Snapshot Format
+Mode-aware main loop
+3D snapshot includes z, quat, c, n1, n2 arrays
+3D console output columns
+Phase 7: Four Visualization Scripts
+viz_compaction.py - Void space evolution
+Void fraction vs time (total, near-functional, near-inert)
+Solid packing fraction vs time
+Compaction ratio: phi_solid(t) / phi_solid(0)
+Void size distribution histograms
+CLI: python viz_compaction.py -i results/run1
+viz_percolation.py - Transport property analysis
+Kozeny-Carman permeability: K = eps^3 * d^2 / [180*(1-eps)^2]
+Darcy flow rate: q = -K/mu * grad_P
+RCP comparison: phi_solid(t) / phi_RCP
+Dimensionless groups dashboard:
+Peclet number: Pe = v*L/D
+Reynolds number: Re = rho*v*d/mu
+Compaction ratio: phi/phi_RCP
+Darcy number: Da = K/L^2
+Porosity ratio: eps(t)/eps(0)
+Void connectivity / percolation indicator
+viz_movies.py - 3D volumetric animations
+Rotating 3D view at fixed time (marching cubes isosurfaces)
+Time-lapse compaction movie (fixed camera, frames over time)
+Cross-section sweep animation
+Composite 2x2 layout: 3D isosurface + XY/XZ/YZ midplanes
+Output: GIF via PillowWriter or MP4 via ffmpeg
+viz_phases.py - Individual phase volumes
+Three-panel 3D isosurface strip (functional / inert / void at selected times)
+Phase volume fractions vs time
+Tri-plane evolution: XY, XZ, YZ midplane slices per phase
+Phase interface area vs time (isosurface area of phi=0.5)
+All viz scripts:
+
+Accept -i input_dir and -o output_dir CLI flags
+Save to <input_dir>/visualizations/ by default
+Can be imported as modules
+Reuse utilities from new_dem_visualization.py
+PyVista primary for 3D volume rendering (high quality, interactive)
+matplotlib fallback when PyVista unavailable (mplot3d + marching cubes)
+Try/except import pattern: try: import pyvista; HAS_PYVISTA = True
+Phase 7b: Performance for 500-1000 Granules
+Vectorized contact detection: Batch all candidate pairs from cKDTree, compute bounding-sphere overlaps as NumPy array operations before entering per-pair Newton-Raphson
+Numba JIT: Decorate find_contact_superellipsoids() and superellipsoid_point/normal with @numba.njit for ~10-50x speedup on the inner Newton-Raphson loop
+Bounding-box clipping in render_fields_3d(): Only evaluate implicit function within r_bound of each granule center
+Optional Numba: Import with try/except, fall back to pure NumPy if unavailable. Add use_numba: bool = True to Params
+Coarser 3D grid: Default Ngrid_3d=80 (512K voxels) is fine; user can lower to 50 for large runs
+Phase 8: Trial JSON Format
+Add optional fields (backward compatible):
+
+{
+    "mode": "3D",
+    "domain": { "Lx_um": 200, "Ly_um": 200, "Lz_um": 200 },
+    "functional_granules": {
+        "aspect_ratio_c_range": [0.8, 1.2],
+        "blockiness_n2_range": [2.0, 3.0]
+    },
+    ...
+}
+Missing "mode" defaults to "2D" (pure V1.3 behavior)
+"mode": "2D-slice" generates 3D packing, slices at z-midplane, runs 2D sim
+"mode": "3D" runs full volumetric simulation
+side_length_um sets Lx=Ly=Lz in 3D/2D-slice modes
+Phase 9: Documentation
+Update CLAUDE.md version, layout, key decisions
+CHANGELOG.md V1.4 entry
+ARCHITECTURE.md with 3D data flow
+README.md with 3D usage examples
+Implementation Order
+Params + GranuleSystem extensions (1c, 1d) - foundation
+Quaternion utilities (1a) - pure math, testable
+Superellipsoid geometry (1b) - verify sphere reduction
+3D packing generator (2a) - needed for testing
+3D contact detection (2b, 2c) - critical physics
+3D forces (3a) - extend compute_forces
+3D integration (3b) - extend step()
+3D rendering (4a) - volumetric fields
+3D metrics (4b) - Kozeny-Carman, percolation
+2D slice mode (5) - cross-section workflow
+run() and snapshots (6) - main loop
+Trial JSON (8) - config format
+viz_compaction.py (7) - first viz script
+viz_percolation.py (7) - transport analysis
+viz_movies.py (7) - animations
+viz_phases.py (7) - phase volumes
+Documentation (9) - CLAUDE.md, CHANGELOG, etc.
+Verification
+Unit test: Superellipsoid with a=b=c, n1=n2=2 must produce sphere behavior (volume, contact, forces)
+2D backward compat: Params() with defaults runs exactly as V1.3
+3D smoke test: Params(mode="3D", Lx=400, Ly=400, Lz=400, t_total=10) completes
+Packing: 3D void fraction matches target within tolerance
+Contact: Two overlapping spheres produce correct Hertz force magnitude
+Viz scripts: Each script runs on 3D output without errors, produces expected plot files
+2D slice mode: 3D packing sliced at midplane produces valid 2D granules
+Critical Files
+File	Action
+new_dem_0.py	Major modification (3D physics engine)
+viz_compaction.py	New file
+viz_percolation.py	New file
+viz_movies.py	New file
+viz_phases.py	New file
+CLAUDE.md	Update version, layout, decisions
+CodeLog/Updates/CHANGELOG.md	V1.4 entry
+CodeLog/Architecture/ARCHITECTURE.md	3D architecture
+CodeLog/Readme/README.md	3D usage examples
+Trials/Trial12.json	Example 3D trial config
+run_hpc_headless.py	Add mode flag, 3D JSON loading
+run_all_trials.py	Pass mode parameter

@@ -1,109 +1,68 @@
 """
 Overdamped Particle Dynamics Model for Cell-Driven Granular Rearrangement
 ==========================================================================
+V1.4 — Full 3D Volumetric Simulation with 2D/2D-slice/3D modes.
+
+MODES:
+    "2D"       — Pure 2D simulation with superellipses (V1.3 compatible)
+    "2D-slice" — Generate 3D superellipsoid packing, slice at z-midplane, run 2D
+    "3D"       — Full 3D volumetric simulation with superellipsoids
 
 MATHEMATICAL MODEL
 ------------------
-N rigid circular granules (functional or inert) in 2D, overdamped regime.
+N rigid granules (functional or inert) in 2D or 3D, overdamped regime.
 Granules maintain their shape; cells bridge nearby functional pairs and
 pull them together.
 
 EQUATIONS OF MOTION (overdamped Langevin):
-
     γ_i dx_i/dt = F_i^contact + F_i^cell + F_i^wall + F_i^noise
 
-where γ_i = 6πη R_i is the Stokes drag on granule i.
+3D SHAPE: Superellipsoid
+    (|x/a|^n1 + |y/b|^n1)^(n2/n1) + |z/c|^n2 = 1
+    Spheres: a=b=c, n1=n2=2.  Ellipsoids: n1=n2=2.  Blocky: n1,n2 > 2.
 
 FORCE LAWS:
+    (1) Hertzian contact: F = (4/3) E* √R* δ^{3/2}
+    (2) Motor-clutch bridging (functional–functional, Chan & Odde 2008)
+    (3) Wall repulsion (Hertz, rigid limit)
+    (4) Activity noise (cell-driven fluctuations)
+    (5) Area-dependent friction (Gong 2006, Pitenis 2014)
+    (6) DMT adhesion (Derjaguin-Muller-Toporov)
 
-(1) Contact repulsion (Hertzian, physically-based stiffness):
-    R*_ij = R_i R_j / (R_i + R_j)              (reduced radius)
-    E*    = E / [2(1 − ν²)]                    (effective modulus, identical materials)
-    F_ij^contact = (4/3) E* √R* δ^{3/2} n̂_ij  if δ_ij = R_i+R_j - d_ij > 0
-                 = 0                            otherwise
+3D ROTATIONAL DYNAMICS:
+    Quaternion orientation (w,x,y,z), overdamped: I_eff dω/dt = τ
 
-    Volume conservation: overlap lens area is tracked per granule and
-    redistributed as an inflated effective radius for rendering:
-        r_eff_i = √(r_i² + ΔA_i / π)
+TRANSPORT METRICS (V1.4):
+    Kozeny-Carman permeability, Darcy number, compaction ratio, porosity
 
-(2) Cell-mediated attraction (motor-clutch model, functional–functional only):
-    Cells are initially spheres (d=20 µm).  After ~3 h they attach to the
-    hydrogel via integrin clutches and spread into oblate ellipsoids (~5 µm
-    tall, volume conserved).  If the spread footprint exceeds the granule
-    area, excess cells crawl on top of neighbours.
-
-    Attached cells sense nearby granules within a filopodia range
-    (cell_sense_distance) and form bridges.  Bridge force per cell comes
-    from the motor-clutch model (Chan & Odde 2008):
-
-        k_sub  = π E a / (1−ν²)              (substrate stiffness at cell scale)
-        k_opt  = n_clutches · k_clutch        (clutch ensemble stiffness)
-        engagement = k_on / (k_on + k_off)    (steady-state clutch fraction)
-        F_mc   = F_stall · k_sub/(k_sub+k_opt) · engagement · FA_maturity
-
-    Bridge count and net force:
-        gap_ij = d_ij − R_i − R_j             (surface separation)
-        proximity = 1 − gap/cell_sense_distance
-        n_bridges = √(n_avail_i · n_avail_j) · proximity
-        F_ij^cell = F_mc · n_bridges · n̂_ij   (if gap > L_rest)
-        |F_ij^cell| ≤ F_max · n_bridges       (force cap)
-
-(3) Wall repulsion (Hertz, sphere against rigid flat):
-    E*_wall = E / (1 − ν²)                         (rigid wall limit)
-    F_wall  = (4/3) E*_wall √R_i · pen^{3/2} n̂     for each boundary
-
-(4) Activity noise (small stochastic kicks on functional granules):
-    F_noise ~ √(2 γ_i T_active) · ξ(t)            (cell-driven fluctuations)
-
-(5) Tangential friction (area-dependent, hydrogel tribology):
-    A_ij   = π R*_ij δ_ij                         (Hertzian contact area)
-    v_t    = (v_j − v_i) − [(v_j − v_i)·n̂] n̂     (relative tangential velocity)
-    F_fric = τ₀ · A_ij · tanh(|v_t|/v_ref) · (−v_t/|v_t|)
-
-    τ₀ depends on pair surface chemistry (Gong 2006, Pitenis 2014):
-        inert–inert (bare Gemini gel):           τ₀ ≈  50 Pa
-        inert–functional (bare–collagen-I):      τ₀ ≈ 500 Pa
-        functional–functional (col-I–col-I):     τ₀ ≈ 2000 Pa
-
-(6) DMT adhesion (constant attractive force during contact):
-    F_adh  = 2π W_adh R*_ij                       (Derjaguin-Muller-Toporov)
-    F_norm = F_contact − F_adh                     (net; can be negative = attractive)
-
-    W_adh depends on pair surface chemistry:
-        inert–inert:             W ≈ 0.5 mJ/m²
-        inert–functional:        W ≈ 1.0 mJ/m²
-        functional–functional:   W ≈ 2.0 mJ/m²
-
-CELL COUNT PER GRANULE (projected-area limited):
-    A_cell  = π (d/2)²                                 (sphere projected area)
-    n_cells = min(n_input, floor(π R² · coverage / A_cell))
-
-OBSERVABLES (rendered from particle positions at each save step):
-    φ_f(x), φ_i(x), φ_v(x) = 1 - φ_f - φ_i
-    → void topology, functional topology, packing evolution, tissue metrics
-
-PHYSICAL PARAMETER MAPPING:
-    E      ~ 1-100 kPa               (hydrogel Young's modulus)
-    ν      ~ 0.4-0.5                  (Poisson's ratio, nearly incompressible)
-    η      ~ 1e-3 Pa·s               (culture medium viscosity)
-    d_cell = 20 µm                    (initial cell diameter)
-    h_cell = 5 µm                     (spread cell height)
-    n_motors ~ 200, F_stall ~ 2 pN    (myosin motors)
-    n_clutches ~ 75, k_clutch ~ 0.5 nN/µm  (integrin clutches)
-    t_attach ~ 3 h                    (cell attachment onset)
+Units: micrometres (length), nanonewtons (force), hours (time), kPa (modulus).
 """
 
 import numpy as np
 from scipy.spatial import cKDTree
 from scipy.ndimage import label
-from scipy.special import gamma as _gamma
-from scipy.optimize import brentq
+from scipy.special import gamma as _gamma, beta as _beta
+from scipy.optimize import brentq, minimize_scalar
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle, Polygon
 from matplotlib.collections import PatchCollection
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Tuple, Optional
 import time as timer
+import os
+
+try:
+    from numba import njit
+    HAS_NUMBA = True
+except ImportError:
+    HAS_NUMBA = False
+    # Fallback: identity decorator
+    def njit(*args, **kwargs):
+        if args and callable(args[0]):
+            return args[0]
+        return lambda f: f
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -112,9 +71,13 @@ import time as timer
 
 @dataclass
 class Params:
+    # ── Simulation mode ──
+    mode: str = "2D"                # "2D", "2D-slice", or "3D"
+
     # ── Domain (µm) ──
     Lx: float = 800.0
     Ly: float = 800.0
+    Lz: float = 800.0              # depth (used in 3D and 2D-slice modes)
 
     # ── Granule physical properties ──
     R_func_mean: float = 40.0       # functional radius (µm)
@@ -180,22 +143,42 @@ class Params:
     save_every_h: float = 2.0       # save interval (hours)
     v_max: float = 20.0             # µm/hr, velocity cap
 
-    # ── Granule shape (V1.3 — superellipses) ──
-    shape_enabled: bool = False                # False = circles (V1.2 compat)
+    # ── Granule shape (V1.3 — 2D superellipses) ──
+    shape_enabled: bool = False                # False = circles/spheres (V1.2 compat)
     aspect_ratio_func_mean: float = 1.0        # a/b ratio for functional granules
     aspect_ratio_func_std: float = 0.0
     aspect_ratio_inert_mean: float = 1.0       # a/b ratio for inert granules
     aspect_ratio_inert_std: float = 0.0
-    blockiness_func_mean: float = 2.0          # n exponent (2=ellipse, >2=blocky)
+    blockiness_func_mean: float = 2.0          # n1 exponent (2=ellipse, >2=blocky)
     blockiness_func_std: float = 0.0
     blockiness_inert_mean: float = 2.0
     blockiness_inert_std: float = 0.0
     drag_scale_rot: float = 0.05               # rotational drag scaling
-    omega_max: float = 1.0                     # rad/h, angular velocity cap
+    omega_max: float = 1.0                     # rad/h, angular velocity cap (2D)
+
+    # ── Granule shape (V1.4 — 3D superellipsoids) ──
+    aspect_ratio_c_func_mean: float = 1.0      # c/a ratio for functional (z-elongation)
+    aspect_ratio_c_func_std: float = 0.0
+    aspect_ratio_c_inert_mean: float = 1.0     # c/a ratio for inert
+    aspect_ratio_c_inert_std: float = 0.0
+    blockiness_n2_func_mean: float = 2.0       # n2 exponent (meridional blockiness)
+    blockiness_n2_func_std: float = 0.0
+    blockiness_n2_inert_mean: float = 2.0
+    blockiness_n2_inert_std: float = 0.0
+    omega_max_3d: float = 1.0                  # rad/h, angular velocity cap per axis (3D)
+
+    # ── Packing ──
+    packing_gap: float = 0.0        # µm, min gap between granule surfaces at placement
+    boundary_exclusion: float = 0.2  # fraction of domain excluded from each edge for metrics
+    packing_settle_steps: int = 200  # compression micro-steps after RSA to achieve contact
 
     # ── Rendering ──
-    Ngrid: int = 200                # grid for field rendering
+    Ngrid: int = 200                # grid for 2D field rendering
+    Ngrid_3d: int = 80              # grid for 3D field rendering (Ngrid^3 voxels)
     interface_width: float = 3.0    # µm, tanh smoothing
+
+    # ── Performance ──
+    use_numba: bool = True          # use Numba JIT if available
 
     @property
     def L_max(self):
@@ -212,46 +195,312 @@ class Params:
 # ══════════════════════════════════════════════════════════════════════
 
 class GranuleSystem:
-    """Tracks all granule and per-granule cell state."""
+    """Tracks all granule and per-granule cell state.  Mode-aware (2D/3D)."""
     def __init__(self, x, y, r, gtype, n_cells,
-                 a=None, b=None, n_shape=None, theta=None):
+                 z=None,
+                 a=None, b=None, c=None,
+                 n_shape=None, n1=None, n2=None,
+                 theta=None, quat=None,
+                 mode="2D"):
+        self.mode = mode
         self.x = np.array(x, dtype=np.float64)
         self.y = np.array(y, dtype=np.float64)
-        self.r = np.array(r, dtype=np.float64)   # equivalent radius (area = pi*r^2)
+        self.z = np.array(z, dtype=np.float64) if z is not None else np.zeros(len(x))
+        self.r = np.array(r, dtype=np.float64)   # equivalent radius
         self.gtype = np.array(gtype, dtype=int)   # 0=func, 1=inert
-        self.n_cells = np.array(n_cells, dtype=np.float64)  # seeded cells
+        self.n_cells = np.array(n_cells, dtype=np.float64)
         self.N = len(x)
         self.func_mask = self.gtype == 0
         self.inert_mask = self.gtype == 1
 
-        # ── Shape state (V1.3 — superellipses) ──
+        # ── Shape state ──
         if a is not None:
-            self.a = np.array(a, dtype=np.float64)           # semi-axis, body x
-            self.b = np.array(b, dtype=np.float64)           # semi-axis, body y
-            self.n_shape = np.array(n_shape, dtype=np.float64)  # blockiness
-            self.theta = np.array(theta, dtype=np.float64)   # orientation (rad)
+            self.a = np.array(a, dtype=np.float64)           # semi-axis x
+            self.b = np.array(b, dtype=np.float64)           # semi-axis y
+            self.c = np.array(c, dtype=np.float64) if c is not None else self.a.copy()
+            # n1 = equatorial blockiness, n2 = meridional blockiness
+            if n1 is not None:
+                self.n1 = np.array(n1, dtype=np.float64)
+                self.n2 = np.array(n2, dtype=np.float64)
+            elif n_shape is not None:
+                self.n1 = np.array(n_shape, dtype=np.float64)
+                self.n2 = np.array(n_shape, dtype=np.float64)
+            else:
+                self.n1 = np.full(self.N, 2.0)
+                self.n2 = np.full(self.N, 2.0)
+            self.n_shape = self.n1   # backward compat alias for 2D code
             self.is_circle = False
         else:
             self.a = self.r.copy()
             self.b = self.r.copy()
-            self.n_shape = np.full(self.N, 2.0)
-            self.theta = np.zeros(self.N)
+            self.c = self.r.copy()
+            self.n1 = np.full(self.N, 2.0)
+            self.n2 = np.full(self.N, 2.0)
+            self.n_shape = self.n1
             self.is_circle = True
-        self.r_bound = np.maximum(self.a, self.b)  # bounding circle radius
-        self.omega = np.zeros(self.N)               # angular velocity (rad/h)
+
+        if mode == "3D":
+            self.r_bound = np.maximum(np.maximum(self.a, self.b), self.c)
+        else:
+            self.r_bound = np.maximum(self.a, self.b)
+
+        # ── Orientation ──
+        if mode == "3D":
+            if quat is not None:
+                self.quat = np.array(quat, dtype=np.float64)
+            else:
+                self.quat = np.zeros((self.N, 4))
+                self.quat[:, 0] = 1.0  # identity quaternion (w,x,y,z)
+            self.omega_3d = np.zeros((self.N, 3))   # angular velocity (rad/h)
+            self.theta = np.zeros(self.N)  # not used in 3D, but present for compat
+            self.omega = np.zeros(self.N)
+        else:
+            self.theta = np.array(theta, dtype=np.float64) if theta is not None else np.zeros(self.N)
+            self.omega = np.zeros(self.N)
+            self.quat = None
+            self.omega_3d = None
 
         # ── Cell state (per granule) ──
-        self.n_attached = np.zeros(self.N)       # cells that have attached
-        self.spread_fraction = np.zeros(self.N)  # 0 = sphere, 1 = fully spread
-        self.fa_maturity = np.zeros(self.N)      # focal adhesion maturity [0, 1]
-        self.n_overcrowded = np.zeros(self.N)    # cells crawling on others
+        self.n_attached = np.zeros(self.N)
+        self.spread_fraction = np.zeros(self.N)
+        self.fa_maturity = np.zeros(self.N)
+        self.n_overcrowded = np.zeros(self.N)
 
-        # ── Velocity state (for tangential friction calculation) ──
+        # ── Velocity state ──
         self.vx = np.zeros(self.N)
         self.vy = np.zeros(self.N)
+        self.vz = np.zeros(self.N)
 
     def positions(self):
+        if self.mode == "3D":
+            return np.column_stack([self.x, self.y, self.z])
         return np.column_stack([self.x, self.y])
+
+    @property
+    def is_3d(self):
+        return self.mode == "3D"
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Quaternion utilities (V1.4 — 3D rotations)
+# ══════════════════════════════════════════════════════════════════════
+# Quaternion convention: q = (w, x, y, z) where w is the scalar part.
+
+def quat_multiply(q1, q2):
+    """Hamilton product of two quaternions (w, x, y, z)."""
+    w1, x1, y1, z1 = q1
+    w2, x2, y2, z2 = q2
+    return np.array([
+        w1*w2 - x1*x2 - y1*y2 - z1*z2,
+        w1*x2 + x1*w2 + y1*z2 - z1*y2,
+        w1*y2 - x1*z2 + y1*w2 + z1*x2,
+        w1*z2 + x1*y2 - y1*x2 + z1*w2])
+
+
+def quat_conjugate(q):
+    """Conjugate of quaternion (w, x, y, z) -> (w, -x, -y, -z)."""
+    return np.array([q[0], -q[1], -q[2], -q[3]])
+
+
+def quat_normalize(q):
+    """Normalize quaternion to unit length."""
+    n = np.sqrt(q[0]**2 + q[1]**2 + q[2]**2 + q[3]**2)
+    if n < 1e-30:
+        return np.array([1.0, 0.0, 0.0, 0.0])
+    return q / n
+
+
+def quat_rotate(q, v):
+    """Rotate vector v (3,) by quaternion q: q v q*."""
+    qv = np.array([0.0, v[0], v[1], v[2]])
+    r = quat_multiply(quat_multiply(q, qv), quat_conjugate(q))
+    return r[1:]
+
+
+def quat_rotate_inv(q, v):
+    """Inverse rotation: q* v q (world to body)."""
+    qv = np.array([0.0, v[0], v[1], v[2]])
+    r = quat_multiply(quat_multiply(quat_conjugate(q), qv), q)
+    return r[1:]
+
+
+def quat_to_rotation_matrix(q):
+    """Convert unit quaternion to 3x3 rotation matrix."""
+    w, x, y, z = q
+    return np.array([
+        [1-2*(y*y+z*z), 2*(x*y-w*z),   2*(x*z+w*y)],
+        [2*(x*y+w*z),   1-2*(x*x+z*z), 2*(y*z-w*x)],
+        [2*(x*z-w*y),   2*(y*z+w*x),   1-2*(x*x+y*y)]])
+
+
+def quat_from_axis_angle(axis, angle):
+    """Quaternion from rotation axis (3,) and angle (radians)."""
+    axis = np.asarray(axis, dtype=np.float64)
+    n = np.sqrt(axis[0]**2 + axis[1]**2 + axis[2]**2)
+    if n < 1e-30:
+        return np.array([1.0, 0.0, 0.0, 0.0])
+    axis = axis / n
+    ha = angle / 2.0
+    return np.array([np.cos(ha), axis[0]*np.sin(ha),
+                     axis[1]*np.sin(ha), axis[2]*np.sin(ha)])
+
+
+def quat_random(rng):
+    """Uniformly random unit quaternion."""
+    u = rng.random(3)
+    q = np.array([
+        np.sqrt(1-u[0]) * np.sin(2*np.pi*u[1]),
+        np.sqrt(1-u[0]) * np.cos(2*np.pi*u[1]),
+        np.sqrt(u[0]) * np.sin(2*np.pi*u[2]),
+        np.sqrt(u[0]) * np.cos(2*np.pi*u[2])])
+    return quat_normalize(q)
+
+
+def quat_integrate(q, omega, dt):
+    """
+    Integrate quaternion by angular velocity omega (3-vector, rad/h) over dt (h).
+    Uses first-order: q_new = q + 0.5 * dt * [0, omega] * q, then normalize.
+    """
+    omega_quat = np.array([0.0, omega[0], omega[1], omega[2]])
+    dq = 0.5 * quat_multiply(omega_quat, q) * dt
+    q_new = q + dq
+    return quat_normalize(q_new)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Superellipsoid geometry (V1.4 — 3D shapes)
+# ══════════════════════════════════════════════════════════════════════
+#
+# 3D superellipsoid: (|x/a|^n1 + |y/b|^n1)^(n2/n1) + |z/c|^n2 = 1
+# Parametric surface (eta in [-pi/2, pi/2], omega in [-pi, pi)):
+#   x = a * sgnpow(cos(eta), 2/n2) * sgnpow(cos(omega), 2/n1)
+#   y = b * sgnpow(cos(eta), 2/n2) * sgnpow(sin(omega), 2/n1)
+#   z = c * sgnpow(sin(eta), 2/n2)
+# where sgnpow(v, e) = sign(v) * |v|^e
+
+def _sgnpow(v, e):
+    """Signed power: sign(v) * |v|^e, safe for v=0."""
+    return np.sign(v) * np.abs(v + 1e-30)**e
+
+
+def superellipsoid_volume(a, b, c, n1, n2):
+    """
+    Exact volume of superellipsoid (Jaklic & Leonardis 2000).
+    V = 2 * a * b * c * e1 * e2 * B(e1/2 + 1, e1) * B(e2/2, e2/2)
+    where e1 = 2/n1, e2 = 2/n2.
+    Simplifies for sphere (a=b=c, n1=n2=2): V = (4/3) pi r^3.
+    """
+    e1 = 2.0 / n1
+    e2 = 2.0 / n2
+    return (2.0 * a * b * c * e1 * e2 *
+            _beta(e1/2.0 + 1.0, e1) * _beta(e2/2.0, e2/2.0))
+
+
+def superellipsoid_point(eta, omega, a, b, c, n1, n2):
+    """Parametric surface point in body frame."""
+    e2 = 2.0 / n2
+    e1 = 2.0 / n1
+    ce = np.cos(eta)
+    se = np.sin(eta)
+    co = np.cos(omega)
+    so = np.sin(omega)
+    x = a * _sgnpow(ce, e2) * _sgnpow(co, e1)
+    y = b * _sgnpow(ce, e2) * _sgnpow(so, e1)
+    z = c * _sgnpow(se, e2)
+    return np.array([x, y, z])
+
+
+def superellipsoid_normal(eta, omega, a, b, c, n1, n2):
+    """
+    Outward unit normal at (eta, omega) in body frame.
+    n = (1/a * sgnpow(cos(eta), 2-2/n2) * sgnpow(cos(omega), 2-2/n1),
+         1/b * sgnpow(cos(eta), 2-2/n2) * sgnpow(sin(omega), 2-2/n1),
+         1/c * sgnpow(sin(eta), 2-2/n2))  normalized.
+    """
+    e2c = 2.0 - 2.0/n2
+    e1c = 2.0 - 2.0/n1
+    ce = np.cos(eta)
+    se = np.sin(eta)
+    co = np.cos(omega)
+    so = np.sin(omega)
+    nx = (1.0/a) * _sgnpow(ce, e2c) * _sgnpow(co, e1c)
+    ny = (1.0/b) * _sgnpow(ce, e2c) * _sgnpow(so, e1c)
+    nz = (1.0/c) * _sgnpow(se, e2c)
+    mag = np.sqrt(nx*nx + ny*ny + nz*nz)
+    if mag < 1e-30:
+        return np.array([0.0, 0.0, 1.0])
+    return np.array([nx/mag, ny/mag, nz/mag])
+
+
+def superellipsoid_curvature_radii(eta, omega, a, b, c, n1, n2):
+    """
+    Approximate principal radii of curvature at (eta, omega).
+    Returns (R1, R2).  For Hertz: R_eff = sqrt(R1*R2) for each body,
+    then combined R* = R_eff_i * R_eff_j / (R_eff_i + R_eff_j).
+    """
+    eps = 1e-8
+    # Finite difference approach: sample surface nearby and fit curvature
+    pt0 = superellipsoid_point(eta, omega, a, b, c, n1, n2)
+    n0 = superellipsoid_normal(eta, omega, a, b, c, n1, n2)
+
+    # Sample in eta and omega directions
+    deta = 0.01
+    domega = 0.01
+    pt_de = superellipsoid_point(eta + deta, omega, a, b, c, n1, n2)
+    pt_do = superellipsoid_point(eta, omega + domega, a, b, c, n1, n2)
+    n_de = superellipsoid_normal(eta + deta, omega, a, b, c, n1, n2)
+    n_do = superellipsoid_normal(eta, omega + domega, a, b, c, n1, n2)
+
+    # Curvature ~ |dn/ds| where ds is arc length
+    ds_eta = np.linalg.norm(pt_de - pt0)
+    ds_omega = np.linalg.norm(pt_do - pt0)
+
+    if ds_eta > eps:
+        dn_eta = np.linalg.norm(n_de - n0)
+        kappa1 = dn_eta / ds_eta
+    else:
+        kappa1 = 1.0 / max(a, b, c)
+
+    if ds_omega > eps:
+        dn_omega = np.linalg.norm(n_do - n0)
+        kappa2 = dn_omega / ds_omega
+    else:
+        kappa2 = 1.0 / max(a, b, c)
+
+    R1 = 1.0 / max(kappa1, 1e-6)
+    R2 = 1.0 / max(kappa2, 1e-6)
+    return R1, R2
+
+
+def superellipsoid_implicit(bx, by, bz, a, b, c, n1, n2):
+    """
+    Implicit function value in body frame.
+    Returns < 1 inside, = 1 on boundary, > 1 outside.
+    """
+    return ((np.abs(bx/a)**n1 + np.abs(by/b)**n1)**(n2/n1) +
+            np.abs(bz/c)**n2)
+
+
+def superellipsoid_implicit_world(px, py, pz, cx, cy, cz, a, b, c, n1, n2, quat):
+    """Implicit function value at world point (px, py, pz)."""
+    body = quat_rotate_inv(quat, np.array([px-cx, py-cy, pz-cz]))
+    return superellipsoid_implicit(body[0], body[1], body[2], a, b, c, n1, n2)
+
+
+def superellipsoid_mesh(a, b, c, n1, n2, n_pts=24):
+    """
+    Generate triangle mesh vertices for a superellipsoid (body frame).
+    Returns vertices array of shape (n_pts*n_pts, 3).
+    """
+    eta = np.linspace(-np.pi/2, np.pi/2, n_pts)
+    omega = np.linspace(-np.pi, np.pi, n_pts)
+    E, O = np.meshgrid(eta, omega, indexing='ij')
+    e2 = 2.0 / n2
+    e1 = 2.0 / n1
+    X = a * _sgnpow(np.cos(E), e2) * _sgnpow(np.cos(O), e1)
+    Y = b * _sgnpow(np.cos(E), e2) * _sgnpow(np.sin(O), e1)
+    Z = c * _sgnpow(np.sin(E), e2)
+    return np.column_stack([X.ravel(), Y.ravel(), Z.ravel()])
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -809,6 +1058,157 @@ def update_cell_state(gs: GranuleSystem, p: Params, t: float):
 
 
 # ══════════════════════════════════════════════════════════════════════
+# Packing settle (compression to achieve granule contact)
+# ══════════════════════════════════════════════════════════════════════
+
+def _settle_packing_2d(gs, p):
+    """Run short isotropic compression micro-steps to bring granules into contact.
+
+    Uses a centroid-attraction + Hertz repulsion scheme:
+    each granule is gently pushed toward the domain centre while
+    overlapping neighbours are repelled. This produces a jammed
+    packing where most granules are touching at least one neighbour.
+    """
+    N = gs.N
+    cx_dom, cy_dom = p.Lx / 2, p.Ly / 2
+    dt_settle = 0.02  # micro-step size (µm per step)
+    repulsion_k = 2.0  # overlap repulsion strength
+
+    print(f"  Settling packing ({p.packing_settle_steps} steps)...", end="", flush=True)
+
+    for step in range(p.packing_settle_steps):
+        pos = gs.positions()  # (N, 2)
+        fx = np.zeros(N)
+        fy = np.zeros(N)
+
+        # Gentle centripetal attraction (decays with step count)
+        attract = max(0.5 * (1.0 - step / p.packing_settle_steps), 0.05)
+        for i in range(N):
+            dx = cx_dom - pos[i, 0]
+            dy = cy_dom - pos[i, 1]
+            d = np.sqrt(dx*dx + dy*dy) + 1e-12
+            fx[i] += attract * dx / d * gs.r_bound[i]
+            fy[i] += attract * dy / d * gs.r_bound[i]
+
+        # Pairwise repulsion for overlapping bounding spheres
+        tree = cKDTree(pos)
+        max_rb = float(np.max(gs.r_bound))
+        pairs = tree.query_pairs(2 * max_rb, output_type='ndarray')
+        for idx in range(len(pairs)):
+            i, j = pairs[idx]
+            dx = pos[j, 0] - pos[i, 0]
+            dy = pos[j, 1] - pos[i, 1]
+            d = np.sqrt(dx*dx + dy*dy) + 1e-12
+            overlap = gs.r_bound[i] + gs.r_bound[j] - d
+            if overlap > 0:
+                # Push apart proportional to overlap
+                nx, ny = dx / d, dy / d
+                f_rep = repulsion_k * overlap
+                fx[i] -= f_rep * nx
+                fy[i] -= f_rep * ny
+                fx[j] += f_rep * nx
+                fy[j] += f_rep * ny
+
+        # Move
+        gs.x += fx * dt_settle
+        gs.y += fy * dt_settle
+
+        # Clamp to domain
+        for i in range(N):
+            rb = gs.r_bound[i]
+            gs.x[i] = np.clip(gs.x[i], rb, p.Lx - rb)
+            gs.y[i] = np.clip(gs.y[i], rb, p.Ly - rb)
+
+    # Count contacts after settling
+    pos = gs.positions()
+    tree = cKDTree(pos)
+    pairs = tree.query_pairs(2 * float(np.max(gs.r_bound)) + 1.0, output_type='ndarray')
+    n_contacts = 0
+    for idx in range(len(pairs)):
+        i, j = pairs[idx]
+        d = np.sqrt(np.sum((pos[j] - pos[i])**2))
+        gap = d - gs.r_bound[i] - gs.r_bound[j]
+        if gap < 1.0:  # within 1 µm = effectively touching
+            n_contacts += 1
+    print(f" done ({n_contacts} contacts, {n_contacts/max(N,1):.1f}/granule avg)")
+
+
+def _settle_packing_3d(gs, p):
+    """Run short isotropic compression micro-steps for 3D packing.
+
+    Same algorithm as 2D but with z-coordinate.
+    """
+    N = gs.N
+    cx_dom = p.Lx / 2
+    cy_dom = p.Ly / 2
+    cz_dom = p.Lz / 2
+    dt_settle = 0.02
+    repulsion_k = 2.0
+
+    print(f"  Settling 3D packing ({p.packing_settle_steps} steps)...", end="", flush=True)
+
+    for step in range(p.packing_settle_steps):
+        pos = gs.positions()  # (N, 3)
+        fx = np.zeros(N)
+        fy = np.zeros(N)
+        fz = np.zeros(N)
+
+        # Centripetal attraction
+        attract = max(0.5 * (1.0 - step / p.packing_settle_steps), 0.05)
+        for i in range(N):
+            dx = cx_dom - pos[i, 0]
+            dy = cy_dom - pos[i, 1]
+            dz = cz_dom - pos[i, 2]
+            d = np.sqrt(dx*dx + dy*dy + dz*dz) + 1e-12
+            scale = attract * gs.r_bound[i] / d
+            fx[i] += scale * dx
+            fy[i] += scale * dy
+            fz[i] += scale * dz
+
+        # Pairwise repulsion
+        tree = cKDTree(pos)
+        max_rb = float(np.max(gs.r_bound))
+        pairs = tree.query_pairs(2 * max_rb, output_type='ndarray')
+        for idx in range(len(pairs)):
+            i, j = pairs[idx]
+            dx = pos[j, 0] - pos[i, 0]
+            dy = pos[j, 1] - pos[i, 1]
+            dz = pos[j, 2] - pos[i, 2]
+            d = np.sqrt(dx*dx + dy*dy + dz*dz) + 1e-12
+            overlap = gs.r_bound[i] + gs.r_bound[j] - d
+            if overlap > 0:
+                nx, ny, nz = dx / d, dy / d, dz / d
+                f_rep = repulsion_k * overlap
+                fx[i] -= f_rep * nx; fy[i] -= f_rep * ny; fz[i] -= f_rep * nz
+                fx[j] += f_rep * nx; fy[j] += f_rep * ny; fz[j] += f_rep * nz
+
+        # Move
+        gs.x += fx * dt_settle
+        gs.y += fy * dt_settle
+        gs.z += fz * dt_settle
+
+        # Clamp to domain
+        for i in range(N):
+            rb = gs.r_bound[i]
+            gs.x[i] = np.clip(gs.x[i], rb, p.Lx - rb)
+            gs.y[i] = np.clip(gs.y[i], rb, p.Ly - rb)
+            gs.z[i] = np.clip(gs.z[i], rb, p.Lz - rb)
+
+    # Count contacts
+    pos = gs.positions()
+    tree = cKDTree(pos)
+    pairs = tree.query_pairs(2 * float(np.max(gs.r_bound)) + 1.0, output_type='ndarray')
+    n_contacts = 0
+    for idx in range(len(pairs)):
+        i, j = pairs[idx]
+        d = np.sqrt(np.sum((pos[j] - pos[i])**2))
+        gap = d - gs.r_bound[i] - gs.r_bound[j]
+        if gap < 1.0:
+            n_contacts += 1
+    print(f" done ({n_contacts} contacts, {n_contacts/max(N,1):.1f}/granule avg)")
+
+
+# ══════════════════════════════════════════════════════════════════════
 # Packing generator (random sequential addition)
 # ══════════════════════════════════════════════════════════════════════
 
@@ -833,7 +1233,7 @@ def generate_packing(p: Params, seed=42) -> GranuleSystem:
 
     xs, ys, rs, types = [], [], [], []
     a_list, b_list, n_shape_list, theta_list = [], [], [], []
-    gap = 2.0  # minimum gap between granule surfaces (µm)
+    gap = p.packing_gap  # minimum gap between granule surfaces (µm)
 
     # Interleave placement for good mixing
     order = []
@@ -917,6 +1317,10 @@ def generate_packing(p: Params, seed=42) -> GranuleSystem:
     else:
         gs = GranuleSystem(xs, ys, rs, types, n_cells)
 
+    # ── Compression settle: push granules into contact ──
+    if p.packing_settle_steps > 0 and gs.N > 1:
+        _settle_packing_2d(gs, p)
+
     # Report packing fractions (use actual areas)
     if p.shape_enabled:
         areas = np.array([superellipse_area(gs.a[i], gs.b[i], gs.n_shape[i])
@@ -930,6 +1334,407 @@ def generate_packing(p: Params, seed=42) -> GranuleSystem:
           f"{np.sum(gs.inert_mask)} inert (φ_i={act_i:.3f})")
     print(f"  Void fraction: {1-act_f-act_i:.3f}")
     print(f"  Total cells: {int(sum(gs.n_cells))}")
+    return gs
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 3D packing generator (V1.4)
+# ══════════════════════════════════════════════════════════════════════
+
+def generate_packing_3d(p: Params, seed=42) -> GranuleSystem:
+    """Generate a 3D random packing of superellipsoids."""
+    rng = np.random.default_rng(seed)
+    domain_vol = p.Lx * p.Ly * p.Lz
+
+    vol_f = (4.0/3.0) * np.pi * p.R_func_mean**3
+    vol_i = (4.0/3.0) * np.pi * p.R_inert_mean**3
+    n_func = int(round(p.phi_f_target * domain_vol / vol_f))
+    n_inert = int(round(p.phi_i_target * domain_vol / vol_i))
+
+    print(f"  Target: {n_func} functional (R~{p.R_func_mean:.0f}µm) + "
+          f"{n_inert} inert (R~{p.R_inert_mean:.0f}µm)")
+
+    xs, ys, zs, rs, types = [], [], [], [], []
+    a_list, b_list, c_list = [], [], []
+    n1_list, n2_list = [], []
+    quat_list = []
+    gap = p.packing_gap
+
+    # Interleave placement
+    order = []
+    fi, ii = 0, 0
+    while fi < n_func or ii < n_inert:
+        if ii < n_inert: order.append(1); ii += 1
+        if fi < n_func: order.append(0); fi += 1
+
+    for gt in order:
+        if gt == 0:
+            r_eq = max(15, rng.normal(p.R_func_mean, p.R_func_std))
+        else:
+            r_eq = max(20, rng.normal(p.R_inert_mean, p.R_inert_std))
+
+        # Sample shape parameters
+        if p.shape_enabled:
+            if gt == 0:
+                ar_ab = max(1.0, rng.normal(p.aspect_ratio_func_mean,
+                                            p.aspect_ratio_func_std))
+                ar_c = max(0.3, rng.normal(p.aspect_ratio_c_func_mean,
+                                           p.aspect_ratio_c_func_std))
+                n1_val = max(1.5, rng.normal(p.blockiness_func_mean,
+                                             p.blockiness_func_std))
+                n2_val = max(1.5, rng.normal(p.blockiness_n2_func_mean,
+                                             p.blockiness_n2_func_std))
+            else:
+                ar_ab = max(1.0, rng.normal(p.aspect_ratio_inert_mean,
+                                            p.aspect_ratio_inert_std))
+                ar_c = max(0.3, rng.normal(p.aspect_ratio_c_inert_mean,
+                                           p.aspect_ratio_c_inert_std))
+                n1_val = max(1.5, rng.normal(p.blockiness_inert_mean,
+                                             p.blockiness_inert_std))
+                n2_val = max(1.5, rng.normal(p.blockiness_n2_inert_mean,
+                                             p.blockiness_n2_inert_std))
+            # Compute semi-axes: a, b from ar_ab; c from ar_c
+            a0 = r_eq * np.sqrt(ar_ab)
+            b0 = r_eq / np.sqrt(ar_ab)
+            c0 = r_eq * ar_c
+            # Scale to match target volume = (4/3) pi r_eq^3
+            target_vol = (4.0/3.0) * np.pi * r_eq**3
+            actual_vol = superellipsoid_volume(a0, b0, c0, n1_val, n2_val)
+            if actual_vol > 0:
+                scale = (target_vol / actual_vol)**(1.0/3.0)
+                a_val, b_val, c_val = a0*scale, b0*scale, c0*scale
+            else:
+                a_val = b_val = c_val = r_eq
+            q_val = quat_random(rng)
+        else:
+            a_val = b_val = c_val = r_eq
+            n1_val = n2_val = 2.0
+            q_val = np.array([1.0, 0.0, 0.0, 0.0])
+
+        r_bound_val = max(a_val, b_val, c_val)
+
+        placed = False
+        for _ in range(800):
+            cx = rng.uniform(r_bound_val + gap, p.Lx - r_bound_val - gap)
+            cy = rng.uniform(r_bound_val + gap, p.Ly - r_bound_val - gap)
+            cz = rng.uniform(r_bound_val + gap, p.Lz - r_bound_val - gap)
+            ok = True
+            for j in range(len(xs)):
+                dx = cx - xs[j]; dy = cy - ys[j]; dz = cz - zs[j]
+                rj_b = max(a_list[j], b_list[j], c_list[j])
+                if dx*dx + dy*dy + dz*dz < (r_bound_val + rj_b + gap)**2:
+                    ok = False; break
+            if ok:
+                xs.append(cx); ys.append(cy); zs.append(cz)
+                rs.append(r_eq); types.append(gt)
+                a_list.append(a_val); b_list.append(b_val); c_list.append(c_val)
+                n1_list.append(n1_val); n2_list.append(n2_val)
+                quat_list.append(q_val)
+                placed = True; break
+        if not placed:
+            pass  # skip
+
+    # Compute cells per granule
+    n_cells = []
+    A_cell_sphere = cell_projected_area(0.0, p.cell_diameter, p.cell_height_spread)
+    for i in range(len(xs)):
+        if types[i] == 0:
+            cap = max_cells_on_granule(rs[i], A_cell_sphere, p.cell_coverage)
+            nc = min(p.n_cells_per_granule, cap)
+            n_cells.append(nc)
+        else:
+            n_cells.append(0)
+
+    gs = GranuleSystem(
+        xs, ys, rs, types, n_cells,
+        z=zs,
+        a=a_list if p.shape_enabled else None,
+        b=b_list if p.shape_enabled else None,
+        c=c_list if p.shape_enabled else None,
+        n1=n1_list if p.shape_enabled else None,
+        n2=n2_list if p.shape_enabled else None,
+        quat=quat_list if p.shape_enabled else None,
+        mode="3D")
+
+    # ── Compression settle: push granules into contact ──
+    if p.packing_settle_steps > 0 and gs.N > 1:
+        _settle_packing_3d(gs, p)
+
+    # Report packing fractions
+    if p.shape_enabled:
+        vols = np.array([superellipsoid_volume(gs.a[i], gs.b[i], gs.c[i],
+                         gs.n1[i], gs.n2[i]) for i in range(gs.N)])
+        act_f = float(np.sum(vols[gs.func_mask])) / domain_vol
+        act_i = float(np.sum(vols[gs.inert_mask])) / domain_vol
+    else:
+        act_f = sum((4.0/3.0)*np.pi*gs.r[gs.func_mask]**3) / domain_vol
+        act_i = sum((4.0/3.0)*np.pi*gs.r[gs.inert_mask]**3) / domain_vol
+    print(f"  Placed: {np.sum(gs.func_mask)} func (φ_f={act_f:.3f}) + "
+          f"{np.sum(gs.inert_mask)} inert (φ_i={act_i:.3f})")
+    print(f"  Void fraction: {1-act_f-act_i:.3f}")
+    print(f"  Total cells: {int(sum(gs.n_cells))}")
+    return gs
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 3D Contact detection (V1.4)
+# ══════════════════════════════════════════════════════════════════════
+
+def find_contact_spheres_3d(xi, yi, zi, ri, xj, yj, zj, rj):
+    """
+    Sphere-sphere contact in 3D.
+    Returns (in_contact, delta, nx, ny, nz, cx, cy, cz, R_eff) or None.
+    """
+    dx = xj - xi; dy = yj - yi; dz = zj - zi
+    d = np.sqrt(dx*dx + dy*dy + dz*dz)
+    if d < 1e-12:
+        return None
+    overlap = ri + rj - d
+    if overlap <= 0:
+        return None
+    nx, ny, nz = dx/d, dy/d, dz/d
+    R_eff = ri * rj / (ri + rj)
+    cx = xi + (ri - overlap/2) * nx
+    cy = yi + (ri - overlap/2) * ny
+    cz = zi + (ri - overlap/2) * nz
+    return (True, overlap, nx, ny, nz, cx, cy, cz, R_eff)
+
+
+def find_contact_superellipsoids_3d(
+        xi, yi, zi, ai, bi, ci, n1i, n2i, qi,
+        xj, yj, zj, aj, bj, cj, n1j, n2j, qj):
+    """
+    Common normal contact detection between two 3D superellipsoids.
+    Returns (in_contact, delta, nx, ny, nz, cx, cy, cz, R_eff) or None.
+    """
+    dx_c = xj - xi; dy_c = yj - yi; dz_c = zj - zi
+    d_c = np.sqrt(dx_c**2 + dy_c**2 + dz_c**2)
+    if d_c < 1e-12:
+        return None
+    ux = dx_c/d_c; uy = dy_c/d_c; uz = dz_c/d_c
+
+    # Initial guess: find parameter on each surface closest to line of centres
+    dir_body_i = quat_rotate_inv(qi, np.array([ux, uy, uz]))
+    dir_body_j = quat_rotate_inv(qj, np.array([-ux, -uy, -uz]))
+
+    eta_i = np.arctan2(dir_body_i[2],
+                       np.sqrt(dir_body_i[0]**2 + dir_body_i[1]**2) + 1e-30)
+    omega_i = np.arctan2(dir_body_i[1], dir_body_i[0])
+    eta_j = np.arctan2(dir_body_j[2],
+                       np.sqrt(dir_body_j[0]**2 + dir_body_j[1]**2) + 1e-30)
+    omega_j = np.arctan2(dir_body_j[1], dir_body_j[0])
+
+    # Newton-Raphson: find common normal
+    for _ in range(15):
+        # Surface points in body frame
+        pi_body = superellipsoid_point(eta_i, omega_i, ai, bi, ci, n1i, n2i)
+        pj_body = superellipsoid_point(eta_j, omega_j, aj, bj, cj, n1j, n2j)
+
+        # Transform to world
+        pi_world = quat_rotate(qi, pi_body) + np.array([xi, yi, zi])
+        pj_world = quat_rotate(qj, pj_body) + np.array([xj, yj, zj])
+
+        # Vector from Pi to Pj
+        dp = pj_world - pi_world
+        dp_mag = np.linalg.norm(dp)
+        if dp_mag < 1e-12:
+            break
+        target = dp / dp_mag
+
+        # Normals in body frame, then to world
+        ni_body = superellipsoid_normal(eta_i, omega_i, ai, bi, ci, n1i, n2i)
+        nj_body = superellipsoid_normal(eta_j, omega_j, aj, bj, cj, n1j, n2j)
+        ni_world = quat_rotate(qi, ni_body)
+        nj_world = quat_rotate(qj, nj_body)
+
+        # Error: cross product (normal should align with target)
+        err_i = np.cross(ni_world, target)
+        err_j = np.cross(nj_world, -target)
+
+        if np.linalg.norm(err_i) < 1e-7 and np.linalg.norm(err_j) < 1e-7:
+            break
+
+        # Damped update of surface parameters
+        # Project error onto eta/omega directions (approximate Jacobian)
+        eta_i -= 0.3 * (err_i[2] * np.cos(omega_i) - err_i[1] * np.sin(omega_i))
+        omega_i -= 0.3 * err_i[0]
+        eta_j -= 0.3 * (err_j[2] * np.cos(omega_j) - err_j[1] * np.sin(omega_j))
+        omega_j -= 0.3 * err_j[0]
+
+        # Clamp
+        eta_i = np.clip(eta_i, -np.pi/2 + 0.01, np.pi/2 - 0.01)
+        eta_j = np.clip(eta_j, -np.pi/2 + 0.01, np.pi/2 - 0.01)
+
+    # Final geometry
+    pi_body = superellipsoid_point(eta_i, omega_i, ai, bi, ci, n1i, n2i)
+    pj_body = superellipsoid_point(eta_j, omega_j, aj, bj, cj, n1j, n2j)
+    pi_world = quat_rotate(qi, pi_body) + np.array([xi, yi, zi])
+    pj_world = quat_rotate(qj, pj_body) + np.array([xj, yj, zj])
+
+    dp = pj_world - pi_world
+    dp_mag = np.linalg.norm(dp)
+
+    # Check overlap: is Pi inside body j?
+    pi_in_j_body = quat_rotate_inv(qj, pi_world - np.array([xj, yj, zj]))
+    val_j = superellipsoid_implicit(pi_in_j_body[0], pi_in_j_body[1],
+                                    pi_in_j_body[2], aj, bj, cj, n1j, n2j)
+    pj_in_i_body = quat_rotate_inv(qi, pj_world - np.array([xi, yi, zi]))
+    val_i = superellipsoid_implicit(pj_in_i_body[0], pj_in_i_body[1],
+                                    pj_in_i_body[2], ai, bi, ci, n1i, n2i)
+
+    if val_j > 1.0 and val_i > 1.0:
+        return None  # no overlap
+
+    delta = dp_mag
+    if dp_mag > 1e-12:
+        nx, ny, nz = dp[0]/dp_mag, dp[1]/dp_mag, dp[2]/dp_mag
+    else:
+        nx, ny, nz = ux, uy, uz
+
+    cx = 0.5 * (pi_world[0] + pj_world[0])
+    cy = 0.5 * (pi_world[1] + pj_world[1])
+    cz_pt = 0.5 * (pi_world[2] + pj_world[2])
+
+    # Effective radius from local curvature
+    R1i, R2i = superellipsoid_curvature_radii(eta_i, omega_i, ai, bi, ci, n1i, n2i)
+    R1j, R2j = superellipsoid_curvature_radii(eta_j, omega_j, aj, bj, cj, n1j, n2j)
+    R_eff_i = np.sqrt(R1i * R2i)
+    R_eff_j = np.sqrt(R1j * R2j)
+    R_eff = R_eff_i * R_eff_j / (R_eff_i + R_eff_j) if (R_eff_i + R_eff_j) > 0 else 1.0
+
+    return (True, delta, nx, ny, nz, cx, cy, cz_pt, R_eff)
+
+
+def find_contact_wall_3d(xi, yi, zi, ai, bi, ci, n1i, n2i, qi, ri_bound,
+                         wall_pos, wall_axis, wall_sign):
+    """
+    Contact between a 3D granule and a flat wall.
+    wall_axis: 0=x, 1=y, 2=z.  wall_sign: +1 if granule on positive side.
+    Returns (penetration, R_local) or None.
+    """
+    # Sample the superellipsoid surface and find extreme point
+    n_sample = 20
+    eta = np.linspace(-np.pi/2, np.pi/2, n_sample)
+    omega = np.linspace(-np.pi, np.pi, n_sample)
+    E, O = np.meshgrid(eta, omega, indexing='ij')
+    e2 = 2.0 / n2i
+    e1 = 2.0 / n1i
+    bx = ai * _sgnpow(np.cos(E), e2) * _sgnpow(np.cos(O), e1)
+    by = bi * _sgnpow(np.cos(E), e2) * _sgnpow(np.sin(O), e1)
+    bz = ci * _sgnpow(np.sin(E), e2)
+
+    # Rotate to world frame
+    R_mat = quat_to_rotation_matrix(qi)
+    body_pts = np.column_stack([bx.ravel(), by.ravel(), bz.ravel()])
+    world_pts = body_pts @ R_mat.T + np.array([xi, yi, zi])
+
+    coords = world_pts[:, wall_axis]
+
+    if wall_sign > 0:
+        idx = np.argmin(coords)
+        pen = wall_pos - coords[idx]
+    else:
+        idx = np.argmax(coords)
+        pen = coords[idx] - wall_pos
+
+    if pen <= 0:
+        return None
+
+    # Approximate local curvature radius from bounding sphere
+    R_local = ri_bound * 0.5  # rough approximation
+    return (pen, R_local)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 2D-slice mode (V1.4): generate 3D packing, slice at z-midplane
+# ══════════════════════════════════════════════════════════════════════
+
+def slice_superellipsoid_z(cx, cy, cz, a, b, c, n1, n2, quat, z_plane):
+    """
+    Slice a 3D superellipsoid at z = z_plane to produce a 2D cross-section.
+    Returns (a_2d, b_2d, n_2d, theta_2d) or None if plane doesn't intersect.
+    """
+    # Transform z_plane to body frame
+    R_mat = quat_to_rotation_matrix(quat)
+    delta = np.array([0.0, 0.0, z_plane - cz])
+    body_delta = R_mat.T @ delta
+
+    # z coordinate in body frame
+    z_body = body_delta[2]
+    z_term = abs(z_body / c) ** n2
+    if z_term >= 1.0:
+        return None  # plane doesn't intersect
+
+    # Cross-section: scale factor
+    s = (1.0 - z_term) ** (1.0 / n2)
+    a_2d = a * s
+    b_2d = b * s
+    n_2d = n1  # equatorial blockiness preserved in cross-section
+
+    # Orientation from projected rotation matrix
+    theta_2d = np.arctan2(R_mat[1, 0], R_mat[0, 0])
+
+    return a_2d, b_2d, n_2d, theta_2d
+
+
+def generate_packing_2d_slice(p: Params, seed=42) -> GranuleSystem:
+    """
+    Generate 3D packing, then slice at z-midplane to create 2D granule system.
+    Mimics experimental confocal imaging of a 3D scaffold.
+    """
+    print("  2D-slice mode: generating 3D packing first...")
+    gs_3d = generate_packing_3d(p, seed=seed)
+
+    z_plane = p.Lz / 2.0
+    xs, ys, rs, types, n_cells = [], [], [], [], []
+    a_list, b_list, n_shape_list, theta_list = [], [], [], []
+
+    for i in range(gs_3d.N):
+        result = slice_superellipsoid_z(
+            gs_3d.x[i], gs_3d.y[i], gs_3d.z[i],
+            gs_3d.a[i], gs_3d.b[i], gs_3d.c[i],
+            gs_3d.n1[i], gs_3d.n2[i],
+            gs_3d.quat[i] if gs_3d.quat is not None else np.array([1,0,0,0]),
+            z_plane)
+        if result is None:
+            continue
+        a_2d, b_2d, n_2d, theta_2d = result
+        r_eq = np.sqrt(a_2d * b_2d)  # equivalent radius from cross-section
+        if r_eq < 5.0:
+            continue  # too small slice
+
+        xs.append(gs_3d.x[i])
+        ys.append(gs_3d.y[i])
+        rs.append(r_eq)
+        types.append(gs_3d.gtype[i])
+        n_cells.append(int(gs_3d.n_cells[i]))
+        a_list.append(a_2d)
+        b_list.append(b_2d)
+        n_shape_list.append(n_2d)
+        theta_list.append(theta_2d)
+
+    print(f"  Sliced: {len(xs)} granules intersect z-midplane "
+          f"(of {gs_3d.N} total)")
+
+    if len(xs) == 0:
+        raise ValueError("No granules intersect the slice plane")
+
+    gs = GranuleSystem(
+        xs, ys, rs, types, n_cells,
+        a=a_list, b=b_list, n_shape=n_shape_list, theta=theta_list,
+        mode="2D")
+
+    domain_area = p.Lx * p.Ly
+    if p.shape_enabled:
+        areas = np.array([superellipse_area(gs.a[i], gs.b[i], gs.n1[i])
+                          for i in range(gs.N)])
+        act_f = float(np.sum(areas[gs.func_mask])) / domain_area
+        act_i = float(np.sum(areas[gs.inert_mask])) / domain_area
+    else:
+        act_f = sum(np.pi*gs.r[gs.func_mask]**2) / domain_area
+        act_i = sum(np.pi*gs.r[gs.inert_mask]**2) / domain_area
+    print(f"  2D slice packing: φ_f={act_f:.3f}, φ_i={act_i:.3f}, "
+          f"φ_v={1-act_f-act_i:.3f}")
     return gs
 
 
@@ -1153,40 +1958,236 @@ def compute_forces(gs: GranuleSystem, p: Params, rng):
 
 
 # ══════════════════════════════════════════════════════════════════════
+# 3D Force computation (V1.4)
+# ══════════════════════════════════════════════════════════════════════
+
+def compute_forces_3d(gs: GranuleSystem, p: Params, rng):
+    """
+    Compute all forces and torques on each granule in 3D.
+    Returns (F, torques) where F is (N, 3) and torques is (N, 3).
+    """
+    N = gs.N
+    F = np.zeros((N, 3))
+    torques = np.zeros((N, 3))
+    pos = gs.positions()  # (N, 3)
+
+    nu2 = p.poisson_ratio ** 2
+    E_star_gg = (p.E_modulus * 1e3) / (2.0 * (1.0 - nu2))
+    E_star_gw = (p.E_modulus * 1e3) / (1.0 - nu2)
+
+    friction_lut = {
+        (0, 0): (p.tau_0_ff, p.W_adh_ff),
+        (0, 1): (p.tau_0_if, p.W_adh_if),
+        (1, 0): (p.tau_0_if, p.W_adh_if),
+        (1, 1): (p.tau_0_ii, p.W_adh_ii),
+    }
+
+    # Neighbour search (3D)
+    max_r = float(np.max(gs.r_bound))
+    cutoff = 2*max_r + p.L_max
+    tree = cKDTree(pos)
+    pairs = tree.query_pairs(cutoff, output_type='ndarray')
+
+    for idx in range(len(pairs)):
+        i, j = pairs[idx]
+        dp = pos[j] - pos[i]
+        d = np.linalg.norm(dp)
+        if d < 1e-6:
+            continue
+        nv = dp / d  # unit normal i->j
+
+        # Contact detection
+        if gs.is_circle:
+            result = find_contact_spheres_3d(
+                pos[i,0], pos[i,1], pos[i,2], gs.r[i],
+                pos[j,0], pos[j,1], pos[j,2], gs.r[j])
+        else:
+            result = find_contact_superellipsoids_3d(
+                pos[i,0], pos[i,1], pos[i,2],
+                gs.a[i], gs.b[i], gs.c[i], gs.n1[i], gs.n2[i],
+                gs.quat[i],
+                pos[j,0], pos[j,1], pos[j,2],
+                gs.a[j], gs.b[j], gs.c[j], gs.n1[j], gs.n2[j],
+                gs.quat[j])
+
+        if result is not None:
+            _, overlap, nx, ny, nz, cx, cy, cz_pt, R_eff = result
+            n_vec = np.array([nx, ny, nz])
+
+            if overlap > 0:
+                Fc = hertz_contact_force(E_star_gg, R_eff, overlap)
+                tau_0, W_adh = friction_lut[(gs.gtype[i], gs.gtype[j])]
+                F_adh = 2.0 * np.pi * W_adh * R_eff * 1e3
+                F_normal = Fc - F_adh
+                Fn = F_normal * n_vec
+                F[i] -= Fn
+                F[j] += Fn
+
+                # Torque from off-centre contact
+                if not gs.is_circle:
+                    rc_i = np.array([cx - pos[i,0], cy - pos[i,1], cz_pt - pos[i,2]])
+                    rc_j = np.array([cx - pos[j,0], cy - pos[j,1], cz_pt - pos[j,2]])
+                    torques[i] += np.cross(rc_i, -Fn)
+                    torques[j] += np.cross(rc_j, Fn)
+
+                # Tangential friction
+                A_contact = np.pi * R_eff * overlap
+                dv = np.array([gs.vx[j]-gs.vx[i], gs.vy[j]-gs.vy[i],
+                               gs.vz[j]-gs.vz[i]])
+                v_dot_n = np.dot(dv, n_vec)
+                vt = dv - v_dot_n * n_vec
+                vt_mag = np.linalg.norm(vt)
+
+                if vt_mag > 1e-12:
+                    F_fric = tau_0 * A_contact * 1e-3 * np.tanh(
+                        vt_mag / p.friction_v_ref)
+                    t_vec = vt / vt_mag
+                    Ft = F_fric * t_vec
+                    F[i] += Ft
+                    F[j] -= Ft
+                    if not gs.is_circle:
+                        torques[i] += np.cross(rc_i, Ft)
+                        torques[j] += np.cross(rc_j, -Ft)
+
+            in_contact = True
+            contact_overlap = overlap
+        else:
+            in_contact = False
+            contact_overlap = 0.0
+
+        # Cell bridging (motor-clutch, functional-functional)
+        if gs.gtype[i] == 0 and gs.gtype[j] == 0:
+            if in_contact:
+                gap = -contact_overlap
+            else:
+                gap = d - gs.r_bound[i] - gs.r_bound[j]
+                if gap < 0:
+                    gap = 0.0
+            if 0 < gap < p.cell_sense_distance:
+                n_avail_i = max(0.0, gs.n_attached[i] - gs.n_overcrowded[i])
+                n_avail_j = max(0.0, gs.n_attached[j] - gs.n_overcrowded[j])
+                if n_avail_i > 0.1 and n_avail_j > 0.1:
+                    proximity = 1.0 - gap / p.cell_sense_distance
+                    n_br = np.sqrt(n_avail_i * n_avail_j) * proximity
+                    avg_maturity = 0.5 * (gs.fa_maturity[i] + gs.fa_maturity[j])
+                    F_per_cell = motor_clutch_force(p.E_modulus, p, avg_maturity)
+                    if gap > p.L_rest:
+                        F_mag = min(F_per_cell * n_br, p.F_max_per_cell * n_br)
+                        F[i] += F_mag * nv
+                        F[j] -= F_mag * nv
+
+    # Wall repulsion (6 faces)
+    for i in range(N):
+        walls = [
+            (0.0, 0, +1), (p.Lx, 0, -1),  # x walls
+            (0.0, 1, +1), (p.Ly, 1, -1),  # y walls
+            (0.0, 2, +1), (p.Lz, 2, -1),  # z walls
+        ]
+        if gs.is_circle:
+            r = gs.r[i]
+            coords = [gs.x[i], gs.y[i], gs.z[i]]
+            for wall_pos, axis, sign in walls:
+                if sign > 0:
+                    pen = r - (coords[axis] - wall_pos)
+                else:
+                    pen = (coords[axis] + r) - wall_pos
+                if pen > 0:
+                    Fw = hertz_contact_force(E_star_gw, r, pen)
+                    F[i, axis] += sign * Fw
+        else:
+            for wall_pos, axis, sign in walls:
+                wresult = find_contact_wall_3d(
+                    gs.x[i], gs.y[i], gs.z[i],
+                    gs.a[i], gs.b[i], gs.c[i],
+                    gs.n1[i], gs.n2[i], gs.quat[i], gs.r_bound[i],
+                    wall_pos, axis, sign)
+                if wresult is not None:
+                    pen, R_local = wresult
+                    Fw = hertz_contact_force(E_star_gw, R_local, pen)
+                    F[i, axis] += sign * Fw
+
+    # Active noise
+    if p.T_active > 0:
+        for i in range(N):
+            if gs.gtype[i] == 0:
+                gamma_i = p.drag_scale * gs.r[i]
+                noise_amp = np.sqrt(2 * gamma_i * p.T_active / p.dt)
+                F[i, 0] += noise_amp * rng.standard_normal()
+                F[i, 1] += noise_amp * rng.standard_normal()
+                F[i, 2] += noise_amp * rng.standard_normal()
+
+    return F, torques
+
+
+# ══════════════════════════════════════════════════════════════════════
 # Time integration (overdamped: γ dx/dt = F  →  dx = F/γ · dt)
 # ══════════════════════════════════════════════════════════════════════
 
 def step(gs: GranuleSystem, p: Params, rng, t: float):
     """One overdamped Euler step with cell state evolution and rotation."""
     update_cell_state(gs, p, t)
-    F, torques = compute_forces(gs, p, rng)
 
-    for i in range(gs.N):
-        gamma_i = p.drag_scale * gs.r[i]
-        vx = F[i,0] / gamma_i
-        vy = F[i,1] / gamma_i
-        # Velocity cap
-        v = np.sqrt(vx*vx + vy*vy)
-        if v > p.v_max:
-            vx *= p.v_max / v; vy *= p.v_max / v
-        # Store velocities for next step's friction calculation
-        gs.vx[i] = vx
-        gs.vy[i] = vy
-        gs.x[i] += vx * p.dt
-        gs.y[i] += vy * p.dt
+    if gs.is_3d:
+        F, torques = compute_forces_3d(gs, p, rng)
+    else:
+        F, torques = compute_forces(gs, p, rng)
 
-        # ── Rotational dynamics (V1.3, superellipses only) ──
-        if not gs.is_circle:
-            gamma_rot = p.drag_scale_rot * (gs.a[i]**2 + gs.b[i]**2) / 2.0
-            if gamma_rot > 1e-20:
-                gs.omega[i] = torques[i] / gamma_rot
-                gs.omega[i] = np.clip(gs.omega[i], -p.omega_max, p.omega_max)
-                gs.theta[i] += gs.omega[i] * p.dt
+    if gs.is_3d:
+        # ── 3D integration ──
+        for i in range(gs.N):
+            gamma_i = p.drag_scale * gs.r[i]
+            vx = F[i,0] / gamma_i
+            vy = F[i,1] / gamma_i
+            vz = F[i,2] / gamma_i
+            v = np.sqrt(vx*vx + vy*vy + vz*vz)
+            if v > p.v_max:
+                scale = p.v_max / v
+                vx *= scale; vy *= scale; vz *= scale
+            gs.vx[i] = vx; gs.vy[i] = vy; gs.vz[i] = vz
+            gs.x[i] += vx * p.dt
+            gs.y[i] += vy * p.dt
+            gs.z[i] += vz * p.dt
 
-        # Hard wall clamp
-        rb = gs.r_bound[i]
-        gs.x[i] = np.clip(gs.x[i], rb+0.5, p.Lx-rb-0.5)
-        gs.y[i] = np.clip(gs.y[i], rb+0.5, p.Ly-rb-0.5)
+            # 3D rotational dynamics (quaternion)
+            if not gs.is_circle:
+                I_eff = p.drag_scale_rot * (gs.a[i]**2 + gs.b[i]**2 + gs.c[i]**2) / 3.0
+                if I_eff > 1e-20:
+                    omega = torques[i] / I_eff
+                    omega_mag = np.linalg.norm(omega)
+                    if omega_mag > p.omega_max_3d:
+                        omega *= p.omega_max_3d / omega_mag
+                    gs.omega_3d[i] = omega
+                    gs.quat[i] = quat_integrate(gs.quat[i], omega, p.dt)
+
+            rb = gs.r_bound[i]
+            gs.x[i] = np.clip(gs.x[i], rb+0.5, p.Lx-rb-0.5)
+            gs.y[i] = np.clip(gs.y[i], rb+0.5, p.Ly-rb-0.5)
+            gs.z[i] = np.clip(gs.z[i], rb+0.5, p.Lz-rb-0.5)
+    else:
+        # ── 2D integration (V1.3 path) ──
+        for i in range(gs.N):
+            gamma_i = p.drag_scale * gs.r[i]
+            vx = F[i,0] / gamma_i
+            vy = F[i,1] / gamma_i
+            v = np.sqrt(vx*vx + vy*vy)
+            if v > p.v_max:
+                vx *= p.v_max / v; vy *= p.v_max / v
+            gs.vx[i] = vx
+            gs.vy[i] = vy
+            gs.x[i] += vx * p.dt
+            gs.y[i] += vy * p.dt
+
+            # 2D rotational dynamics (superellipses only)
+            if not gs.is_circle:
+                gamma_rot = p.drag_scale_rot * (gs.a[i]**2 + gs.b[i]**2) / 2.0
+                if gamma_rot > 1e-20:
+                    gs.omega[i] = torques[i] / gamma_rot
+                    gs.omega[i] = np.clip(gs.omega[i], -p.omega_max, p.omega_max)
+                    gs.theta[i] += gs.omega[i] * p.dt
+
+            rb = gs.r_bound[i]
+            gs.x[i] = np.clip(gs.x[i], rb+0.5, p.Lx-rb-0.5)
+            gs.y[i] = np.clip(gs.y[i], rb+0.5, p.Ly-rb-0.5)
 
     return F
 
@@ -1249,9 +2250,101 @@ def render_fields(gs: GranuleSystem, p: Params):
     return phi_f, phi_i, 1.0 - phi_f - phi_i
 
 
+def render_fields_3d(gs: GranuleSystem, p: Params):
+    """
+    Stamp each granule onto 3D grid using superellipsoid implicit function.
+    Returns φ_f, φ_i, φ_v arrays of shape (Ng, Ng, Ng).
+    """
+    Ng = p.Ngrid_3d
+    dx_g = p.Lx / Ng
+    dy_g = p.Ly / Ng
+    dz_g = p.Lz / Ng
+    xg = np.linspace(dx_g/2, p.Lx - dx_g/2, Ng)
+    yg = np.linspace(dy_g/2, p.Ly - dy_g/2, Ng)
+    zg = np.linspace(dz_g/2, p.Lz - dz_g/2, Ng)
+
+    phi_f = np.zeros((Ng, Ng, Ng))
+    phi_i = np.zeros((Ng, Ng, Ng))
+    w = p.interface_width
+
+    for i in range(gs.N):
+        rb = gs.r_bound[i] + 3*w  # include interface region
+        # Bounding box in grid indices
+        ix0 = max(0, int((gs.x[i] - rb) / dx_g))
+        ix1 = min(Ng, int((gs.x[i] + rb) / dx_g) + 1)
+        iy0 = max(0, int((gs.y[i] - rb) / dy_g))
+        iy1 = min(Ng, int((gs.y[i] + rb) / dy_g) + 1)
+        iz0 = max(0, int((gs.z[i] - rb) / dz_g))
+        iz1 = min(Ng, int((gs.z[i] + rb) / dz_g) + 1)
+        if ix0 >= ix1 or iy0 >= iy1 or iz0 >= iz1:
+            continue
+
+        X, Y, Z = np.meshgrid(xg[ix0:ix1], yg[iy0:iy1], zg[iz0:iz1],
+                               indexing='ij')
+
+        if gs.is_circle:
+            # Sphere: radial distance
+            dist = np.sqrt((X - gs.x[i])**2 + (Y - gs.y[i])**2 +
+                           (Z - gs.z[i])**2)
+            profile = 0.5 * (1.0 - np.tanh((dist - gs.r[i]) / w))
+        else:
+            # Superellipsoid implicit function
+            dx_l = X - gs.x[i]
+            dy_l = Y - gs.y[i]
+            dz_l = Z - gs.z[i]
+            # Transform to body frame
+            R_mat = quat_to_rotation_matrix(gs.quat[i])
+            # Vectorized rotation: body = R^T @ world_offset
+            bx = R_mat[0,0]*dx_l + R_mat[1,0]*dy_l + R_mat[2,0]*dz_l
+            by = R_mat[0,1]*dx_l + R_mat[1,1]*dy_l + R_mat[2,1]*dz_l
+            bz = R_mat[0,2]*dx_l + R_mat[1,2]*dy_l + R_mat[2,2]*dz_l
+
+            se_val = ((np.abs(bx/gs.a[i])**gs.n1[i] +
+                       np.abs(by/gs.b[i])**gs.n1[i])**(gs.n2[i]/gs.n1[i]) +
+                      np.abs(bz/gs.c[i])**gs.n2[i])
+            n_inv = 1.0 / gs.n2[i]
+            dist_approx = (se_val**n_inv - 1.0) * gs.r[i]
+            profile = 0.5 * (1.0 - np.tanh(dist_approx / w))
+
+        if gs.gtype[i] == 0:
+            phi_f[ix0:ix1, iy0:iy1, iz0:iz1] = np.maximum(
+                phi_f[ix0:ix1, iy0:iy1, iz0:iz1], profile)
+        else:
+            phi_i[ix0:ix1, iy0:iy1, iz0:iz1] = np.maximum(
+                phi_i[ix0:ix1, iy0:iy1, iz0:iz1], profile)
+
+    total = phi_f + phi_i
+    over = total > 0.99
+    if np.any(over):
+        phi_f[over] *= 0.99 / total[over]
+        phi_i[over] *= 0.99 / total[over]
+
+    return phi_f, phi_i, 1.0 - phi_f - phi_i
+
+
 # ══════════════════════════════════════════════════════════════════════
 # Metrics
 # ══════════════════════════════════════════════════════════════════════
+
+def kozeny_carman_permeability(porosity, d_grain_um):
+    """
+    Kozeny-Carman permeability estimate.
+    K = eps^3 * d^2 / [180 * (1-eps)^2]   [µm²]
+    """
+    eps = np.clip(porosity, 0.01, 0.99)
+    return eps**3 * d_grain_um**2 / (180.0 * (1.0 - eps)**2)
+
+
+def rcp_fraction_superellipsoid(mean_aspect_ratio):
+    """
+    Estimate random close packing fraction for superellipsoids.
+    For spheres: phi_RCP ~ 0.64.
+    For ellipsoids: increases with aspect ratio (Donev et al. 2004).
+    """
+    # Empirical fit from Donev et al.: phi_RCP ~ 0.64 + 0.08*(AR - 1) up to AR ~ 2
+    ar = max(1.0, mean_aspect_ratio)
+    return min(0.74, 0.64 + 0.08 * (ar - 1.0))
+
 
 def connectivity(field, thresh_frac=0.3):
     """Cluster analysis on thresholded field."""
@@ -1266,28 +2359,56 @@ def connectivity(field, thresh_frac=0.3):
 
 def compute_metrics(gs, p, phi_f, phi_i, phi_v, t, forces):
     m = dict(time=t)
-    m['phi_f_mean'] = np.mean(phi_f)
-    m['phi_i_mean'] = np.mean(phi_i)
-    m['phi_v_mean'] = np.mean(phi_v)
 
-    # Functional connectivity
-    fn, fl, fc = connectivity(phi_f, 0.3)
+    # ── Boundary exclusion: compute metrics on inner region only ──
+    bx = p.boundary_exclusion
+    if bx > 0:
+        shape = phi_f.shape
+        # Index ranges for inner region (exclude bx fraction from each edge)
+        lo = [int(bx * s) for s in shape]
+        hi = [int((1.0 - bx) * s) for s in shape]
+        if phi_f.ndim == 3:
+            inner = (slice(lo[0], hi[0]), slice(lo[1], hi[1]), slice(lo[2], hi[2]))
+        else:
+            inner = (slice(lo[0], hi[0]), slice(lo[1], hi[1]))
+        pf_inner = phi_f[inner]
+        pi_inner = phi_i[inner]
+        pv_inner = phi_v[inner]
+        # Granule mask: which granules are inside the inner region
+        x_lo = bx * p.Lx; x_hi = (1.0 - bx) * p.Lx
+        y_lo = bx * p.Ly; y_hi = (1.0 - bx) * p.Ly
+        inner_gran = (gs.x >= x_lo) & (gs.x <= x_hi) & (gs.y >= y_lo) & (gs.y <= y_hi)
+        if gs.is_3d:
+            z_lo = bx * p.Lz; z_hi = (1.0 - bx) * p.Lz
+            inner_gran &= (gs.z >= z_lo) & (gs.z <= z_hi)
+    else:
+        pf_inner, pi_inner, pv_inner = phi_f, phi_i, phi_v
+        inner_gran = np.ones(gs.N, dtype=bool)
+
+    m['phi_f_mean'] = float(np.mean(pf_inner))
+    m['phi_i_mean'] = float(np.mean(pi_inner))
+    m['phi_v_mean'] = float(np.mean(pv_inner))
+    m['boundary_exclusion'] = bx
+    m['n_granules_inner'] = int(np.sum(inner_gran))
+
+    # Functional connectivity (inner region)
+    fn, fl, fc = connectivity(pf_inner, 0.3)
     m.update(func_nc=fn, func_lf=fl, func_cov=fc)
 
-    # Void connectivity
-    vn, vl, vc = connectivity(phi_v, 0.3)
+    # Void connectivity (inner region)
+    vn, vl, vc = connectivity(pv_inner, 0.3)
     m.update(void_nc=vn, void_lf=vl, void_cov=vc)
 
-    # Inert connectivity
-    inn, il, _ = connectivity(phi_i, 0.3)
+    # Inert connectivity (inner region)
+    inn, il, _ = connectivity(pi_inner, 0.3)
     m.update(inert_nc=inn, inert_lf=il)
 
-    # Tissue: dense functional regions
-    m['tissue_frac'] = float(np.mean(phi_f > 0.5))
+    # Tissue: dense functional regions (inner region)
+    m['tissue_frac'] = float(np.mean(pf_inner > 0.5))
 
-    # Max cluster area
-    thr = np.mean(phi_f) + 0.3*np.std(phi_f)
-    b = (phi_f > thr).astype(int); lab, nc = label(b)
+    # Max cluster area (inner region)
+    thr = np.mean(pf_inner) + 0.3*np.std(pf_inner)
+    b = (pf_inner > thr).astype(int); lab, nc = label(b)
     dxg = p.Lx / p.Ngrid
     if nc > 0:
         sizes = np.array([np.sum(lab==l) for l in range(1, nc+1)])
@@ -1295,10 +2416,9 @@ def compute_metrics(gs, p, phi_f, phi_i, phi_v, t, forces):
     else:
         m['func_max_area'] = 0.0
 
-    # Mean displacement from initial (stored externally)
-    # Packing in functional-rich region
-    fr = phi_f > thr
-    pt = phi_f + phi_i
+    # Packing in functional-rich region (inner region)
+    fr = pf_inner > thr
+    pt = pf_inner + pi_inner
     m['packing_func_rich'] = float(np.mean(pt[fr])) if np.any(fr) else 0.0
 
     # Mean force magnitude
@@ -1412,13 +2532,41 @@ def compute_metrics(gs, p, phi_f, phi_i, phi_v, t, forces):
     m['mean_fa_maturity'] = float(np.mean(gs.fa_maturity[func])) if np.any(func) else 0.0
     m['n_overcrowded_total'] = float(np.sum(gs.n_overcrowded[func]))
 
+    # ── Transport metrics (V1.4, inner region) ──
+    porosity = float(np.mean(pv_inner))
+    m['porosity'] = porosity
+    inner_r = gs.r[inner_gran] if np.any(inner_gran) else gs.r
+    d_grain = float(np.mean(2 * inner_r))
+    m['d_grain_mean'] = d_grain
+    m['K_kozeny_carman'] = float(kozeny_carman_permeability(porosity, d_grain))
+
+    # Compaction ratio (inner region)
+    phi_solid = float(np.mean(pf_inner) + np.mean(pi_inner))
+    m['phi_solid'] = phi_solid
+    ar_mean = float(np.mean(np.maximum(gs.a, gs.b) /
+                            np.minimum(gs.a, gs.b))) if gs.N > 0 else 1.0
+    phi_rcp = rcp_fraction_superellipsoid(ar_mean)
+    m['phi_RCP'] = phi_rcp
+    m['compaction_ratio'] = phi_solid / phi_rcp if phi_rcp > 0 else 0.0
+
+    # Darcy number
+    if gs.is_3d:
+        L_char = (p.Lx * p.Ly * p.Lz)**(1.0/3.0)
+    else:
+        L_char = np.sqrt(p.Lx * p.Ly)
+    m['Da_number'] = m['K_kozeny_carman'] / (L_char**2) if L_char > 0 else 0.0
+
     return m
 
 
-def compute_displacement(gs, x0, y0):
+def compute_displacement(gs, x0, y0, z0=None):
     """RMS displacement from initial positions."""
     dx = gs.x - x0; dy = gs.y - y0
-    disp = np.sqrt(dx**2 + dy**2)
+    if gs.is_3d and z0 is not None:
+        dz = gs.z - z0
+        disp = np.sqrt(dx**2 + dy**2 + dz**2)
+    else:
+        disp = np.sqrt(dx**2 + dy**2)
     return float(np.mean(disp[gs.func_mask])), float(np.mean(disp[gs.inert_mask]))
 
 
@@ -1426,44 +2574,77 @@ def compute_displacement(gs, x0, y0):
 # Main simulation loop
 # ══════════════════════════════════════════════════════════════════════
 
-def run(p=None, seed=42):
+def run(p=None, seed=None):
     if p is None: p = Params()
+    if seed is None:
+        seed = int(np.random.default_rng().integers(0, 2**31))
+        print(f"  Using random seed: {seed}")
     rng = np.random.default_rng(seed)
 
-    print("\n  Generating packing...")
-    gs = generate_packing(p, seed=seed)
+    print(f"\n  Mode: {p.mode}")
+    print("  Generating packing...")
 
-    # Store initial positions for displacement tracking
+    # Mode-aware packing generation
+    if p.mode == "3D":
+        gs = generate_packing_3d(p, seed=seed)
+    elif p.mode == "2D-slice":
+        gs = generate_packing_2d_slice(p, seed=seed)
+    else:
+        gs = generate_packing(p, seed=seed)
+
+    # Store initial positions
     x0 = gs.x.copy(); y0 = gs.y.copy()
+    z0 = gs.z.copy() if gs.is_3d else None
 
     n_steps = int(p.t_total / p.dt)
-    hist, snaps, disp_hist = [], [], []
+    hist, snaps = [], []
 
     def save(t, F):
-        pf, pi, pv = render_fields(gs, p)
+        if gs.is_3d:
+            pf, pi, pv = render_fields_3d(gs, p)
+        else:
+            pf, pi, pv = render_fields(gs, p)
         m = compute_metrics(gs, p, pf, pi, pv, t, F)
-        df, di = compute_displacement(gs, x0, y0)
+        df, di = compute_displacement(gs, x0, y0, z0)
         m['disp_func'] = df; m['disp_inert'] = di
         hist.append(m)
-        snaps.append((pf.copy(), pi.copy(), pv.copy(),
-                       gs.x.copy(), gs.y.copy(), gs.r.copy(), gs.gtype.copy(),
-                       gs.n_attached.copy(), gs.spread_fraction.copy(),
-                       gs.fa_maturity.copy(), gs.n_overcrowded.copy(),
-                       gs.a.copy(), gs.b.copy(), gs.n_shape.copy(),
-                       gs.theta.copy()))
+        # Snapshot: mode-aware
+        snap = {
+            'phi_f': pf.copy(), 'phi_i': pi.copy(), 'phi_v': pv.copy(),
+            'x': gs.x.copy(), 'y': gs.y.copy(), 'z': gs.z.copy(),
+            'r': gs.r.copy(), 'gtype': gs.gtype.copy(),
+            'n_attached': gs.n_attached.copy(),
+            'spread_fraction': gs.spread_fraction.copy(),
+            'fa_maturity': gs.fa_maturity.copy(),
+            'n_overcrowded': gs.n_overcrowded.copy(),
+            'a': gs.a.copy(), 'b': gs.b.copy(), 'c': gs.c.copy(),
+            'n1': gs.n1.copy(), 'n2': gs.n2.copy(),
+            'mode': gs.mode,
+        }
+        if gs.is_3d and gs.quat is not None:
+            snap['quat'] = gs.quat.copy()
+        else:
+            snap['theta'] = gs.theta.copy()
+        # Store n_shape for 2D viz compat
+        snap['n_shape'] = gs.n1.copy()
+        snaps.append(snap)
         return m
 
-    # Initial save (t=0, no cell attachment yet)
+    # Initial save
     update_cell_state(gs, p, 0.0)
-    F0, _ = compute_forces(gs, p, rng)
+    if gs.is_3d:
+        F0, _ = compute_forces_3d(gs, p, rng)
+    else:
+        F0, _ = compute_forces(gs, p, rng)
     m = save(0.0, F0)
     print(f"\n  {'t(h)':>6} {'f_cl':>5} {'f_lf':>6} {'v_cl':>5} "
           f"{'tissue':>7} {'bridges':>7} {'attach':>7} {'spread':>6} "
-          f"{'FA_mat':>6} {'disp_f':>7}")
+          f"{'FA_mat':>6} {'disp_f':>7} {'K_KC':>8}")
     print(f"  {0:6.1f} {m['func_nc']:5d} {m['func_lf']:6.2f} {m['void_nc']:5d} "
           f"{m['tissue_frac']:7.3f} {m['n_bridges']:7d} "
           f"{m['n_attached_total']:7.0f} {m['mean_spread_frac']:6.2f} "
-          f"{m['mean_fa_maturity']:6.2f} {m['disp_func']:7.1f}")
+          f"{m['mean_fa_maturity']:6.2f} {m['disp_func']:7.1f} "
+          f"{m['K_kozeny_carman']:8.1f}")
 
     wall_t0 = timer.time()
     t = 0.0
@@ -1477,7 +2658,7 @@ def run(p=None, seed=42):
                   f"{m['void_nc']:5d} {m['tissue_frac']:7.3f} "
                   f"{m['n_bridges']:7d} {m['n_attached_total']:7.0f} "
                   f"{m['mean_spread_frac']:6.2f} {m['mean_fa_maturity']:6.2f} "
-                  f"{m['disp_func']:7.1f}")
+                  f"{m['disp_func']:7.1f} {m['K_kozeny_carman']:8.1f}")
 
     elapsed = timer.time() - wall_t0
     print(f"\n  Done in {elapsed:.1f}s ({n_steps} steps, {gs.N} granules)")
@@ -1499,13 +2680,21 @@ def plot_granules(snaps, hist, p, indices=None):
 
     for c, si in enumerate(indices):
         snap = snaps[si]
-        pf, pi, pv, xs, ys, rs, gt = snap[:7]
-        # Shape arrays (V1.3) — default to circles if not present
-        if len(snap) > 11:
-            a_arr, b_arr, ns_arr, th_arr = snap[11], snap[12], snap[13], snap[14]
-            has_shape = True
+        if isinstance(snap, dict):
+            pf, pi, pv = snap['phi_f'], snap['phi_i'], snap['phi_v']
+            xs, ys, rs, gt = snap['x'], snap['y'], snap['r'], snap['gtype']
+            has_shape = 'a' in snap and 'b' in snap and 'n_shape' in snap
+            if has_shape:
+                a_arr, b_arr = snap['a'], snap['b']
+                ns_arr = snap.get('n1', snap['n_shape'])
+                th_arr = snap.get('theta', np.zeros(len(xs)))
         else:
-            has_shape = False
+            pf, pi, pv, xs, ys, rs, gt = snap[:7]
+            if len(snap) > 11:
+                a_arr, b_arr, ns_arr, th_arr = snap[11], snap[12], snap[13], snap[14]
+                has_shape = True
+            else:
+                has_shape = False
 
         ax = axes[c]; ax.set_xlim(0, p.Lx); ax.set_ylim(0, p.Ly)
         ax.set_aspect('equal')
@@ -1548,7 +2737,15 @@ def plot_fields(snaps, hist, p, indices=None):
     cm = ['Oranges', 'Blues', 'Greens']
 
     for c, si in enumerate(indices):
-        pf, pi, pv = snaps[si][0], snaps[si][1], snaps[si][2]
+        snap = snaps[si]
+        if isinstance(snap, dict):
+            pf, pi, pv = snap['phi_f'], snap['phi_i'], snap['phi_v']
+        else:
+            pf, pi, pv = snap[0], snap[1], snap[2]
+        # For 3D fields, show midplane XY slice
+        if pf.ndim == 3:
+            mid_z = pf.shape[2] // 2
+            pf, pi, pv = pf[:,:,mid_z], pi[:,:,mid_z], pv[:,:,mid_z]
         flds = [pf, pi, pv]
         t = hist[si]['time']
         for r in range(3):
@@ -1644,7 +2841,15 @@ def plot_composite(snaps, hist, p, indices=None):
     fig, axes = plt.subplots(1, nc, figsize=(3.8*nc, 3.5))
     if nc == 1: axes = [axes]
     for c, si in enumerate(indices):
-        pf, pi, pv = snaps[si][0], snaps[si][1], snaps[si][2]
+        snap = snaps[si]
+        if isinstance(snap, dict):
+            pf, pi, pv = snap['phi_f'], snap['phi_i'], snap['phi_v']
+        else:
+            pf, pi, pv = snap[0], snap[1], snap[2]
+        # For 3D fields, show midplane XY slice
+        if pf.ndim == 3:
+            mid_z = pf.shape[2] // 2
+            pf, pi, pv = pf[:,:,mid_z], pi[:,:,mid_z], pv[:,:,mid_z]
         mx = max(pf.max(), pi.max(), pv.max(), 0.01)
         rgb = np.stack([pf/mx, pv/mx, pi/mx], axis=-1)
         axes[c].imshow(np.clip(np.transpose(rgb,(1,0,2)),0,1),
@@ -1660,11 +2865,17 @@ def plot_composite(snaps, hist, p, indices=None):
 
 if __name__ == '__main__':
     print("="*65)
-    print("  Overdamped Particle Dynamics: Cell-Driven Granular Rearrangement")
+    print("  GELLS-DEM V1.4: Cell-Driven Granular Rearrangement")
     print("="*65)
 
     p = Params()
-    print(f"\n  Domain: {p.Lx:.0f} × {p.Ly:.0f} µm")
+    if p.mode == "3D":
+        print(f"\n  Domain: {p.Lx:.0f} × {p.Ly:.0f} × {p.Lz:.0f} µm (3D)")
+    elif p.mode == "2D-slice":
+        print(f"\n  Domain: {p.Lx:.0f} × {p.Ly:.0f} µm (2D slice of "
+              f"{p.Lx:.0f}×{p.Ly:.0f}×{p.Lz:.0f} 3D)")
+    else:
+        print(f"\n  Domain: {p.Lx:.0f} × {p.Ly:.0f} µm (2D)")
     print(f"  R_func={p.R_func_mean:.0f}±{p.R_func_std:.0f} µm, "
           f"R_inert={p.R_inert_mean:.0f}±{p.R_inert_std:.0f} µm")
     print(f"  Cells/granule={p.n_cells_per_granule}, "
@@ -1682,10 +2893,29 @@ if __name__ == '__main__':
 
     hist, snaps, p, gs = run(p)
 
+    # Built-in plots
     fig1 = plot_granules(snaps, hist, p)
     fig2 = plot_fields(snaps, hist, p)
     fig3 = plot_timeseries(hist, p)
     fig4 = plot_composite(snaps, hist, p)
+
+    # V1.4 visualization scripts
+    outdir = 'results/default'
+    os.makedirs(outdir, exist_ok=True)
+
+    # Save built-in plots
+    fig1.savefig(os.path.join(outdir, 'granules.png'), dpi=150, bbox_inches='tight')
+    fig2.savefig(os.path.join(outdir, 'fields.png'), dpi=150, bbox_inches='tight')
+    fig3.savefig(os.path.join(outdir, 'timeseries.png'), dpi=150, bbox_inches='tight')
+    fig4.savefig(os.path.join(outdir, 'composite.png'), dpi=150, bbox_inches='tight')
+
+    import viz_compaction, viz_percolation, viz_movies, viz_phases
+    print("\n  Running visualization scripts...")
+    viz_compaction.run_all(hist, snaps=snaps, outdir=outdir)
+    viz_percolation.run_all(hist, outdir=outdir)
+    viz_movies.run_all(snaps, hist, p, outdir=outdir)
+    viz_phases.run_all(hist, snaps=snaps, p=p, outdir=outdir)
+
     plt.show()
 
     h0, hf = hist[0], hist[-1]
@@ -1715,3 +2945,10 @@ if __name__ == '__main__':
     print(f"    Attached: {hf['n_attached_total']:.0f} / {hf['n_seeded_total']:.0f}")
     print(f"    Spread: {hf['mean_spread_frac']:.0%}, FA maturity: {hf['mean_fa_maturity']:.0%}")
     print(f"    Overcrowded: {hf['n_overcrowded_total']:.0f}")
+    print(f"  Transport (V1.4):")
+    print(f"    Porosity: {h0['porosity']:.3f} → {hf['porosity']:.3f}")
+    print(f"    K (Kozeny-Carman): {h0['K_kozeny_carman']:.1f} → "
+          f"{hf['K_kozeny_carman']:.1f} µm²")
+    print(f"    Compaction ratio: {h0['compaction_ratio']:.3f} → "
+          f"{hf['compaction_ratio']:.3f} (φ_RCP={hf['phi_RCP']:.3f})")
+    print(f"    Darcy number: {hf['Da_number']:.2e}")
