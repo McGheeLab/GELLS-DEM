@@ -331,11 +331,17 @@ if __name__ == '__main__':
     indir = Path(args.input)
     outdir = args.outdir or str(indir / 'visualizations')
 
-    hist_file = indir / 'history.json'
-    if hist_file.exists():
-        with open(hist_file) as f:
-            hist = json.load(f)
-        print(f"Use programmatically: from viz_phases import run_all")
-        print(f"  run_all(hist, snaps, p, outdir='{outdir}')")
-    else:
-        print(f"No history.json found in {indir}")
+    # V1.5: Load from disk via load_run()
+    try:
+        from new_dem_0 import load_run
+        hist, snaps, p, meta = load_run(str(indir))
+        run_all(hist, snaps=snaps, p=p, outdir=outdir)
+    except Exception as e:
+        print(f"Could not load run data: {e}")
+        hist_file = indir / 'history.json'
+        if hist_file.exists():
+            with open(hist_file) as f:
+                hist = json.load(f)
+            run_all(hist, outdir=outdir)
+        else:
+            print(f"No history.json found in {indir}")

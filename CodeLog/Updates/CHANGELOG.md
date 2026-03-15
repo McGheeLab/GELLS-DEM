@@ -8,6 +8,176 @@ MINOR tracks feature additions and improvements.
 
 ---
 
+## [V1.5.2] - 2026-03-14
+
+### Added
+- **Per-contact data storage** (`new_dem_0.py`): `compute_forces_3d()` and `compute_forces()`
+  now return a third element — a list of contact dicts with per-contact fields: `i`, `j`
+  (granule pair), `cx/cy/cz` (contact point), `nx/ny/nz` (contact normal), `overlap`,
+  `R_eff`, `F_normal`, `A_contact`. Contacts propagated through `step()`, `save()`, and
+  serialized to disk in `.npz` snapshots as structured arrays (`contact_i`, `contact_j`,
+  `contact_cx`, etc.).
+- **`viz_stress.py`**: New PyVista-based 3D visualization script for surface stress fields.
+  - `granule_surface_mesh()`: Generates PyVista PolyData mesh from superellipsoid parametric
+    surface with quaternion rotation and world-frame translation.
+  - `compute_surface_stress()`: Maps Hertzian contact pressure distribution
+    `p(r) = p0 * sqrt(1 - r²/a_c²)` to mesh vertices, with Gaussian smoothing tail.
+  - `reconstruct_contacts()`: Fallback contact detection for older snapshots without
+    stored contact data.
+  - `plot_stress_cross_section()`: Z-slab cross-section (thickness = 1 functional granule
+    diameter) showing continuous surface stress colormap. Top-down camera, multi-timepoint.
+  - `select_interesting_granules()`: Auto-selects granules by composite score (contact count,
+    force magnitude, bridge count), excluding boundary granules.
+  - `granule_evolution_gif()`: Isolated granule group time evolution in isometric view with
+    surface stress colormap and cell ellipsoid rendering. Fixed color scale across frames.
+  - `cell_ellipsoid_mesh()`: Volume-conserving ellipsoid meshes for cells — sphere for
+    unattached, oblate for spreading, prolate for bridging (elongated toward target).
+  - `plot_granules_3d()`: Isosurface rendering with mid-slice opaque (`opacity=1.0`) and
+    remaining granules as ghosts (`opacity=0.1`).
+  - `run_all()`: Public API + CLI with `-i`/`-o`, uses `load_run()`.
+
+### Changed
+- **Instant cell attachment**: Cells now start as ATTACHED (not UNATTACHED) with
+  `t_attach_onset=0.0` and `t_attach_half=0.0` (instant full attachment). When
+  `t_attach_half <= 0.01`, the sigmoidal kinetics are bypassed and all cells attach
+  immediately.
+- **Bridge formation kinetics** (`new_dem_0.py`): Bridge formation is now a gradual,
+  stochastic process instead of deterministic and instantaneous:
+  - **Probabilistic initiation**: Each eligible cell has a Poisson-distributed probability
+    of finding a bridge target per timestep (`bridge_attempt_rate`, default 0.3/h), modulated
+    by gap proximity. Only SPREADING or PROLIFERATING cells with sufficient FA maturity
+    (`min_fa_for_bridge`, default 0.3) can attempt bridges.
+  - **Maturity ramp**: New bridges start weak and ramp to full motor-clutch force over
+    `bridge_formation_time` (default 2 h), modeling filopodia extension, migration to gap
+    edge, and adhesion formation on the target granule.
+  - **Persistent bridges**: Committed BRIDGING cells retain their state across timesteps
+    (no longer reset to ATTACHED each step). Bridge age tracked in `cell_bridge_age` array.
+  - **Bridge senescence**: After sustained mechanical load (`bridge_senescence_time`,
+    default 24 h), bridging cells transition to SENESCENT — they do not detach.
+  - **Bridge rupture**: If the gap exceeds `bridge_break_gap` (default 60 µm), the bridge
+    ruptures and the cell goes senescent (mechanically damaged).
+  - New parameters: `bridge_attempt_rate`, `bridge_formation_time`,
+    `bridge_senescence_time`, `min_fa_for_bridge`, `bridge_break_gap`.
+- **Phase field isosurface rendering** (`viz_stress.plot_granules_3d()`): `granules_3d.png`
+  now uses phase field isosurfaces (`phi_f`, `phi_i`) so overlapping/touching granules
+  merge into a continuous solid, matching the physical scaffold. Mid z-slice is opaque,
+  rest rendered as ghosts. Falls back to individual parametric meshes when phase fields
+  are unavailable.
+- **Bridge cell rendering** (`viz_cells.py`): Replaced dumbbell shape with volume-conserving
+  elongated ellipse spanning the bridge gap. Cell width derived from area conservation
+  (`A_cell / (π * a_long)`), providing realistic fibroblast morphology.
+- **`plot_granules()`** (`new_dem_0.py`): 3D mode now delegates to
+  `viz_stress.plot_granules_3d()` for isosurface rendering with z-slice opacity, falling
+  back to 2D circle projection if PyVista is unavailable.
+- **`run_all_trials.py`**: Added `viz_stress.run_all()` to local trial pipeline after
+  `viz_cells`.
+- **`viz_cells.run_all()`**: In 3D mode, automatically delegates stress rendering to
+  `viz_stress` if PyVista is available.
+
+### Bug Fixes
+- **Watertight granule meshes** (`viz_stress.granule_surface_mesh()`): Fixed hollow shell
+  rendering caused by open parametric surface seams. Omega now uses `endpoint=False` with
+  modulo-wrapped face connectivity, and single-vertex pole caps replace degenerate pole rings.
+  Meshes are verified manifold via `mesh.is_manifold`. `compute_normals(consistent_normals=True)`
+  ensures correct outward face normals for solid rendering and clipping.
+- **Watertight cell ellipsoids** (`viz_stress.cell_ellipsoid_mesh()`): Replaced open parametric
+  mesh with `pv.Sphere()` primitive scaled by axis radii — guaranteed watertight with proper
+  normals.
+
+---
+
+## [V1.5.1] - 2026-03-14
+
+### Added
+- **`viz_cells.py`**: New visualization script for cell and stress analysis (2D + 3D).
+  - `plot_stress_map()`: Granules colored by net force magnitude (`YlOrRd` colormap)
+    with directional arrows (quiver). Multi-panel layout at selected timepoints.
+  - `plot_cell_states()`: Fibroblast-like cell morphology rendered as matplotlib patches.
+    Stellate/star shapes for proliferating cells, dumbbell-shaped bridging cells that span
+    surface-to-surface with contact patches at both ends, round blobs for unattached.
+  - `cell_timelapse_gif()`: Animated GIF of cell migration, bridge formation, and pulling
+    across all snapshot timepoints. Uses PillowWriter with imageio fallback.
+  - `run_all()`: Public API matching other viz scripts, plus CLI with `-i`/`-o`.
+  - 3D support via XY projection (circles for granules, quaternion-rotated cell positions).
+- **Cell migration** (`new_dem_0.py`): Non-bridging attached cells (ATTACHED, SPREADING,
+  PROLIFERATING) now perform a random walk on the granule surface each timestep.
+  Controlled by `Params.cell_migration_speed` (default 5.0 µm/h). Applies in 2D
+  (`cell_theta_local`) and 3D (`cell_eta_local`, `cell_omega_local`).
+
+### Changed
+- **`new_dem_0.py` `save()` closure**: In-memory snapshot dicts now include `force_x`,
+  `force_y`, `cell_state`, `cell_granule_id`, `cell_theta_local`, `cell_fx`, `cell_fy`,
+  `cell_bridge_target`, `cell_contact_area`, `cell_offset`. 3D mode also adds `force_z`,
+  `cell_fz`, `cell_eta_local`, `cell_omega_local`. Previously these were only in on-disk
+  `.npz` files — now available to viz scripts called in-process.
+- **`update_cell_state()`**: Now accepts optional `rng` parameter, passed through to
+  `_update_individual_cells()` for cell migration random walk.
+- **Bridge cell rendering**: Bridging cells now render as dumbbell shapes spanning from
+  the host granule surface to the nearest point on the target granule surface, with
+  contact patches at both attachment points (radius proportional to contact area) and
+  a thin process in the middle. Previously rendered as small fixed-size shapes with
+  dashed lines to the target granule center.
+- **`run_all_trials.py`**: Added `viz_cells.run_all()` to local trial pipeline.
+
+---
+
+## [V1.5] - 2026-03-14
+
+### Added
+- **Individual cell tracking (V1.5)**: Each cell is tracked individually with its own
+  state (`CellState` enum: UNATTACHED, ATTACHED, SPREADING, PROLIFERATING, BRIDGING,
+  SENESCENT), surface position on its host granule, force vector, contact area with
+  host granule, and bridge target granule. Cell data stored as flat numpy arrays
+  indexed by `cell_offset` per granule.
+- **CellState enum**: `IntEnum` with 6 discrete states, extensible for future cell types.
+  Stored as integers in numpy arrays for efficient serialization.
+- **Data serialization**: Full simulation data now saved to disk during `run()`.
+  Per-timepoint `.npz` snapshots include granule positions, velocities, forces, shapes,
+  orientations, and all per-cell tracking arrays. Scalar metrics saved as `history.csv`
+  (pandas-loadable) and `history.json` (exact fidelity). Phase fields optionally saved
+  separately. All output archived as `.tar.gz` for HPC transfer.
+- **`load_run()` function**: Load a complete simulation from disk (directory or `.tar.gz`).
+  Returns `(hist, snaps, p, metadata)` matching the `run()` return signature.
+- **`load_cells()` function**: Targeted loading of per-cell data for specific snapshots.
+- **New Params fields**: `save_data` (bool, default True), `save_fields` (bool, default
+  False), `output_dir` (str), `compress_archive` (bool, default True).
+- **Granule velocity and forces in snapshots**: `vx`, `vy`, `vz`, `force_x`, `force_y`,
+  `force_z` now included in serialized data.
+- **`_record_bridge_forces()` helper**: Distributes bridging forces to individual cells
+  during force computation.
+- **`_initialize_cells()` helper**: Distributes cells uniformly on functional granule
+  surfaces during packing.
+
+### Changed
+- **`update_cell_state()`**: Now also updates individual cell states via
+  `_update_individual_cells()`. Per-granule aggregates remain authoritative for force
+  computation (backward compatible, identical physics to V1.4.1).
+- **`compute_forces()` / `compute_forces_3d()`**: Now record per-cell bridging forces
+  and bridge targets. Resets cell force arrays at start of each call.
+- **`save()` inner function in `run()`**: Now writes to disk when `p.save_data=True`.
+- **Viz scripts**: All 4 viz scripts (`viz_compaction`, `viz_percolation`, `viz_movies`,
+  `viz_phases`) can now load full simulation data from disk via `load_run()` in their
+  `__main__` blocks.
+- **`run_hpc_headless.py`**: `--output-dir` now sets both figure and data serialization paths.
+- **`run_all_trials.py`**: Sets `p.output_dir` per trial for data serialization.
+
+### Output Format
+```
+results/<run_name>/
+  params.json          — Params dataclass as JSON dict
+  metadata.json        — Version, git hash, seed, domain, cell state enum mapping
+  history.csv          — Scalar metrics (one row per save point, pandas-loadable)
+  history.json         — Scalar metrics (exact numeric fidelity)
+  snapshots/
+    snap_0000.npz      — Granule + cell arrays at t=0
+    snap_0001.npz      — etc.
+  fields/              — Optional (save_fields=True)
+    fields_0000.npz    — phi_f, phi_i, phi_v grids
+  <run_name>.tar.gz    — Archive of everything
+```
+
+---
+
 ## [V1.4.1] - 2026-03-14
 
 ### Added

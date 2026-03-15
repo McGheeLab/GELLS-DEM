@@ -198,9 +198,15 @@ if __name__ == '__main__':
     indir = Path(args.input)
     outdir = args.outdir or str(indir / 'visualizations')
 
-    hist_file = indir / 'history.json'
-    if hist_file.exists():
-        hist = load_history(hist_file)
-        run_all(hist, outdir=outdir)
-    else:
-        print(f"No history.json found in {indir}")
+    # V1.5: Try load_run() first, fall back to history.json
+    try:
+        from new_dem_0 import load_run
+        hist, snaps, p, meta = load_run(str(indir))
+        run_all(hist, snaps=snaps, outdir=outdir)
+    except Exception:
+        hist_file = indir / 'history.json'
+        if hist_file.exists():
+            hist = load_history(hist_file)
+            run_all(hist, outdir=outdir)
+        else:
+            print(f"No history.json found in {indir}")

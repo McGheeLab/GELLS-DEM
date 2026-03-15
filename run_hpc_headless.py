@@ -205,6 +205,9 @@ def main():
     out_dir = args.output_dir
     os.makedirs(out_dir, exist_ok=True)
 
+    # V1.5: Wire output_dir for data serialization
+    p.output_dir = out_dir
+
     # Print config
     trial_label = f" (trial: {os.path.basename(args.trial)})" if args.trial else ""
     print("=" * 65)

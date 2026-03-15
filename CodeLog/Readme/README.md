@@ -19,7 +19,7 @@ over 24--72 hours.
 ### Key Physics
 
 - **Hertzian contact mechanics** with physically meaningful Young's modulus (1--100 kPa)
-- **Motor-clutch cell bridging** (Chan & Odde 2008) — substrate stiffness-dependent traction
+- **Motor-clutch cell bridging** (Chan & Odde 2008) — substrate stiffness-dependent traction with probabilistic bridge initiation, maturity ramp, and senescence
 - **DMT adhesion** and **area-dependent friction** by granule pair type
 - **Superellipsoid granule shapes** (3D) / superellipse shapes (2D)
 - **Quaternion-based 3D rotational dynamics**
@@ -114,11 +114,13 @@ The Young's modulus `E_modulus` controls how much granules overlap under cell fo
 
 ```
 GELLS-DEM/
-├── new_dem_0.py                 # Main simulation engine (V1.4.1)
+├── new_dem_0.py                 # Main simulation engine (V1.5.2)
 ├── viz_compaction.py            # Void-space & compaction plots
 ├── viz_percolation.py           # Transport property analysis
 ├── viz_movies.py                # 3D volumetric animations
 ├── viz_phases.py                # Individual phase volumes
+├── viz_cells.py                 # Cell morphology, stress maps, GIFs (V1.5.1)
+├── viz_stress.py                # 3D surface stress, isosurfaces, GIFs (V1.5.2)
 ├── new_dem_visualization.py     # Legacy post-processing
 ├── new_dem_postprocess.py       # Legacy post-processing (JSON)
 ├── run_hpc_headless.py          # HPC headless runner
@@ -149,7 +151,7 @@ When run as a script, four matplotlib figures are generated:
 3. **Metric time series** (3×3 grid: topology, dynamics, cell state)
 4. **RGB composite** (Red=functional, Green=void, Blue=inert)
 
-### Specialized Visualization Scripts (V1.4)
+### Specialized Visualization Scripts (V1.4+)
 
 | Script | Plots |
 |--------|-------|
@@ -157,6 +159,8 @@ When run as a script, four matplotlib figures are generated:
 | `viz_percolation.py` | Kozeny-Carman permeability, porosity + RCP, dimensionless groups (Pe, Re, Da, compaction, porosity ratio), Darcy flow, void connectivity |
 | `viz_movies.py` | Rotating 3D isosurface, time-lapse compaction, z-sweep cross-section, composite 2×2 |
 | `viz_phases.py` | Phase isosurface strip, phase fractions vs time, tri-plane evolution (XY/XZ/YZ), interface area vs time |
+| `viz_cells.py` | Cell morphology patches, force-magnitude stress maps, cell timelapse GIF (V1.5.1) |
+| `viz_stress.py` | 3D Hertzian surface stress fields, cross-section stress maps, granule evolution GIFs, isosurface rendering (V1.5.2, requires PyVista) |
 
 Usage:
 ```bash
@@ -164,16 +168,20 @@ python viz_compaction.py -i ./simulations/run1
 python viz_percolation.py -i ./simulations/run1
 python viz_movies.py -i ./simulations/run1
 python viz_phases.py -i ./simulations/run1
+python viz_cells.py -i ./simulations/run1
+python viz_stress.py -i ./simulations/run1
 ```
 
 Or programmatically:
 ```python
-import viz_compaction, viz_percolation, viz_movies, viz_phases
+import viz_compaction, viz_percolation, viz_movies, viz_phases, viz_cells, viz_stress
 
 viz_compaction.run_all(hist, snaps=snaps, outdir='plots/')
 viz_percolation.run_all(hist, outdir='plots/')
 viz_movies.run_all(snaps, hist, p, outdir='plots/')
 viz_phases.run_all(hist, snaps=snaps, p=p, outdir='plots/')
+viz_cells.run_all(snaps, hist, p, outdir='plots/')
+viz_stress.run_all(snaps, hist, p, outdir='plots/')
 ```
 
 All visualization scripts support PyVista (primary) with matplotlib fallback.

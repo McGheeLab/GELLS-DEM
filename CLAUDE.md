@@ -6,17 +6,19 @@
 is a 2D/3D overdamped particle dynamics simulator for modelling cell-driven rearrangement
 of hydrogel granular scaffolds. The primary simulation engine is `new_dem_0.py`.
 
-**Current version: V1.4.1**
+**Current version: V1.5.2**
 
 ## Repository Layout
 
 ```
 GELLS-DEM/
-├── new_dem_0.py                 # PRIMARY simulation engine (V1.4)
+├── new_dem_0.py                 # PRIMARY simulation engine (V1.5.2)
 ├── viz_compaction.py            # Void-space & compaction visualization
 ├── viz_percolation.py           # Transport property analysis (Darcy, Kozeny-Carman)
 ├── viz_movies.py                # 3D volumetric animations (rotating, timelapse, sweep)
 ├── viz_phases.py                # Individual phase volume visualization
+├── viz_cells.py                 # Cell morphology & stress map visualization (V1.5.1)
+├── viz_stress.py                # 3D surface stress, granule isosurfaces, cell ellipsoids (V1.5.2)
 ├── new_dem_visualization.py     # Unified post-processing & visualisation (legacy)
 ├── new_dem_postprocess.py       # Legacy-compatible post-processing (JSON frames)
 ├── run_hpc_headless.py          # HPC headless runner (supports 2D/3D modes)
@@ -50,9 +52,12 @@ GELLS-DEM/
   NOT set as an arbitrary spring constant. See `hertz_contact_force()`.
 - **Cell force model**: Motor-clutch (V1.2+, Chan & Odde 2008). Cell traction depends on
   substrate stiffness, replacing the old simple spring. See `motor_clutch_force()`.
-- **Cell lifecycle** (V1.2+): Cells are 20 µm spheres → attach at ~3 h → spread to 5 µm-tall
-  ellipsoids (volume conserved) → overcrowded cells crawl on others → bridges form via
-  motor-clutch adhesions. See `update_cell_state()`.
+- **Cell lifecycle** (V1.2+, updated V1.5.2): Cells are 20 µm spheres that attach instantly
+  (default `t_attach_onset=0`, `t_attach_half=0`) → spread to 5 µm-tall ellipsoids (volume
+  conserved) → overcrowded cells go senescent. Bridges form probabilistically
+  (`bridge_attempt_rate`, `min_fa_for_bridge`) with force ramp over `bridge_formation_time`.
+  Persistent bridges → SENESCENT after `bridge_senescence_time`. See `update_cell_state()`,
+  `_service_committed_bridges()`, `_attempt_new_bridges()`.
 - **Granule shape 2D** (V1.3+): Superellipses `|x/a|^n + |y/b|^n = 1` parameterised by
   semi-axes (a, b), blockiness exponent (n), and orientation (θ). Circles are the
   special case a=b, n=2. Enable with `shape_enabled=True`. See `superellipse_*()` functions.
@@ -69,7 +74,8 @@ GELLS-DEM/
 - **Volume conservation**: Overlap lens area is tracked and redistributed via effective radii
   for rendering. Forces still use the original (undeformed) radii.
 - **Integration**: Overdamped Euler (no inertia). Velocity cap prevents numerical blowup.
-- **Neighbour search**: `scipy.spatial.cKDTree` with cutoff `2*max_r_bound + cell_sense_distance`.
+- **Neighbour search**: `scipy.spatial.cKDTree` with cutoff `2*max_r_bound + L_max` where
+  `L_max = max(cell_sense_distance, bridge_break_gap)`.
 - **Performance** (V1.4+): Optional Numba JIT for Newton-Raphson solver and superellipsoid
   geometry. Bounding-box clipping in 3D field rendering. Target: 500-1000 granules.
 - **Packing** (V1.4.1+): RSA placement followed by compression settle phase
@@ -81,6 +87,22 @@ GELLS-DEM/
 - **Trial JSON format** (V1.4.1+): Two formats supported. **Flat**: keys are `Params` field
   names directly (e.g., `"E_modulus": 10.0`). **Legacy**: nested sections (domain,
   mechanics, shape, etc.) with translated key names. Flat format detected by `"_format": "flat"`.
+- **Individual cell tracking** (V1.5+): Each cell tracked individually via `CellState` enum
+  (UNATTACHED, ATTACHED, SPREADING, PROLIFERATING, BRIDGING, SENESCENT). Flat arrays in
+  `GranuleSystem` indexed by `cell_offset[i]:cell_offset[i+1]`. Per-granule aggregates
+  remain authoritative for force computation (physics identical to V1.4.1).
+- **Data serialization** (V1.5+): Per-timepoint `.npz` snapshots with granule + cell arrays.
+  Scalar metrics as CSV/JSON. Params and metadata as JSON. Archived as `.tar.gz`.
+  Controlled by `Params.save_data`, `save_fields`, `output_dir`, `compress_archive`.
+- **Data loading** (V1.5+): `load_run(run_dir)` → `(hist, snaps, p, metadata)`. Also
+  `load_cells(run_dir, snap_index)` for targeted cell analysis.
+- **Per-contact data** (V1.5.2+): Each contact stores point, normal, overlap, R_eff,
+  F_normal, A_contact. Serialized to `.npz` as structured arrays. Used by `viz_stress.py`
+  for Hertzian surface stress mapping.
+- **Bridge formation kinetics** (V1.5.2+): Bridges form probabilistically via Poisson
+  process, ramp force over `bridge_formation_time`, persist across timesteps, and transition
+  to SENESCENT after sustained load. Parameters: `bridge_attempt_rate`, `bridge_formation_time`,
+  `bridge_senescence_time`, `min_fa_for_bridge`, `bridge_break_gap`.
 
 ## Conventions
 
@@ -89,6 +111,8 @@ GELLS-DEM/
 - All parameters live in the `Params` dataclass; modify defaults there or pass overrides.
 - Snapshots are dicts with keys: `phi_f`, `phi_i`, `phi_v`, `x`, `y`, `r`, `gtype`, plus
   cell state and shape arrays. In 3D mode, also includes `z`, `quat`, `c`, `n1`, `n2`.
+- Serialized snapshots (V1.5) also include per-cell arrays (`cell_*`) and granule
+  velocities/forces.
 
 ## Documentation Requirements
 
@@ -134,17 +158,34 @@ python viz_compaction.py -i ./simulations/run1
 python viz_percolation.py -i ./simulations/run1
 python viz_movies.py -i ./simulations/run1
 python viz_phases.py -i ./simulations/run1
+python viz_cells.py -i ./simulations/run1
+python viz_stress.py -i ./simulations/run1
 ```
 
 Or import programmatically:
 
 ```python
-import viz_compaction, viz_percolation, viz_movies, viz_phases
+import viz_compaction, viz_percolation, viz_movies, viz_phases, viz_cells
 
 viz_compaction.run_all(hist, snaps=snaps, outdir='plots/')
 viz_percolation.run_all(hist, outdir='plots/')
 viz_movies.run_all(snaps, hist, p, outdir='plots/')
 viz_phases.run_all(hist, snaps=snaps, p=p, outdir='plots/')
+viz_cells.run_all(snaps, hist, p, outdir='plots/')
+viz_stress.run_all(snaps, hist, p, outdir='plots/')  # requires pyvista
+```
+
+### Loading Saved Data (V1.5)
+
+```python
+from new_dem_0 import load_run, load_cells
+
+# Load from output directory or .tar.gz archive
+hist, snaps, p, metadata = load_run('results/default')
+
+# Load per-cell data from a specific timepoint
+cells = load_cells('results/default', snap_index=0)
+# cells['cell_state'], cells['cell_fx'], cells['cell_bridge_target'], ...
 ```
 
 ## Dependencies

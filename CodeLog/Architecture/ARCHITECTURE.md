@@ -1,6 +1,6 @@
 # GELLS-DEM Architecture Document
 
-**Version:** V1.4.1
+**Version:** V1.5.2
 **Last updated:** 2026-03-14
 **Primary source file:** `new_dem_0.py`
 
@@ -58,12 +58,14 @@ relevant timescales (24--72 hours).
 └──────────────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────────────┐
-│                    Visualization Scripts (V1.4)                       │
+│                    Visualization Scripts (V1.4+)                      │
 │                                                                      │
 │  viz_compaction.py     Void-space evolution, packing, compaction     │
 │  viz_percolation.py    Darcy, Kozeny-Carman, dimensionless groups    │
 │  viz_movies.py         Rotating GIF, timelapse, z-sweep, composite   │
 │  viz_phases.py         Phase isosurfaces, fractions, tri-plane       │
+│  viz_cells.py          Cell morphology, stress maps, GIFs (V1.5.1)  │
+│  viz_stress.py         3D surface stress, isosurfaces, GIFs (V1.5.2)│
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -83,6 +85,7 @@ relevant timescales (24--72 hours).
 | Cell timeline | `t_attach_onset`, `t_attach_half`, `t_spread_duration`, `fa_maturation_rate` | h, h, h, 1/h | Attachment/spreading/FA kinetics |
 | Motor-clutch | `n_motors`, `F_motor_stall`, `n_clutches`, `k_clutch`, `k_on_clutch`, `k_off_clutch` | --, nN, --, nN/um, 1/s, 1/s | Chan & Odde 2008 force model |
 | Cell bridging | `cell_sense_distance`, `F_max_per_cell`, `L_rest` | um, nN, um | Filopodia range, force cap, rest length |
+| Bridge kinetics | `bridge_attempt_rate`, `bridge_formation_time`, `bridge_senescence_time`, `min_fa_for_bridge`, `bridge_break_gap` | 1/h, h, h, --, um | Stochastic bridge initiation, maturity ramp, senescence, rupture (V1.5.2) |
 | Contact mechanics | `E_modulus`, `poisson_ratio` | kPa, -- | Hertzian contact (V1.1) |
 | Friction | `tau_0_ii/if/ff`, `friction_v_ref` | Pa, µm/h | Area-dependent hydrogel friction (V1.2) |
 | Adhesion | `W_adh_ii/if/ff` | J/m² | DMT adhesion by pair type (V1.2) |
@@ -104,6 +107,9 @@ Mode-aware container. Stores all per-granule arrays:
 - **Type**: `gtype` (int, 0=functional, 1=inert)
 - **Cell count**: `n_cells` (float64)
 - **Cell state** (V1.2): `n_attached`, `spread_fraction`, `fa_maturity`, `n_overcrowded`
+- **Per-cell tracking** (V1.5): flat arrays indexed by `cell_offset[i]:cell_offset[i+1]`
+  - `cell_granule_id`, `cell_state` (CellState enum), `cell_theta_local`/`cell_eta_local`/`cell_omega_local`
+  - `cell_fx`/`cell_fy`/`cell_fz` (force vector), `cell_bridge_target`, `cell_bridge_age`, `cell_contact_area`
 - **Velocity state**: `vx`, `vy` (float64); `vz` (float64, 3D only)
 - **Shape semi-axes**: `a`, `b` (float64); `c` (float64, 3D only)
 - **Blockiness**: `n_shape` (equatorial n1); `n1`, `n2` (3D mode)
@@ -200,7 +206,7 @@ Per-step lifecycle: attachment → spreading → FA maturation → overcrowding
 | **Contact (normal)** | All overlapping pairs | Hertz − DMT | `E_modulus`, `poisson_ratio`, `W_adh_*` |
 | **Contact (tangential)** | All overlapping pairs | Area-dependent friction | `tau_0_*`, `friction_v_ref` |
 | **Contact torque** | Non-spherical granules | τ = (contact_pt − centre) × F | Off-centre contacts |
-| **Cell bridging** | Functional pairs with attached cells | Motor-clutch | `n_motors`, `F_motor_stall`, etc. |
+| **Cell bridging** | Functional pairs with spreading/proliferating cells | Motor-clutch (probabilistic, maturity-ramped) | `bridge_attempt_rate`, `bridge_formation_time`, `min_fa_for_bridge` |
 | **Wall** | Granules penetrating boundary | Hertz (rigid flat) | 4 walls (2D) or 6 walls (3D) |
 | **Active noise** | Functional granules only | Gaussian white noise | `T_active` |
 
@@ -211,7 +217,7 @@ Dispatch: `compute_forces()` → 2D path, `compute_forces_3d()` → 3D path.
 **2D path:**
 ```
 update_cell_state(gs, p, t)
-F, torques = compute_forces(gs, p, rng)
+F, torques, contacts = compute_forces(gs, p, rng)
 v = F / gamma;  |v| = min(|v|, v_max)
 x += v * dt;  x = clamp(x, 4 walls)
 theta += omega * dt  (non-circular granules)
@@ -220,7 +226,7 @@ theta += omega * dt  (non-circular granules)
 **3D path:**
 ```
 update_cell_state(gs, p, t)
-F, torques = compute_forces_3d(gs, p, rng)
+F, torques, contacts = compute_forces_3d(gs, p, rng)
 v = F / gamma;  |v| = min(|v|, v_max)
 x,y,z += v * dt;  clamp to 6 walls
 quat = quat_integrate(quat, omega_3d, dt)
@@ -376,3 +382,50 @@ Missing `"mode"` defaults to `"2D"`. See `Trial15_3D.json` for a flat format exa
 6. **Performance target**: 500-1000 granules in 3D with optional Numba JIT.
 7. **Rendering backends**: PyVista primary for 3D (high quality, off-screen capable),
    matplotlib fallback when PyVista unavailable.
+8. **Aggregate-authoritative cell state**: Per-granule aggregates (n_attached, etc.) are the
+   source of truth for force computation. Individual cell states are derived from aggregates.
+   This ensures physics identical to V1.4.1.
+
+---
+
+## 7. Data Serialization (V1.5)
+
+### 7.1 CellState Enum
+
+`CellState(IntEnum)` with values: UNATTACHED(0), ATTACHED(1), SPREADING(2),
+PROLIFERATING(3), BRIDGING(4), SENESCENT(5). Stored as int arrays, extensible.
+
+### 7.2 Output Format
+
+```
+results/<run_name>/
+  params.json           — Params dataclass as JSON
+  metadata.json         — version, git hash, seed, cell state enum map
+  history.csv           — scalar metrics (pandas-loadable)
+  history.json          — scalar metrics (exact fidelity)
+  snapshots/
+    snap_NNNN.npz       — granule + cell arrays per timepoint
+  fields/               — optional (save_fields=True)
+    fields_NNNN.npz     — phi_f, phi_i, phi_v grids
+  <run_name>.tar.gz     — archive of everything
+```
+
+### 7.3 Per-Snapshot NPZ Contents
+
+**Granule arrays (N):** x, y, z, r, gtype, a, b, c, n1, n2, vx, vy, vz,
+n_attached, spread_fraction, fa_maturity, n_overcrowded, n_cells,
+force_x, force_y, force_z, theta/quat.
+
+**Cell arrays (N_cells):** cell_granule_id, cell_state, cell_theta_local,
+cell_eta_local, cell_omega_local, cell_fx, cell_fy, cell_fz,
+cell_bridge_target, cell_bridge_age, cell_contact_area, cell_offset.
+
+**Contact arrays (N_contacts, V1.5.2):** contact_i, contact_j (granule pair),
+contact_cx, contact_cy, contact_cz (contact point), contact_nx, contact_ny,
+contact_nz (contact normal), contact_overlap, contact_R_eff, contact_F_normal,
+contact_A_contact.
+
+### 7.4 Loading API
+
+- `load_run(run_dir)` → `(hist, snaps, p, metadata)` — from directory or .tar.gz
+- `load_cells(run_dir, snap_index=None)` — targeted cell data loading

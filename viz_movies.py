@@ -310,5 +310,13 @@ if __name__ == '__main__':
 
     indir = Path(args.input)
     outdir = args.outdir or str(indir / 'visualizations')
-    print(f"Use programmatically: from viz_movies import run_all")
-    print(f"  run_all(snaps, hist, p, outdir='{outdir}')")
+
+    # V1.5: Load from disk via load_run()
+    try:
+        from new_dem_0 import load_run
+        hist, snaps, p, meta = load_run(str(indir))
+        run_all(snaps, hist, p, outdir=outdir)
+    except Exception as e:
+        print(f"Could not load run data: {e}")
+        print(f"Use programmatically: from viz_movies import run_all")
+        print(f"  run_all(snaps, hist, p, outdir='{outdir}')")

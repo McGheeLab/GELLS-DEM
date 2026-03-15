@@ -4,7 +4,7 @@
 #SBATCH --partition=standard
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=4             # Puma: 5 GB memory per CPU (4 CPUs = 20 GB)
+#SBATCH --cpus-per-task=4
 #SBATCH --time=04:00:00
 #SBATCH --output=slurm_logs/%x_%j.out
 #SBATCH --error=slurm_logs/%x_%j.err

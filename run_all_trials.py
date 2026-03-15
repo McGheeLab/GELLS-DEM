@@ -9,7 +9,7 @@ Run modes (set RUN_MODE below):
 """
 
 # ── USER CONFIGURATION ──────────────────────────────────────────────
-RUN_MODE = 3                        # 1 = Local, 2 = HPC, 3 = HPC (custom config)
+RUN_MODE = 1                        # 1 = Local, 2 = HPC, 3 = HPC (custom config)
 TRIALS_DIR = "Trials"               # directory containing trial .json files
 OUTPUT_DIR = "results/trials"       # base output directory
 SEED = None                         # random seed (None = random each run)
@@ -50,7 +50,8 @@ def run_local(trials: list, output_base: str, seed=None):
         Params, run, plot_granules, plot_fields,
         plot_timeseries, plot_composite, print_stiffness_info
     )
-    import viz_compaction, viz_percolation, viz_movies, viz_phases
+    import viz_compaction, viz_percolation, viz_movies, viz_phases, viz_cells
+    import viz_stress
     import matplotlib.pyplot as plt
 
     os.makedirs(output_base, exist_ok=True)
@@ -70,6 +71,9 @@ def run_local(trials: list, output_base: str, seed=None):
         for k, v in overrides.items():
             if hasattr(p, k):
                 setattr(p, k, type(getattr(p, k))(v))
+
+        # V1.5: Wire output_dir for data serialization
+        p.output_dir = out_dir
 
         mode = getattr(p, 'mode', '2D')
         if mode == '3D' or mode == '2D-slice':
@@ -101,6 +105,8 @@ def run_local(trials: list, output_base: str, seed=None):
         viz_percolation.run_all(hist, outdir=out_dir)
         viz_movies.run_all(snaps, hist, p, outdir=out_dir)
         viz_phases.run_all(hist, snaps=snaps, p=p, outdir=out_dir)
+        viz_cells.run_all(snaps, hist, p, outdir=out_dir)
+        viz_stress.run_all(snaps, hist, p, outdir=out_dir)
 
         plt.close('all')
 

@@ -1,7 +1,7 @@
 """
 Overdamped Particle Dynamics Model for Cell-Driven Granular Rearrangement
 ==========================================================================
-V1.4 — Full 3D Volumetric Simulation with 2D/2D-slice/3D modes.
+V1.5 — Individual Cell Tracking + Data Serialization.
 
 MODES:
     "2D"       — Pure 2D simulation with superellipses (V1.3 compatible)
@@ -50,8 +50,13 @@ from matplotlib.patches import Circle, Polygon
 from matplotlib.collections import PatchCollection
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional
+from enum import IntEnum
 import time as timer
 import os
+import json
+import csv
+import tarfile
+import subprocess
 
 try:
     from numba import njit
@@ -96,8 +101,8 @@ class Params:
     cell_coverage: float = 0.6      # max fraction of granule projected area covered
 
     # ── Cell attachment & spreading timeline ──
-    t_attach_onset: float = 3.0     # hours, when cells begin attaching
-    t_attach_half: float = 1.5      # hours after onset for 50% attachment
+    t_attach_onset: float = 0.0     # hours, when cells begin attaching
+    t_attach_half: float = 0.0      # hours after onset for 50% attachment (0 = instant)
     t_spread_duration: float = 3.0  # hours for attached cell to fully spread
     fa_maturation_rate: float = 0.3 # 1/h, focal adhesion maturation rate
 
@@ -110,10 +115,20 @@ class Params:
     k_off_clutch: float = 0.1      # 1/s, baseline clutch unbinding rate
     F_bond: float = 0.002          # nN (2 pN), characteristic bond rupture force
 
+    # ── Cell migration ──
+    cell_migration_speed: float = 5.0  # µm/h, random walk speed on granule surface
+
     # ── Cell sensing & bridging ──
     cell_sense_distance: float = 40.0  # µm, filopodia sensing range
     F_max_per_cell: float = 50.0       # nN, absolute max force cap per cell
     L_rest: float = 5.0                # µm, rest length (~ spread cell thickness)
+
+    # ── Bridge formation kinetics ──
+    bridge_attempt_rate: float = 0.3   # 1/h, Poisson rate per eligible cell per timestep
+    bridge_formation_time: float = 2.0 # h, ramp time for new bridge to reach full force
+    bridge_senescence_time: float = 24.0  # h, sustained bridge load → senescence
+    min_fa_for_bridge: float = 0.3     # min FA maturity to attempt bridging
+    bridge_break_gap: float = 60.0     # µm, gap at which committed bridge ruptures
 
     # ── Contact mechanics (Hertzian) ──
     E_modulus: float = 10.0         # kPa, Young's modulus of hydrogel
@@ -180,14 +195,34 @@ class Params:
     # ── Performance ──
     use_numba: bool = True          # use Numba JIT if available
 
+    # ── Data serialization (V1.5) ──
+    save_data: bool = True              # save simulation data to disk
+    save_fields: bool = False           # save phase field grids (large in 3D)
+    output_dir: str = "results/default" # output directory for serialized data
+    compress_archive: bool = True       # create .tar.gz at end of simulation
+
     @property
     def L_max(self):
-        """Max bridging distance equals cell sensing distance."""
-        return self.cell_sense_distance
+        """Max interaction distance: max of sensing and bridge break gap."""
+        return max(self.cell_sense_distance, self.bridge_break_gap)
 
     @property
     def save_every(self):
         return max(1, int(self.save_every_h / self.dt))
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Cell state enum (V1.5)
+# ══════════════════════════════════════════════════════════════════════
+
+class CellState(IntEnum):
+    """Discrete states for individual cell tracking.  Extensible."""
+    UNATTACHED = 0      # pre-attachment spherical cell
+    ATTACHED = 1        # attached but not yet spreading
+    SPREADING = 2       # actively spreading on granule surface
+    PROLIFERATING = 3   # fully spread, FA mature
+    BRIDGING = 4        # generating traction force across a gap
+    SENESCENT = 5       # overcrowded / inactive
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -271,10 +306,36 @@ class GranuleSystem:
         self.vy = np.zeros(self.N)
         self.vz = np.zeros(self.N)
 
+        # ── Per-cell tracking (V1.5) ──
+        total_cells = int(np.sum(n_cells))
+        self.total_cells = total_cells
+        # Cell-to-granule offset: cells for granule i live at
+        #   cell_offset[i] : cell_offset[i+1]
+        offsets = np.zeros(self.N + 1, dtype=int)
+        for k in range(self.N):
+            offsets[k + 1] = offsets[k] + int(n_cells[k])
+        self.cell_offset = offsets
+        # Per-cell arrays
+        self.cell_granule_id = np.zeros(total_cells, dtype=int)
+        self.cell_state = np.full(total_cells, int(CellState.UNATTACHED), dtype=int)
+        self.cell_theta_local = np.zeros(total_cells, dtype=np.float64)    # 2D surface angle
+        self.cell_eta_local = np.zeros(total_cells, dtype=np.float64)      # 3D parametric eta
+        self.cell_omega_local = np.zeros(total_cells, dtype=np.float64)    # 3D parametric omega
+        self.cell_fx = np.zeros(total_cells, dtype=np.float64)             # force x (nN)
+        self.cell_fy = np.zeros(total_cells, dtype=np.float64)             # force y (nN)
+        self.cell_fz = np.zeros(total_cells, dtype=np.float64)             # force z (nN)
+        self.cell_bridge_target = np.full(total_cells, -1, dtype=int)      # bridge target (-1=none)
+        self.cell_contact_area = np.zeros(total_cells, dtype=np.float64)   # footprint area (µm²)
+        self.cell_bridge_age = np.zeros(total_cells, dtype=np.float64)     # hours in bridge state
+
     def positions(self):
         if self.mode == "3D":
             return np.column_stack([self.x, self.y, self.z])
         return np.column_stack([self.x, self.y])
+
+    def cells_on_granule(self, i):
+        """Return slice for per-cell arrays corresponding to granule i."""
+        return slice(self.cell_offset[i], self.cell_offset[i + 1])
 
     @property
     def is_3d(self):
@@ -1001,7 +1062,7 @@ def motor_clutch_force(E_kPa, p: Params, fa_maturity_val):
     return min(F_mc, p.F_max_per_cell)
 
 
-def update_cell_state(gs: GranuleSystem, p: Params, t: float):
+def update_cell_state(gs: GranuleSystem, p: Params, t: float, rng=None):
     """
     Advance per-granule cell state for current simulation time.
 
@@ -1027,16 +1088,20 @@ def update_cell_state(gs: GranuleSystem, p: Params, t: float):
         if gs.gtype[i] != 0:
             continue
 
-        # ── Attachment (sigmoidal kinetics) ──
+        # ── Attachment (sigmoidal kinetics or instant) ──
         if t >= p.t_attach_onset:
-            tau = t - p.t_attach_onset
-            frac = 1.0 / (1.0 + np.exp(
-                -3.0 * (tau - p.t_attach_half) / max(0.1, p.t_attach_half)))
+            if p.t_attach_half <= 0.01:
+                # Instant full attachment
+                frac = 1.0
+            else:
+                tau = t - p.t_attach_onset
+                frac = 1.0 / (1.0 + np.exp(
+                    -3.0 * (tau - p.t_attach_half) / max(0.1, p.t_attach_half)))
             gs.n_attached[i] = gs.n_cells[i] * frac
         else:
             gs.n_attached[i] = 0.0
 
-        # ── Spreading (linear ramp after half-attachment reached) ──
+        # ── Spreading (linear ramp after attachment) ──
         if gs.n_attached[i] > 0.5:
             t_since = max(0.0, t - p.t_attach_onset - p.t_attach_half)
             gs.spread_fraction[i] = min(1.0, t_since / eff_spread_dur)
@@ -1055,6 +1120,88 @@ def update_cell_state(gs: GranuleSystem, p: Params, t: float):
             gs.spread_fraction[i], p.cell_diameter, p.cell_height_spread)
         cap = max_cells_on_granule(gs.r[i], A_cell, p.cell_coverage)
         gs.n_overcrowded[i] = max(0.0, gs.n_attached[i] - cap)
+
+    # ── V1.5: Per-cell state tracking ──
+    _update_individual_cells(gs, p, rng)
+
+
+def _update_individual_cells(gs: GranuleSystem, p: Params, rng=None):
+    """Map per-granule aggregate cell state to individual cell states.
+
+    Committed BRIDGING cells are preserved — their bridge_age is incremented
+    and they transition to SENESCENT after sustained load (bridge_senescence_time).
+    New bridges are initiated probabilistically during force computation.
+
+    Also applies random-walk migration for mobile cells (ATTACHED, SPREADING,
+    PROLIFERATING) on the granule surface.  BRIDGING and SENESCENT cells
+    do not migrate.
+    """
+    mobile_states = {int(CellState.ATTACHED), int(CellState.SPREADING),
+                     int(CellState.PROLIFERATING)}
+
+    for i in range(gs.N):
+        if gs.gtype[i] != 0:
+            continue
+        n_total = gs.cell_offset[i + 1] - gs.cell_offset[i]
+        if n_total == 0:
+            continue
+
+        n_att = int(round(gs.n_attached[i]))
+        n_over = int(round(gs.n_overcrowded[i]))
+        sf = gs.spread_fraction[i]
+        fa = gs.fa_maturity[i]
+
+        # Compute per-cell contact area from current spread state
+        A_cell = cell_projected_area(sf, p.cell_diameter, p.cell_height_spread)
+
+        for k in range(n_total):
+            ci = gs.cell_offset[i] + k
+            gs.cell_contact_area[ci] = A_cell if k < n_att else 0.0
+
+            # ── Preserve committed bridges ──
+            if gs.cell_state[ci] == int(CellState.BRIDGING):
+                gs.cell_bridge_age[ci] += p.dt
+                # Sustained mechanical load → senescence
+                if gs.cell_bridge_age[ci] >= p.bridge_senescence_time:
+                    gs.cell_state[ci] = int(CellState.SENESCENT)
+                    gs.cell_bridge_target[ci] = -1
+                    gs.cell_bridge_age[ci] = 0.0
+                continue  # don't overwrite bridge state
+
+            # ── Already senescent stays senescent ──
+            if gs.cell_state[ci] == int(CellState.SENESCENT):
+                continue
+
+            # ── Normal state assignment ──
+            if k >= n_att:
+                gs.cell_state[ci] = int(CellState.UNATTACHED)
+            elif k >= (n_att - n_over) and n_over > 0:
+                gs.cell_state[ci] = int(CellState.SENESCENT)
+            elif sf >= 0.95 and fa >= 0.5:
+                gs.cell_state[ci] = int(CellState.PROLIFERATING)
+            elif sf > 0.0:
+                gs.cell_state[ci] = int(CellState.SPREADING)
+            else:
+                gs.cell_state[ci] = int(CellState.ATTACHED)
+
+        # ── Cell migration: random walk on granule surface ──
+        if rng is not None and p.cell_migration_speed > 0:
+            r_eff = max(gs.r[i], 1.0)
+            sigma = p.cell_migration_speed * p.dt / r_eff
+            for k in range(n_total):
+                ci = gs.cell_offset[i] + k
+                if gs.cell_state[ci] not in mobile_states:
+                    continue
+                if gs.mode == "3D":
+                    gs.cell_eta_local[ci] += rng.normal(0, sigma)
+                    gs.cell_omega_local[ci] += rng.normal(0, sigma)
+                    # Clamp eta to avoid poles
+                    gs.cell_eta_local[ci] = np.clip(
+                        gs.cell_eta_local[ci], -0.85 * np.pi / 2, 0.85 * np.pi / 2)
+                    gs.cell_omega_local[ci] %= (2 * np.pi)
+                else:
+                    gs.cell_theta_local[ci] += rng.normal(0, sigma)
+                    gs.cell_theta_local[ci] %= (2 * np.pi)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1209,6 +1356,40 @@ def _settle_packing_3d(gs, p):
 
 
 # ══════════════════════════════════════════════════════════════════════
+# Cell initialization (V1.5)
+# ══════════════════════════════════════════════════════════════════════
+
+def _initialize_cells(gs: GranuleSystem, rng):
+    """Distribute cells uniformly on functional granule surfaces.
+
+    Assigns cell_granule_id and initial surface positions.
+    Cells start as ATTACHED (ready to spread and bridge immediately).
+    """
+    for i in range(gs.N):
+        if gs.gtype[i] != 0:
+            continue
+        sl = gs.cells_on_granule(i)
+        n = gs.cell_offset[i + 1] - gs.cell_offset[i]
+        if n == 0:
+            continue
+        gs.cell_granule_id[sl] = i
+        gs.cell_state[sl] = int(CellState.ATTACHED)
+        gs.n_attached[i] = float(n)
+
+        if gs.mode == "3D":
+            # Distribute on superellipsoid surface (avoid poles)
+            etas = np.linspace(-0.8 * np.pi / 2, 0.8 * np.pi / 2, n)
+            omegas = rng.uniform(0, 2 * np.pi, n)
+            gs.cell_eta_local[sl] = etas
+            gs.cell_omega_local[sl] = omegas
+        else:
+            # Distribute uniformly around superellipse perimeter
+            thetas = np.linspace(0, 2 * np.pi, n, endpoint=False)
+            thetas += rng.uniform(0, 2 * np.pi / max(1, n))
+            gs.cell_theta_local[sl] = thetas
+
+
+# ══════════════════════════════════════════════════════════════════════
 # Packing generator (random sequential addition)
 # ══════════════════════════════════════════════════════════════════════
 
@@ -1334,6 +1515,7 @@ def generate_packing(p: Params, seed=42) -> GranuleSystem:
           f"{np.sum(gs.inert_mask)} inert (φ_i={act_i:.3f})")
     print(f"  Void fraction: {1-act_f-act_i:.3f}")
     print(f"  Total cells: {int(sum(gs.n_cells))}")
+    _initialize_cells(gs, rng)
     return gs
 
 
@@ -1473,6 +1655,7 @@ def generate_packing_3d(p: Params, seed=42) -> GranuleSystem:
           f"{np.sum(gs.inert_mask)} inert (φ_i={act_i:.3f})")
     print(f"  Void fraction: {1-act_f-act_i:.3f}")
     print(f"  Total cells: {int(sum(gs.n_cells))}")
+    _initialize_cells(gs, rng)
     return gs
 
 
@@ -1735,7 +1918,125 @@ def generate_packing_2d_slice(p: Params, seed=42) -> GranuleSystem:
         act_i = sum(np.pi*gs.r[gs.inert_mask]**2) / domain_area
     print(f"  2D slice packing: φ_f={act_f:.3f}, φ_i={act_i:.3f}, "
           f"φ_v={1-act_f-act_i:.3f}")
+    _initialize_cells(gs, np.random.default_rng(seed))
     return gs
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Per-cell bridge force recording (V1.5)
+# ══════════════════════════════════════════════════════════════════════
+
+def _service_committed_bridges(gs, gi, gj, gap, p, F_per_cell, nx, ny, nz, F):
+    """Re-apply forces for cells already committed to a bridge between gi↔gj.
+
+    For each committed bridging cell, apply force modulated by bridge maturity
+    (ramp over bridge_formation_time).  If gap exceeds bridge_break_gap,
+    the bridge ruptures and the cell goes senescent.
+
+    Returns (n_committed_i, n_committed_j) — number of committed cells on each side.
+    """
+    n_ci = n_cj = 0
+
+    for ci in range(gs.cell_offset[gi], gs.cell_offset[gi + 1]):
+        if gs.cell_state[ci] == int(CellState.BRIDGING) and gs.cell_bridge_target[ci] == gj:
+            if gap > p.bridge_break_gap:
+                # Bridge rupture → senescent (cell was under excessive strain)
+                gs.cell_state[ci] = int(CellState.SENESCENT)
+                gs.cell_bridge_target[ci] = -1
+                gs.cell_bridge_age[ci] = 0.0
+            else:
+                maturity = min(1.0, gs.cell_bridge_age[ci] / max(0.1, p.bridge_formation_time))
+                F_cell = min(F_per_cell * maturity, p.F_max_per_cell)
+                gs.cell_fx[ci] += F_cell * nx
+                gs.cell_fy[ci] += F_cell * ny
+                gs.cell_fz[ci] += F_cell * nz
+                F[gi, 0] += F_cell * nx if F.ndim == 2 else 0
+                F[gi, 1] += F_cell * ny if F.ndim == 2 else 0
+                if F.ndim == 2 and F.shape[1] == 3:
+                    F[gi, 2] += F_cell * nz
+                elif F.ndim == 2 and F.shape[1] == 2:
+                    pass  # 2D, no z
+                n_ci += 1
+
+    for cj in range(gs.cell_offset[gj], gs.cell_offset[gj + 1]):
+        if gs.cell_state[cj] == int(CellState.BRIDGING) and gs.cell_bridge_target[cj] == gi:
+            if gap > p.bridge_break_gap:
+                gs.cell_state[cj] = int(CellState.SENESCENT)
+                gs.cell_bridge_target[cj] = -1
+                gs.cell_bridge_age[cj] = 0.0
+            else:
+                maturity = min(1.0, gs.cell_bridge_age[cj] / max(0.1, p.bridge_formation_time))
+                F_cell = min(F_per_cell * maturity, p.F_max_per_cell)
+                gs.cell_fx[cj] -= F_cell * nx
+                gs.cell_fy[cj] -= F_cell * ny
+                gs.cell_fz[cj] -= F_cell * nz
+                F[gj, 0] -= F_cell * nx if F.ndim == 2 else 0
+                F[gj, 1] -= F_cell * ny if F.ndim == 2 else 0
+                if F.ndim == 2 and F.shape[1] == 3:
+                    F[gj, 2] -= F_cell * nz
+                elif F.ndim == 2 and F.shape[1] == 2:
+                    pass  # 2D, no z
+                n_cj += 1
+
+    return n_ci, n_cj
+
+
+def _attempt_new_bridges(gs, gi, gj, gap, p, rng, F_per_cell, nx, ny, nz, F):
+    """Probabilistically initiate new bridges between granules gi and gj.
+
+    Only cells that are SPREADING or PROLIFERATING with sufficient FA maturity
+    can attempt bridging.  Each eligible cell has a Poisson-distributed
+    probability of finding and committing to a bridge target per timestep.
+    """
+    bridgeable_states = (int(CellState.SPREADING), int(CellState.PROLIFERATING))
+    min_fa = p.min_fa_for_bridge
+
+    # Proximity modulates probability: closer gaps → easier to find target
+    proximity = 1.0 - gap / p.cell_sense_distance
+    p_bridge = (1.0 - np.exp(-p.bridge_attempt_rate * p.dt)) * proximity
+
+    # Eligible cells on granule i (sufficient FA maturity, not already bridging)
+    for ci in range(gs.cell_offset[gi], gs.cell_offset[gi + 1]):
+        if gs.cell_state[ci] not in bridgeable_states:
+            continue
+        if gs.fa_maturity[gi] < min_fa:
+            continue
+        if rng.random() < p_bridge:
+            gs.cell_state[ci] = int(CellState.BRIDGING)
+            gs.cell_bridge_target[ci] = gj
+            gs.cell_bridge_age[ci] = 0.0
+            # Initial force is very weak (bridge just forming)
+            maturity = min(1.0, p.dt / max(0.1, p.bridge_formation_time))
+            F_cell = min(F_per_cell * maturity, p.F_max_per_cell)
+            gs.cell_fx[ci] += F_cell * nx
+            gs.cell_fy[ci] += F_cell * ny
+            gs.cell_fz[ci] += F_cell * nz
+            if F.ndim == 2 and F.shape[1] >= 2:
+                F[gi, 0] += F_cell * nx
+                F[gi, 1] += F_cell * ny
+            if F.ndim == 2 and F.shape[1] == 3:
+                F[gi, 2] += F_cell * nz
+
+    # Eligible cells on granule j
+    for cj in range(gs.cell_offset[gj], gs.cell_offset[gj + 1]):
+        if gs.cell_state[cj] not in bridgeable_states:
+            continue
+        if gs.fa_maturity[gj] < min_fa:
+            continue
+        if rng.random() < p_bridge:
+            gs.cell_state[cj] = int(CellState.BRIDGING)
+            gs.cell_bridge_target[cj] = gi
+            gs.cell_bridge_age[cj] = 0.0
+            maturity = min(1.0, p.dt / max(0.1, p.bridge_formation_time))
+            F_cell = min(F_per_cell * maturity, p.F_max_per_cell)
+            gs.cell_fx[cj] -= F_cell * nx
+            gs.cell_fy[cj] -= F_cell * ny
+            gs.cell_fz[cj] -= F_cell * nz
+            if F.ndim == 2 and F.shape[1] >= 2:
+                F[gj, 0] -= F_cell * nx
+                F[gj, 1] -= F_cell * ny
+            if F.ndim == 2 and F.shape[1] == 3:
+                F[gj, 2] -= F_cell * nz
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1766,6 +2067,12 @@ def compute_forces(gs: GranuleSystem, p: Params, rng):
     F = np.zeros((N, 2))
     torques = np.zeros(N)
     pos = gs.positions()
+    contacts = []  # V1.5.2: per-contact data for stress visualization
+
+    # V1.5: Reset per-cell force vectors (but preserve bridge state and targets)
+    gs.cell_fx[:] = 0.0
+    gs.cell_fy[:] = 0.0
+    gs.cell_fz[:] = 0.0
 
     # ── Precompute effective moduli (Pa) ──
     nu2 = p.poisson_ratio ** 2
@@ -1875,44 +2182,41 @@ def compute_forces(gs: GranuleSystem, p: Params, rng):
                     torques[i] += rci_x * Fty - rci_y * Ftx
                     torques[j] += rcj_x * (-Fty) - rcj_y * (-Ftx)
 
+            # V1.5.2: Record contact data for stress visualization
+            contacts.append({
+                'i': i, 'j': j,
+                'cx': contact_x, 'cy': contact_y, 'cz': 0.0,
+                'nx': nx, 'ny': ny, 'nz': 0.0,
+                'overlap': overlap, 'R_eff': R_eff,
+                'F_normal': F_normal, 'A_contact': A_contact,
+                'gtype_i': int(gs.gtype[i]), 'gtype_j': int(gs.gtype[j]),
+            })
+
         # ── Cell bridging (motor-clutch model, functional–functional) ──
         if gs.gtype[i] == 0 and gs.gtype[j] == 0:
             if gs.is_circle:
                 gap = d - gs.r[i] - gs.r[j]
             else:
-                # Surface-to-surface gap: negative of overlap (or use bounding)
                 if in_contact:
                     gap = -overlap
                 else:
-                    # Approximate gap from bounding radii
                     gap = d - gs.r_bound[i] - gs.r_bound[j]
                     if gap < 0:
-                        gap = 0.0  # conservative: may be in contact
+                        gap = 0.0
 
-            if 0 < gap < p.cell_sense_distance:
-                # Only attached, non-overcrowded cells can bridge
-                n_avail_i = max(0.0, gs.n_attached[i] - gs.n_overcrowded[i])
-                n_avail_j = max(0.0, gs.n_attached[j] - gs.n_overcrowded[j])
+            # Motor-clutch force per cell (stiffness + FA maturity)
+            avg_maturity = 0.5 * (gs.fa_maturity[i] + gs.fa_maturity[j])
+            F_per_cell = motor_clutch_force(p.E_modulus, p, avg_maturity)
 
-                if n_avail_i > 0.1 and n_avail_j > 0.1:
-                    # Proximity factor: cells more likely to bridge when close
-                    proximity = 1.0 - gap / p.cell_sense_distance
+            # 1) Service committed bridges (apply force with maturity ramp)
+            if gap > p.L_rest:
+                _service_committed_bridges(
+                    gs, i, j, gap, p, F_per_cell, nx, ny, 0.0, F)
 
-                    # Number of bridging cells (geometric mean × proximity)
-                    n_br = np.sqrt(n_avail_i * n_avail_j) * proximity
-
-                    # Motor-clutch force per cell (stiffness + FA maturity)
-                    avg_maturity = 0.5 * (gs.fa_maturity[i] + gs.fa_maturity[j])
-                    F_per_cell = motor_clutch_force(p.E_modulus, p, avg_maturity)
-
-                    # Bridge engagement: tension when gap > rest length
-                    if gap > p.L_rest:
-                        F_mag = F_per_cell * n_br
-                        F_cap = p.F_max_per_cell * n_br
-                        F_mag = min(F_mag, F_cap)
-                        # Attractive: pull i toward j
-                        F[i,0] += F_mag * nx; F[i,1] += F_mag * ny
-                        F[j,0] -= F_mag * nx; F[j,1] -= F_mag * ny
+            # 2) Probabilistic new bridge formation
+            if 0 < gap < p.cell_sense_distance and gap > p.L_rest:
+                _attempt_new_bridges(
+                    gs, i, j, gap, p, rng, F_per_cell, nx, ny, 0.0, F)
 
     # ── Wall repulsion ──
     for i in range(N):
@@ -1954,7 +2258,7 @@ def compute_forces(gs: GranuleSystem, p: Params, rng):
                 F[i,0] += noise_amp * rng.standard_normal()
                 F[i,1] += noise_amp * rng.standard_normal()
 
-    return F, torques
+    return F, torques, contacts
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1970,6 +2274,12 @@ def compute_forces_3d(gs: GranuleSystem, p: Params, rng):
     F = np.zeros((N, 3))
     torques = np.zeros((N, 3))
     pos = gs.positions()  # (N, 3)
+    contacts = []  # V1.5.2: per-contact data for stress visualization
+
+    # V1.5: Reset per-cell force vectors (but preserve bridge state and targets)
+    gs.cell_fx[:] = 0.0
+    gs.cell_fy[:] = 0.0
+    gs.cell_fz[:] = 0.0
 
     nu2 = p.poisson_ratio ** 2
     E_star_gg = (p.E_modulus * 1e3) / (2.0 * (1.0 - nu2))
@@ -2049,6 +2359,16 @@ def compute_forces_3d(gs: GranuleSystem, p: Params, rng):
                         torques[i] += np.cross(rc_i, Ft)
                         torques[j] += np.cross(rc_j, -Ft)
 
+            # V1.5.2: Record contact data for stress visualization
+            contacts.append({
+                'i': i, 'j': j,
+                'cx': cx, 'cy': cy, 'cz': cz_pt,
+                'nx': nx, 'ny': ny, 'nz': nz,
+                'overlap': overlap, 'R_eff': R_eff,
+                'F_normal': F_normal, 'A_contact': A_contact,
+                'gtype_i': int(gs.gtype[i]), 'gtype_j': int(gs.gtype[j]),
+            })
+
             in_contact = True
             contact_overlap = overlap
         else:
@@ -2063,18 +2383,21 @@ def compute_forces_3d(gs: GranuleSystem, p: Params, rng):
                 gap = d - gs.r_bound[i] - gs.r_bound[j]
                 if gap < 0:
                     gap = 0.0
-            if 0 < gap < p.cell_sense_distance:
-                n_avail_i = max(0.0, gs.n_attached[i] - gs.n_overcrowded[i])
-                n_avail_j = max(0.0, gs.n_attached[j] - gs.n_overcrowded[j])
-                if n_avail_i > 0.1 and n_avail_j > 0.1:
-                    proximity = 1.0 - gap / p.cell_sense_distance
-                    n_br = np.sqrt(n_avail_i * n_avail_j) * proximity
-                    avg_maturity = 0.5 * (gs.fa_maturity[i] + gs.fa_maturity[j])
-                    F_per_cell = motor_clutch_force(p.E_modulus, p, avg_maturity)
-                    if gap > p.L_rest:
-                        F_mag = min(F_per_cell * n_br, p.F_max_per_cell * n_br)
-                        F[i] += F_mag * nv
-                        F[j] -= F_mag * nv
+
+            avg_maturity = 0.5 * (gs.fa_maturity[i] + gs.fa_maturity[j])
+            F_per_cell = motor_clutch_force(p.E_modulus, p, avg_maturity)
+
+            # 1) Service committed bridges (apply force with maturity ramp)
+            if gap > p.L_rest:
+                _service_committed_bridges(
+                    gs, i, j, gap, p, F_per_cell,
+                    nv[0], nv[1], nv[2], F)
+
+            # 2) Probabilistic new bridge formation
+            if 0 < gap < p.cell_sense_distance and gap > p.L_rest:
+                _attempt_new_bridges(
+                    gs, i, j, gap, p, rng, F_per_cell,
+                    nv[0], nv[1], nv[2], F)
 
     # Wall repulsion (6 faces)
     for i in range(N):
@@ -2116,7 +2439,7 @@ def compute_forces_3d(gs: GranuleSystem, p: Params, rng):
                 F[i, 1] += noise_amp * rng.standard_normal()
                 F[i, 2] += noise_amp * rng.standard_normal()
 
-    return F, torques
+    return F, torques, contacts
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -2125,12 +2448,12 @@ def compute_forces_3d(gs: GranuleSystem, p: Params, rng):
 
 def step(gs: GranuleSystem, p: Params, rng, t: float):
     """One overdamped Euler step with cell state evolution and rotation."""
-    update_cell_state(gs, p, t)
+    update_cell_state(gs, p, t, rng)
 
     if gs.is_3d:
-        F, torques = compute_forces_3d(gs, p, rng)
+        F, torques, contacts = compute_forces_3d(gs, p, rng)
     else:
-        F, torques = compute_forces(gs, p, rng)
+        F, torques, contacts = compute_forces(gs, p, rng)
 
     if gs.is_3d:
         # ── 3D integration ──
@@ -2189,7 +2512,7 @@ def step(gs: GranuleSystem, p: Params, rng, t: float):
             gs.x[i] = np.clip(gs.x[i], rb+0.5, p.Lx-rb-0.5)
             gs.y[i] = np.clip(gs.y[i], rb+0.5, p.Ly-rb-0.5)
 
-    return F
+    return F, contacts
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -2571,6 +2894,273 @@ def compute_displacement(gs, x0, y0, z0=None):
 
 
 # ══════════════════════════════════════════════════════════════════════
+# Data serialization (V1.5)
+# ══════════════════════════════════════════════════════════════════════
+
+def save_snapshot_to_disk(snap_idx, gs, p, t, F, output_dir,
+                           save_fields=False, phi_f=None, phi_i=None, phi_v=None,
+                           contacts=None):
+    """Save one timepoint of simulation data to disk as compressed .npz."""
+    snap_dir = os.path.join(output_dir, 'snapshots')
+    os.makedirs(snap_dir, exist_ok=True)
+
+    # Granule data
+    data = {
+        'time': np.float64(t),
+        'x': gs.x.copy(), 'y': gs.y.copy(), 'z': gs.z.copy(),
+        'r': gs.r.copy(), 'gtype': gs.gtype.copy(),
+        'a': gs.a.copy(), 'b': gs.b.copy(), 'c': gs.c.copy(),
+        'n1': gs.n1.copy(), 'n2': gs.n2.copy(),
+        'vx': gs.vx.copy(), 'vy': gs.vy.copy(), 'vz': gs.vz.copy(),
+        'n_attached': gs.n_attached.copy(),
+        'spread_fraction': gs.spread_fraction.copy(),
+        'fa_maturity': gs.fa_maturity.copy(),
+        'n_overcrowded': gs.n_overcrowded.copy(),
+        'n_cells': gs.n_cells.copy(),
+        'force_x': F[:, 0].copy(),
+        'force_y': F[:, 1].copy(),
+    }
+    if F.shape[1] > 2:
+        data['force_z'] = F[:, 2].copy()
+    if gs.is_3d and gs.quat is not None:
+        data['quat'] = gs.quat.copy()
+    else:
+        data['theta'] = gs.theta.copy()
+
+    # Per-cell data (V1.5)
+    data['cell_granule_id'] = gs.cell_granule_id.copy()
+    data['cell_state'] = gs.cell_state.copy()
+    data['cell_theta_local'] = gs.cell_theta_local.copy()
+    data['cell_eta_local'] = gs.cell_eta_local.copy()
+    data['cell_omega_local'] = gs.cell_omega_local.copy()
+    data['cell_fx'] = gs.cell_fx.copy()
+    data['cell_fy'] = gs.cell_fy.copy()
+    data['cell_fz'] = gs.cell_fz.copy()
+    data['cell_bridge_target'] = gs.cell_bridge_target.copy()
+    data['cell_bridge_age'] = gs.cell_bridge_age.copy()
+    data['cell_contact_area'] = gs.cell_contact_area.copy()
+    data['cell_offset'] = gs.cell_offset.copy()
+
+    # V1.5.2: Per-contact data for stress visualization
+    if contacts:
+        n_c = len(contacts)
+        data['contact_i'] = np.array([c['i'] for c in contacts], dtype=np.int32)
+        data['contact_j'] = np.array([c['j'] for c in contacts], dtype=np.int32)
+        data['contact_cx'] = np.array([c['cx'] for c in contacts])
+        data['contact_cy'] = np.array([c['cy'] for c in contacts])
+        data['contact_cz'] = np.array([c.get('cz', 0.0) for c in contacts])
+        data['contact_nx'] = np.array([c['nx'] for c in contacts])
+        data['contact_ny'] = np.array([c['ny'] for c in contacts])
+        data['contact_nz'] = np.array([c.get('nz', 0.0) for c in contacts])
+        data['contact_overlap'] = np.array([c['overlap'] for c in contacts])
+        data['contact_R_eff'] = np.array([c['R_eff'] for c in contacts])
+        data['contact_F_normal'] = np.array([c['F_normal'] for c in contacts])
+        data['contact_A_contact'] = np.array([c['A_contact'] for c in contacts])
+
+    np.savez_compressed(
+        os.path.join(snap_dir, f'snap_{snap_idx:04d}.npz'), **data)
+
+    # Optional phase fields (large in 3D)
+    if save_fields and phi_f is not None:
+        fields_dir = os.path.join(output_dir, 'fields')
+        os.makedirs(fields_dir, exist_ok=True)
+        np.savez_compressed(
+            os.path.join(fields_dir, f'fields_{snap_idx:04d}.npz'),
+            phi_f=phi_f, phi_i=phi_i, phi_v=phi_v)
+
+
+def save_history_to_disk(hist, output_dir):
+    """Save scalar metrics history as CSV and JSON."""
+    os.makedirs(output_dir, exist_ok=True)
+    if not hist:
+        return
+
+    # CSV (pandas-friendly)
+    keys = list(hist[0].keys())
+    csv_path = os.path.join(output_dir, 'history.csv')
+    with open(csv_path, 'w', newline='') as f:
+        w = csv.DictWriter(f, fieldnames=keys)
+        w.writeheader()
+        w.writerows(hist)
+
+    # JSON (exact fidelity)
+    json_path = os.path.join(output_dir, 'history.json')
+    with open(json_path, 'w') as f:
+        json.dump(hist, f, indent=2, default=float)
+
+
+def save_params_metadata(p, gs, output_dir, seed):
+    """Save Params and run metadata as JSON."""
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Params as dict
+    from dataclasses import asdict
+    params_dict = asdict(p)
+    with open(os.path.join(output_dir, 'params.json'), 'w') as f:
+        json.dump(params_dict, f, indent=2, default=float)
+
+    # Metadata
+    try:
+        git_hash = subprocess.check_output(
+            ['git', 'rev-parse', 'HEAD'], stderr=subprocess.DEVNULL
+        ).decode().strip()
+    except Exception:
+        git_hash = 'unknown'
+
+    meta = {
+        'version': 'V1.5',
+        'git_hash': git_hash,
+        'seed': seed,
+        'mode': p.mode,
+        'n_granules': int(gs.N),
+        'n_functional': int(np.sum(gs.func_mask)),
+        'n_inert': int(np.sum(gs.inert_mask)),
+        'total_cells': int(gs.total_cells),
+        'domain': [p.Lx, p.Ly, p.Lz],
+        'cell_state_enum': {s.name: int(s.value) for s in CellState},
+    }
+    with open(os.path.join(output_dir, 'metadata.json'), 'w') as f:
+        json.dump(meta, f, indent=2)
+
+
+def create_archive(output_dir):
+    """Create a .tar.gz archive of the output directory for HPC transfer."""
+    archive_name = output_dir.rstrip('/') + '.tar.gz'
+    parent = os.path.dirname(output_dir) or '.'
+    basename = os.path.basename(output_dir)
+    with tarfile.open(archive_name, 'w:gz') as tar:
+        tar.add(output_dir, arcname=basename)
+    print(f"  Archive: {archive_name}")
+    return archive_name
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Data loading (V1.5)
+# ══════════════════════════════════════════════════════════════════════
+
+def load_run(run_dir):
+    """Load a saved simulation run from disk.
+
+    Parameters
+    ----------
+    run_dir : str
+        Path to the output directory or a .tar.gz archive.
+
+    Returns
+    -------
+    hist : list of dict
+        Scalar metrics time series.
+    snaps : list of dict
+        Per-timepoint snapshot dicts (numpy arrays).
+    p : Params
+        Simulation parameters.
+    metadata : dict
+        Run metadata (version, git hash, seed, etc.).
+    """
+    # Handle .tar.gz input
+    if run_dir.endswith('.tar.gz'):
+        extract_dir = run_dir[:-7]  # strip .tar.gz
+        if not os.path.isdir(extract_dir):
+            with tarfile.open(run_dir, 'r:gz') as tar:
+                tar.extractall(path=os.path.dirname(run_dir) or '.')
+        run_dir = extract_dir
+
+    # Load params
+    params_path = os.path.join(run_dir, 'params.json')
+    p = Params()
+    if os.path.exists(params_path):
+        with open(params_path) as f:
+            params_dict = json.load(f)
+        for k, v in params_dict.items():
+            if hasattr(p, k):
+                field_type = type(getattr(p, k))
+                try:
+                    setattr(p, k, field_type(v))
+                except (ValueError, TypeError):
+                    setattr(p, k, v)
+
+    # Load metadata
+    metadata = {}
+    meta_path = os.path.join(run_dir, 'metadata.json')
+    if os.path.exists(meta_path):
+        with open(meta_path) as f:
+            metadata = json.load(f)
+
+    # Load history
+    hist = []
+    hist_json = os.path.join(run_dir, 'history.json')
+    hist_csv = os.path.join(run_dir, 'history.csv')
+    if os.path.exists(hist_json):
+        with open(hist_json) as f:
+            hist = json.load(f)
+    elif os.path.exists(hist_csv):
+        with open(hist_csv) as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                entry = {}
+                for k, v in row.items():
+                    try:
+                        entry[k] = int(v)
+                    except ValueError:
+                        try:
+                            entry[k] = float(v)
+                        except ValueError:
+                            entry[k] = v
+                hist.append(entry)
+
+    # Load snapshots
+    snaps = []
+    snap_dir = os.path.join(run_dir, 'snapshots')
+    if os.path.isdir(snap_dir):
+        snap_files = sorted(
+            f for f in os.listdir(snap_dir)
+            if f.startswith('snap_') and f.endswith('.npz'))
+        for sf in snap_files:
+            data = dict(np.load(os.path.join(snap_dir, sf), allow_pickle=False))
+            # Check for corresponding field file
+            idx_str = sf.replace('snap_', '').replace('.npz', '')
+            field_file = os.path.join(run_dir, 'fields', f'fields_{idx_str}.npz')
+            if os.path.exists(field_file):
+                fields = dict(np.load(field_file, allow_pickle=False))
+                data.update(fields)
+            snaps.append(data)
+
+    return hist, snaps, p, metadata
+
+
+def load_cells(run_dir, snap_index=None):
+    """Load per-cell data from a specific snapshot (or all snapshots).
+
+    Parameters
+    ----------
+    run_dir : str
+        Path to the output directory.
+    snap_index : int or None
+        If given, load only that snapshot. Otherwise load all.
+
+    Returns
+    -------
+    dict or list of dict
+        Cell data arrays keyed by 'cell_*' names.
+    """
+    snap_dir = os.path.join(run_dir, 'snapshots')
+
+    if snap_index is not None:
+        path = os.path.join(snap_dir, f'snap_{snap_index:04d}.npz')
+        data = dict(np.load(path, allow_pickle=False))
+        return {k: data[k] for k in data if k.startswith('cell_')}
+
+    results = []
+    snap_files = sorted(
+        f for f in os.listdir(snap_dir)
+        if f.startswith('snap_') and f.endswith('.npz'))
+    for sf in snap_files:
+        data = dict(np.load(os.path.join(snap_dir, sf), allow_pickle=False))
+        results.append({k: data[k] for k in data if k.startswith('cell_')})
+    return results
+
+
+# ══════════════════════════════════════════════════════════════════════
 # Main simulation loop
 # ══════════════════════════════════════════════════════════════════════
 
@@ -2599,7 +3189,14 @@ def run(p=None, seed=None):
     n_steps = int(p.t_total / p.dt)
     hist, snaps = [], []
 
-    def save(t, F):
+    # V1.5: Initialize output directory and save metadata
+    output_dir = p.output_dir
+    snap_counter = [0]  # mutable counter for closure
+    if p.save_data:
+        os.makedirs(output_dir, exist_ok=True)
+        save_params_metadata(p, gs, output_dir, seed)
+
+    def save(t, F, contacts=None):
         if gs.is_3d:
             pf, pi, pv = render_fields_3d(gs, p)
         else:
@@ -2620,7 +3217,26 @@ def run(p=None, seed=None):
             'a': gs.a.copy(), 'b': gs.b.copy(), 'c': gs.c.copy(),
             'n1': gs.n1.copy(), 'n2': gs.n2.copy(),
             'mode': gs.mode,
+            # V1.5.1: Force and cell data for viz scripts
+            'force_x': F[:, 0].copy(),
+            'force_y': F[:, 1].copy(),
+            'cell_state': gs.cell_state.copy(),
+            'cell_granule_id': gs.cell_granule_id.copy(),
+            'cell_theta_local': gs.cell_theta_local.copy(),
+            'cell_fx': gs.cell_fx.copy(),
+            'cell_fy': gs.cell_fy.copy(),
+            'cell_bridge_target': gs.cell_bridge_target.copy(),
+            'cell_bridge_age': gs.cell_bridge_age.copy(),
+            'cell_contact_area': gs.cell_contact_area.copy(),
+            'cell_offset': gs.cell_offset.copy(),
+            # V1.5.2: Per-contact data for stress visualization
+            'contacts': contacts if contacts is not None else [],
         }
+        if F.shape[1] > 2:
+            snap['force_z'] = F[:, 2].copy()
+            snap['cell_fz'] = gs.cell_fz.copy()
+            snap['cell_eta_local'] = gs.cell_eta_local.copy()
+            snap['cell_omega_local'] = gs.cell_omega_local.copy()
         if gs.is_3d and gs.quat is not None:
             snap['quat'] = gs.quat.copy()
         else:
@@ -2628,15 +3244,25 @@ def run(p=None, seed=None):
         # Store n_shape for 2D viz compat
         snap['n_shape'] = gs.n1.copy()
         snaps.append(snap)
+
+        # V1.5: Save to disk
+        if p.save_data:
+            save_snapshot_to_disk(
+                snap_counter[0], gs, p, t, F, output_dir,
+                save_fields=p.save_fields,
+                phi_f=pf, phi_i=pi, phi_v=pv,
+                contacts=contacts)
+            snap_counter[0] += 1
+
         return m
 
     # Initial save
-    update_cell_state(gs, p, 0.0)
+    update_cell_state(gs, p, 0.0, rng)
     if gs.is_3d:
-        F0, _ = compute_forces_3d(gs, p, rng)
+        F0, _, contacts0 = compute_forces_3d(gs, p, rng)
     else:
-        F0, _ = compute_forces(gs, p, rng)
-    m = save(0.0, F0)
+        F0, _, contacts0 = compute_forces(gs, p, rng)
+    m = save(0.0, F0, contacts0)
     print(f"\n  {'t(h)':>6} {'f_cl':>5} {'f_lf':>6} {'v_cl':>5} "
           f"{'tissue':>7} {'bridges':>7} {'attach':>7} {'spread':>6} "
           f"{'FA_mat':>6} {'disp_f':>7} {'K_KC':>8}")
@@ -2650,10 +3276,10 @@ def run(p=None, seed=None):
     t = 0.0
     for s in range(1, n_steps + 1):
         t += p.dt
-        F = step(gs, p, rng, t)
+        F, contacts = step(gs, p, rng, t)
 
         if s % p.save_every == 0:
-            m = save(t, F)
+            m = save(t, F, contacts)
             print(f"  {t:6.1f} {m['func_nc']:5d} {m['func_lf']:6.2f} "
                   f"{m['void_nc']:5d} {m['tissue_frac']:7.3f} "
                   f"{m['n_bridges']:7d} {m['n_attached_total']:7.0f} "
@@ -2662,6 +3288,15 @@ def run(p=None, seed=None):
 
     elapsed = timer.time() - wall_t0
     print(f"\n  Done in {elapsed:.1f}s ({n_steps} steps, {gs.N} granules)")
+
+    # V1.5: Save history and create archive
+    if p.save_data:
+        save_history_to_disk(hist, output_dir)
+        n_saved = snap_counter[0]
+        print(f"  Data: {n_saved} snapshots saved to {output_dir}/")
+        if p.compress_archive:
+            create_archive(output_dir)
+
     return hist, snaps, p, gs
 
 
@@ -2670,7 +3305,21 @@ def run(p=None, seed=None):
 # ══════════════════════════════════════════════════════════════════════
 
 def plot_granules(snaps, hist, p, indices=None):
-    """Plot granule positions as circles or superellipses at selected times."""
+    """Plot granule positions as circles or superellipses at selected times.
+
+    For 3D mode, delegates to viz_stress.plot_granules_3d() if available.
+    """
+    # V1.5.2: Try 3D isosurface rendering for 3D mode
+    is_3d = (getattr(p, 'mode', '2D') == '3D' or
+             (snaps and isinstance(snaps[0], dict) and 'quat' in snaps[0]))
+    if is_3d:
+        try:
+            import viz_stress
+            if viz_stress.HAS_PYVISTA:
+                return viz_stress.plot_granules_3d(snaps, hist, p, indices=indices)
+        except ImportError:
+            pass  # fall through to 2D projection
+
     if indices is None:
         n = len(snaps)
         indices = sorted(set([0, n//4, n//2, 3*n//4, n-1]))
