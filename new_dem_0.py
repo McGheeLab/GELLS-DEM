@@ -1,7 +1,7 @@
 """
 Overdamped Particle Dynamics Model for Cell-Driven Granular Rearrangement
 ==========================================================================
-V1.5 — Individual Cell Tracking + Data Serialization.
+V1.6 — Individual Cell Tracking + Data Serialization (no plotting).
 
 MODES:
     "2D"       — Pure 2D simulation with superellipses (V1.3 compatible)
@@ -43,11 +43,6 @@ from scipy.spatial import cKDTree
 from scipy.ndimage import label
 from scipy.special import gamma as _gamma, beta as _beta
 from scipy.optimize import brentq, minimize_scalar
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-from matplotlib.patches import Circle, Polygon
-from matplotlib.collections import PatchCollection
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional
 from enum import IntEnum
@@ -197,7 +192,7 @@ class Params:
 
     # ── Data serialization (V1.5) ──
     save_data: bool = True              # save simulation data to disk
-    save_fields: bool = False           # save phase field grids (large in 3D)
+    save_fields: bool = True            # save phase field grids (needed for visualization)
     output_dir: str = "results/default" # output directory for serialized data
     compress_archive: bool = True       # create .tar.gz at end of simulation
 
@@ -217,12 +212,11 @@ class Params:
 
 class CellState(IntEnum):
     """Discrete states for individual cell tracking.  Extensible."""
-    UNATTACHED = 0      # pre-attachment spherical cell
-    ATTACHED = 1        # attached but not yet spreading
-    SPREADING = 2       # actively spreading on granule surface
-    PROLIFERATING = 3   # fully spread, FA mature
-    BRIDGING = 4        # generating traction force across a gap
-    SENESCENT = 5       # overcrowded / inactive
+    ATTACHED = 0        # attached but not yet spreading
+    SPREADING = 1       # actively spreading on granule surface
+    PROLIFERATING = 2   # fully spread, FA mature
+    BRIDGING = 3        # generating traction force across a gap
+    SENESCENT = 4       # overcrowded / inactive
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -317,7 +311,7 @@ class GranuleSystem:
         self.cell_offset = offsets
         # Per-cell arrays
         self.cell_granule_id = np.zeros(total_cells, dtype=int)
-        self.cell_state = np.full(total_cells, int(CellState.UNATTACHED), dtype=int)
+        self.cell_state = np.full(total_cells, int(CellState.ATTACHED), dtype=int)
         self.cell_theta_local = np.zeros(total_cells, dtype=np.float64)    # 2D surface angle
         self.cell_eta_local = np.zeros(total_cells, dtype=np.float64)      # 3D parametric eta
         self.cell_omega_local = np.zeros(total_cells, dtype=np.float64)    # 3D parametric omega
@@ -347,6 +341,7 @@ class GranuleSystem:
 # ══════════════════════════════════════════════════════════════════════
 # Quaternion convention: q = (w, x, y, z) where w is the scalar part.
 
+@njit(cache=True)
 def quat_multiply(q1, q2):
     """Hamilton product of two quaternions (w, x, y, z)."""
     w1, x1, y1, z1 = q1
@@ -358,11 +353,13 @@ def quat_multiply(q1, q2):
         w1*z2 + x1*y2 - y1*x2 + z1*w2])
 
 
+@njit(cache=True)
 def quat_conjugate(q):
     """Conjugate of quaternion (w, x, y, z) -> (w, -x, -y, -z)."""
     return np.array([q[0], -q[1], -q[2], -q[3]])
 
 
+@njit(cache=True)
 def quat_normalize(q):
     """Normalize quaternion to unit length."""
     n = np.sqrt(q[0]**2 + q[1]**2 + q[2]**2 + q[3]**2)
@@ -371,6 +368,7 @@ def quat_normalize(q):
     return q / n
 
 
+@njit(cache=True)
 def quat_rotate(q, v):
     """Rotate vector v (3,) by quaternion q: q v q*."""
     qv = np.array([0.0, v[0], v[1], v[2]])
@@ -378,6 +376,7 @@ def quat_rotate(q, v):
     return r[1:]
 
 
+@njit(cache=True)
 def quat_rotate_inv(q, v):
     """Inverse rotation: q* v q (world to body)."""
     qv = np.array([0.0, v[0], v[1], v[2]])
@@ -385,6 +384,7 @@ def quat_rotate_inv(q, v):
     return r[1:]
 
 
+@njit(cache=True)
 def quat_to_rotation_matrix(q):
     """Convert unit quaternion to 3x3 rotation matrix."""
     w, x, y, z = q
@@ -417,6 +417,7 @@ def quat_random(rng):
     return quat_normalize(q)
 
 
+@njit(cache=True)
 def quat_integrate(q, omega, dt):
     """
     Integrate quaternion by angular velocity omega (3-vector, rad/h) over dt (h).
@@ -439,6 +440,7 @@ def quat_integrate(q, omega, dt):
 #   z = c * sgnpow(sin(eta), 2/n2)
 # where sgnpow(v, e) = sign(v) * |v|^e
 
+@njit(cache=True)
 def _sgnpow(v, e):
     """Signed power: sign(v) * |v|^e, safe for v=0."""
     return np.sign(v) * np.abs(v + 1e-30)**e
@@ -457,6 +459,7 @@ def superellipsoid_volume(a, b, c, n1, n2):
             _beta(e1/2.0 + 1.0, e1) * _beta(e2/2.0, e2/2.0))
 
 
+@njit(cache=True)
 def superellipsoid_point(eta, omega, a, b, c, n1, n2):
     """Parametric surface point in body frame."""
     e2 = 2.0 / n2
@@ -471,6 +474,7 @@ def superellipsoid_point(eta, omega, a, b, c, n1, n2):
     return np.array([x, y, z])
 
 
+@njit(cache=True)
 def superellipsoid_normal(eta, omega, a, b, c, n1, n2):
     """
     Outward unit normal at (eta, omega) in body frame.
@@ -493,6 +497,7 @@ def superellipsoid_normal(eta, omega, a, b, c, n1, n2):
     return np.array([nx/mag, ny/mag, nz/mag])
 
 
+@njit(cache=True)
 def superellipsoid_curvature_radii(eta, omega, a, b, c, n1, n2):
     """
     Approximate principal radii of curvature at (eta, omega).
@@ -533,6 +538,7 @@ def superellipsoid_curvature_radii(eta, omega, a, b, c, n1, n2):
     return R1, R2
 
 
+@njit(cache=True)
 def superellipsoid_implicit(bx, by, bz, a, b, c, n1, n2):
     """
     Implicit function value in body frame.
@@ -568,6 +574,7 @@ def superellipsoid_mesh(a, b, c, n1, n2, n_pts=24):
 # Hertz contact mechanics
 # ══════════════════════════════════════════════════════════════════════
 
+@njit(cache=True)
 def hertz_contact_force(E_star_Pa, R_eff_um, delta_um):
     """
     Hertzian normal contact force between two elastic spheres.
@@ -612,6 +619,7 @@ def superellipse_area(a, b, n):
     return 4.0 * a * b * _gamma(1.0 + 1.0/n)**2 / _gamma(1.0 + 2.0/n)
 
 
+@njit(cache=True)
 def superellipse_point(t, a, b, n):
     """Point (x, y) on superellipse boundary at parameter t (body frame)."""
     ct, st = np.cos(t), np.sin(t)
@@ -621,6 +629,7 @@ def superellipse_point(t, a, b, n):
     return x, y
 
 
+@njit(cache=True)
 def superellipse_tangent(t, a, b, n):
     """Unnormalised tangent vector dx/dt, dy/dt (body frame)."""
     ct, st = np.cos(t), np.sin(t)
@@ -631,6 +640,7 @@ def superellipse_tangent(t, a, b, n):
     return dxdt, dydt
 
 
+@njit(cache=True)
 def superellipse_normal_vec(t, a, b, n):
     """Outward unit normal at parameter t (body frame)."""
     dxdt, dydt = superellipse_tangent(t, a, b, n)
@@ -642,6 +652,7 @@ def superellipse_normal_vec(t, a, b, n):
     return nx / mag, ny / mag
 
 
+@njit(cache=True)
 def superellipse_curvature_radius(t, a, b, n):
     """
     Local radius of curvature R = 1/kappa at parameter t (body frame).
@@ -696,6 +707,7 @@ def superellipse_perimeter(a, b, n, num_pts=256):
     return float(np.sum(np.sqrt(diffs[:, 0]**2 + diffs[:, 1]**2)))
 
 
+@njit(cache=True)
 def _world_to_body(px, py, cx, cy, theta):
     """Transform world point(s) to body frame of granule at (cx,cy,theta)."""
     dx, dy = px - cx, py - cy
@@ -703,12 +715,14 @@ def _world_to_body(px, py, cx, cy, theta):
     return cos_th * dx + sin_th * dy, -sin_th * dx + cos_th * dy
 
 
+@njit(cache=True)
 def _body_to_world(bx, by, cx, cy, theta):
     """Transform body point(s) to world frame."""
     cos_th, sin_th = np.cos(theta), np.sin(theta)
     return cx + cos_th * bx - sin_th * by, cy + sin_th * bx + cos_th * by
 
 
+@njit(cache=True)
 def superellipse_implicit(px, py, cx, cy, a, b, n, theta):
     """
     Evaluate the superellipse implicit function at world point (px, py).
@@ -746,6 +760,7 @@ def _find_closest_param(bx_target, by_target, a, b, n, t_guess=None):
 
 # ── Contact detection: superellipse–superellipse (common normal) ──
 
+@njit(cache=True)
 def find_contact_superellipses(xi, yi, ai, bi, ni, thetai,
                                 xj, yj, aj, bj, nj, thetaj):
     """
@@ -871,6 +886,7 @@ def find_contact_superellipses(xi, yi, ai, bi, ni, thetai,
 
 # ── Contact detection: superellipse–wall ──
 
+@njit(cache=True)
 def find_contact_superellipse_wall(xi, yi, ai, bi, ni, thetai,
                                     wall_pos, wall_axis, wall_sign):
     """
@@ -1174,7 +1190,7 @@ def _update_individual_cells(gs: GranuleSystem, p: Params, rng=None):
 
             # ── Normal state assignment ──
             if k >= n_att:
-                gs.cell_state[ci] = int(CellState.UNATTACHED)
+                gs.cell_state[ci] = int(CellState.SENESCENT)
             elif k >= (n_att - n_over) and n_over > 0:
                 gs.cell_state[ci] = int(CellState.SENESCENT)
             elif sf >= 0.95 and fa >= 0.5:
@@ -1663,6 +1679,7 @@ def generate_packing_3d(p: Params, seed=42) -> GranuleSystem:
 # 3D Contact detection (V1.4)
 # ══════════════════════════════════════════════════════════════════════
 
+@njit(cache=True)
 def find_contact_spheres_3d(xi, yi, zi, ri, xj, yj, zj, rj):
     """
     Sphere-sphere contact in 3D.
@@ -1683,6 +1700,7 @@ def find_contact_spheres_3d(xi, yi, zi, ri, xj, yj, zj, rj):
     return (True, overlap, nx, ny, nz, cx, cy, cz, R_eff)
 
 
+@njit(cache=True)
 def find_contact_superellipsoids_3d(
         xi, yi, zi, ai, bi, ci, n1i, n2i, qi,
         xj, yj, zj, aj, bj, cj, n1j, n2j, qj):
@@ -1707,6 +1725,9 @@ def find_contact_superellipsoids_3d(
                        np.sqrt(dir_body_j[0]**2 + dir_body_j[1]**2) + 1e-30)
     omega_j = np.arctan2(dir_body_j[1], dir_body_j[0])
 
+    _eta_lo = -np.pi/2 + 0.01
+    _eta_hi = np.pi/2 - 0.01
+
     # Newton-Raphson: find common normal
     for _ in range(15):
         # Surface points in body frame
@@ -1719,7 +1740,7 @@ def find_contact_superellipsoids_3d(
 
         # Vector from Pi to Pj
         dp = pj_world - pi_world
-        dp_mag = np.linalg.norm(dp)
+        dp_mag = np.sqrt(dp[0]**2 + dp[1]**2 + dp[2]**2)
         if dp_mag < 1e-12:
             break
         target = dp / dp_mag
@@ -1734,7 +1755,9 @@ def find_contact_superellipsoids_3d(
         err_i = np.cross(ni_world, target)
         err_j = np.cross(nj_world, -target)
 
-        if np.linalg.norm(err_i) < 1e-7 and np.linalg.norm(err_j) < 1e-7:
+        err_i_mag = np.sqrt(err_i[0]**2 + err_i[1]**2 + err_i[2]**2)
+        err_j_mag = np.sqrt(err_j[0]**2 + err_j[1]**2 + err_j[2]**2)
+        if err_i_mag < 1e-7 and err_j_mag < 1e-7:
             break
 
         # Damped update of surface parameters
@@ -1745,8 +1768,8 @@ def find_contact_superellipsoids_3d(
         omega_j -= 0.3 * err_j[0]
 
         # Clamp
-        eta_i = np.clip(eta_i, -np.pi/2 + 0.01, np.pi/2 - 0.01)
-        eta_j = np.clip(eta_j, -np.pi/2 + 0.01, np.pi/2 - 0.01)
+        eta_i = min(max(eta_i, _eta_lo), _eta_hi)
+        eta_j = min(max(eta_j, _eta_lo), _eta_hi)
 
     # Final geometry
     pi_body = superellipsoid_point(eta_i, omega_i, ai, bi, ci, n1i, n2i)
@@ -1755,7 +1778,7 @@ def find_contact_superellipsoids_3d(
     pj_world = quat_rotate(qj, pj_body) + np.array([xj, yj, zj])
 
     dp = pj_world - pi_world
-    dp_mag = np.linalg.norm(dp)
+    dp_mag = np.sqrt(dp[0]**2 + dp[1]**2 + dp[2]**2)
 
     # Check overlap: is Pi inside body j?
     pi_in_j_body = quat_rotate_inv(qj, pi_world - np.array([xj, yj, zj]))
@@ -2249,14 +2272,15 @@ def compute_forces(gs: GranuleSystem, p: Params, rng):
                     Fw = hertz_contact_force(E_star_gw, R_local, pen)
                     F[i, wall_axis] += wall_sign * Fw
 
-    # ── Active noise on functional granules ──
+    # ── Active noise on functional granules (vectorized) ──
     if p.T_active > 0:
-        for i in range(N):
-            if gs.gtype[i] == 0:
-                gamma_i = p.drag_scale * gs.r[i]
-                noise_amp = np.sqrt(2 * gamma_i * p.T_active / p.dt)
-                F[i,0] += noise_amp * rng.standard_normal()
-                F[i,1] += noise_amp * rng.standard_normal()
+        func_mask = gs.gtype[:N] == 0
+        n_func = int(np.sum(func_mask))
+        if n_func > 0:
+            gamma_func = p.drag_scale * gs.r[:N][func_mask]
+            noise_amp = np.sqrt(2 * gamma_func * p.T_active / p.dt)
+            F[:N, 0][func_mask] += noise_amp * rng.standard_normal(n_func)
+            F[:N, 1][func_mask] += noise_amp * rng.standard_normal(n_func)
 
     return F, torques, contacts
 
@@ -2429,15 +2453,16 @@ def compute_forces_3d(gs: GranuleSystem, p: Params, rng):
                     Fw = hertz_contact_force(E_star_gw, R_local, pen)
                     F[i, axis] += sign * Fw
 
-    # Active noise
+    # Active noise (vectorized)
     if p.T_active > 0:
-        for i in range(N):
-            if gs.gtype[i] == 0:
-                gamma_i = p.drag_scale * gs.r[i]
-                noise_amp = np.sqrt(2 * gamma_i * p.T_active / p.dt)
-                F[i, 0] += noise_amp * rng.standard_normal()
-                F[i, 1] += noise_amp * rng.standard_normal()
-                F[i, 2] += noise_amp * rng.standard_normal()
+        func_mask = gs.gtype[:N] == 0
+        n_func = int(np.sum(func_mask))
+        if n_func > 0:
+            gamma_func = p.drag_scale * gs.r[:N][func_mask]
+            noise_amp = np.sqrt(2 * gamma_func * p.T_active / p.dt)
+            F[:N, 0][func_mask] += noise_amp * rng.standard_normal(n_func)
+            F[:N, 1][func_mask] += noise_amp * rng.standard_normal(n_func)
+            F[:N, 2][func_mask] += noise_amp * rng.standard_normal(n_func)
 
     return F, torques, contacts
 
@@ -2456,61 +2481,60 @@ def step(gs: GranuleSystem, p: Params, rng, t: float):
         F, torques, contacts = compute_forces(gs, p, rng)
 
     if gs.is_3d:
-        # ── 3D integration ──
-        for i in range(gs.N):
-            gamma_i = p.drag_scale * gs.r[i]
-            vx = F[i,0] / gamma_i
-            vy = F[i,1] / gamma_i
-            vz = F[i,2] / gamma_i
-            v = np.sqrt(vx*vx + vy*vy + vz*vz)
-            if v > p.v_max:
-                scale = p.v_max / v
-                vx *= scale; vy *= scale; vz *= scale
-            gs.vx[i] = vx; gs.vy[i] = vy; gs.vz[i] = vz
-            gs.x[i] += vx * p.dt
-            gs.y[i] += vy * p.dt
-            gs.z[i] += vz * p.dt
+        # ── 3D integration (vectorized translational, per-granule quaternion) ──
+        gamma = p.drag_scale * gs.r[:gs.N]         # (N,)
+        vel = F[:gs.N] / gamma[:, None]             # (N, 3)
+        speed = np.sqrt(np.sum(vel**2, axis=1))     # (N,)
+        over = speed > p.v_max
+        vel[over] *= (p.v_max / speed[over])[:, None]
+        gs.vx[:gs.N] = vel[:, 0]
+        gs.vy[:gs.N] = vel[:, 1]
+        gs.vz[:gs.N] = vel[:, 2]
+        gs.x[:gs.N] += vel[:, 0] * p.dt
+        gs.y[:gs.N] += vel[:, 1] * p.dt
+        gs.z[:gs.N] += vel[:, 2] * p.dt
 
-            # 3D rotational dynamics (quaternion)
-            if not gs.is_circle:
+        # 3D rotational dynamics (quaternion — must be per-granule)
+        if not gs.is_circle:
+            for i in range(gs.N):
                 I_eff = p.drag_scale_rot * (gs.a[i]**2 + gs.b[i]**2 + gs.c[i]**2) / 3.0
                 if I_eff > 1e-20:
                     omega = torques[i] / I_eff
-                    omega_mag = np.linalg.norm(omega)
+                    omega_mag = np.sqrt(omega[0]**2 + omega[1]**2 + omega[2]**2)
                     if omega_mag > p.omega_max_3d:
                         omega *= p.omega_max_3d / omega_mag
                     gs.omega_3d[i] = omega
                     gs.quat[i] = quat_integrate(gs.quat[i], omega, p.dt)
 
-            rb = gs.r_bound[i]
-            gs.x[i] = np.clip(gs.x[i], rb+0.5, p.Lx-rb-0.5)
-            gs.y[i] = np.clip(gs.y[i], rb+0.5, p.Ly-rb-0.5)
-            gs.z[i] = np.clip(gs.z[i], rb+0.5, p.Lz-rb-0.5)
+        # Boundary clipping (vectorized)
+        rb = gs.r_bound[:gs.N]
+        gs.x[:gs.N] = np.clip(gs.x[:gs.N], rb + 0.5, p.Lx - rb - 0.5)
+        gs.y[:gs.N] = np.clip(gs.y[:gs.N], rb + 0.5, p.Ly - rb - 0.5)
+        gs.z[:gs.N] = np.clip(gs.z[:gs.N], rb + 0.5, p.Lz - rb - 0.5)
     else:
-        # ── 2D integration (V1.3 path) ──
-        for i in range(gs.N):
-            gamma_i = p.drag_scale * gs.r[i]
-            vx = F[i,0] / gamma_i
-            vy = F[i,1] / gamma_i
-            v = np.sqrt(vx*vx + vy*vy)
-            if v > p.v_max:
-                vx *= p.v_max / v; vy *= p.v_max / v
-            gs.vx[i] = vx
-            gs.vy[i] = vy
-            gs.x[i] += vx * p.dt
-            gs.y[i] += vy * p.dt
+        # ── 2D integration (vectorized) ──
+        gamma = p.drag_scale * gs.r[:gs.N]         # (N,)
+        vel = F[:gs.N] / gamma[:, None]             # (N, 2)
+        speed = np.sqrt(vel[:, 0]**2 + vel[:, 1]**2)
+        over = speed > p.v_max
+        vel[over] *= (p.v_max / speed[over])[:, None]
+        gs.vx[:gs.N] = vel[:, 0]
+        gs.vy[:gs.N] = vel[:, 1]
+        gs.x[:gs.N] += vel[:, 0] * p.dt
+        gs.y[:gs.N] += vel[:, 1] * p.dt
 
-            # 2D rotational dynamics (superellipses only)
-            if not gs.is_circle:
-                gamma_rot = p.drag_scale_rot * (gs.a[i]**2 + gs.b[i]**2) / 2.0
-                if gamma_rot > 1e-20:
-                    gs.omega[i] = torques[i] / gamma_rot
-                    gs.omega[i] = np.clip(gs.omega[i], -p.omega_max, p.omega_max)
-                    gs.theta[i] += gs.omega[i] * p.dt
+        # 2D rotational dynamics (superellipses only, vectorized)
+        if not gs.is_circle:
+            gamma_rot = p.drag_scale_rot * (gs.a[:gs.N]**2 + gs.b[:gs.N]**2) / 2.0
+            valid = gamma_rot > 1e-20
+            gs.omega[:gs.N] = np.where(valid, torques[:gs.N] / np.where(valid, gamma_rot, 1.0), 0.0)
+            gs.omega[:gs.N] = np.clip(gs.omega[:gs.N], -p.omega_max, p.omega_max)
+            gs.theta[:gs.N] += gs.omega[:gs.N] * p.dt
 
-            rb = gs.r_bound[i]
-            gs.x[i] = np.clip(gs.x[i], rb+0.5, p.Lx-rb-0.5)
-            gs.y[i] = np.clip(gs.y[i], rb+0.5, p.Ly-rb-0.5)
+        # Boundary clipping (vectorized)
+        rb = gs.r_bound[:gs.N]
+        gs.x[:gs.N] = np.clip(gs.x[:gs.N], rb + 0.5, p.Lx - rb - 0.5)
+        gs.y[:gs.N] = np.clip(gs.y[:gs.N], rb + 0.5, p.Ly - rb - 0.5)
 
     return F, contacts
 
@@ -3008,7 +3032,7 @@ def save_params_metadata(p, gs, output_dir, seed):
         git_hash = 'unknown'
 
     meta = {
-        'version': 'V1.5',
+        'version': 'V1.6',
         'git_hash': git_hash,
         'seed': seed,
         'mode': p.mode,
@@ -3164,12 +3188,38 @@ def load_cells(run_dir, snap_index=None):
 # Main simulation loop
 # ══════════════════════════════════════════════════════════════════════
 
+def _warmup_jit(is_3d=False):
+    """Trigger Numba JIT compilation of hot-path functions with dummy data."""
+    a, b, n = 40.0, 35.0, 2.5
+    # 2D geometry + NR solver
+    superellipse_point(0.5, a, b, n)
+    superellipse_normal_vec(0.5, a, b, n)
+    superellipse_curvature_radius(0.5, a, b, n)
+    find_contact_superellipses(0.0, 0.0, a, b, n, 0.0,
+                                100.0, 0.0, a, b, n, 0.0)
+    find_contact_superellipse_wall(50.0, 50.0, a, b, n, 0.1, 0.0, 0, 1)
+    hertz_contact_force(5000.0, 20.0, 1.0)
+    if is_3d:
+        q = np.array([1.0, 0.0, 0.0, 0.0])
+        superellipsoid_point(0.3, 0.5, a, b, a, n, n)
+        superellipsoid_normal(0.3, 0.5, a, b, a, n, n)
+        quat_rotate(q, np.array([1.0, 0.0, 0.0]))
+        find_contact_spheres_3d(0.0, 0.0, 0.0, a, 100.0, 0.0, 0.0, a)
+        find_contact_superellipsoids_3d(
+            0.0, 0.0, 0.0, a, b, a, n, n, q,
+            100.0, 0.0, 0.0, a, b, a, n, n, q)
+
+
 def run(p=None, seed=None):
     if p is None: p = Params()
     if seed is None:
         seed = int(np.random.default_rng().integers(0, 2**31))
         print(f"  Using random seed: {seed}")
     rng = np.random.default_rng(seed)
+
+    # JIT warmup: trigger Numba compilation before timing begins
+    if HAS_NUMBA and p.shape_enabled:
+        _warmup_jit(p.mode == "3D")
 
     print(f"\n  Mode: {p.mode}")
     print("  Generating packing...")
@@ -3292,6 +3342,15 @@ def run(p=None, seed=None):
     # V1.5: Save history and create archive
     if p.save_data:
         save_history_to_disk(hist, output_dir)
+        # Append wall-clock time to metadata
+        meta_path = os.path.join(output_dir, 'metadata.json')
+        if os.path.exists(meta_path):
+            with open(meta_path) as _mf:
+                meta = json.load(_mf)
+            meta['wall_time_s'] = round(elapsed, 1)
+            meta['n_steps'] = n_steps
+            with open(meta_path, 'w') as _mf:
+                json.dump(meta, _mf, indent=2)
         n_saved = snap_counter[0]
         print(f"  Data: {n_saved} snapshots saved to {output_dir}/")
         if p.compress_archive:
@@ -3301,220 +3360,12 @@ def run(p=None, seed=None):
 
 
 # ══════════════════════════════════════════════════════════════════════
-# Visualisation
-# ══════════════════════════════════════════════════════════════════════
-
-def plot_granules(snaps, hist, p, indices=None):
-    """Plot granule positions as circles or superellipses at selected times.
-
-    For 3D mode, delegates to viz_stress.plot_granules_3d() if available.
-    """
-    # V1.5.2: Try 3D isosurface rendering for 3D mode
-    is_3d = (getattr(p, 'mode', '2D') == '3D' or
-             (snaps and isinstance(snaps[0], dict) and 'quat' in snaps[0]))
-    if is_3d:
-        try:
-            import viz_stress
-            if viz_stress.HAS_PYVISTA:
-                return viz_stress.plot_granules_3d(snaps, hist, p, indices=indices)
-        except ImportError:
-            pass  # fall through to 2D projection
-
-    if indices is None:
-        n = len(snaps)
-        indices = sorted(set([0, n//4, n//2, 3*n//4, n-1]))
-    nc = len(indices)
-    fig, axes = plt.subplots(1, nc, figsize=(4*nc, 4))
-    if nc == 1: axes = [axes]
-
-    for c, si in enumerate(indices):
-        snap = snaps[si]
-        if isinstance(snap, dict):
-            pf, pi, pv = snap['phi_f'], snap['phi_i'], snap['phi_v']
-            xs, ys, rs, gt = snap['x'], snap['y'], snap['r'], snap['gtype']
-            has_shape = 'a' in snap and 'b' in snap and 'n_shape' in snap
-            if has_shape:
-                a_arr, b_arr = snap['a'], snap['b']
-                ns_arr = snap.get('n1', snap['n_shape'])
-                th_arr = snap.get('theta', np.zeros(len(xs)))
-        else:
-            pf, pi, pv, xs, ys, rs, gt = snap[:7]
-            if len(snap) > 11:
-                a_arr, b_arr, ns_arr, th_arr = snap[11], snap[12], snap[13], snap[14]
-                has_shape = True
-            else:
-                has_shape = False
-
-        ax = axes[c]; ax.set_xlim(0, p.Lx); ax.set_ylim(0, p.Ly)
-        ax.set_aspect('equal')
-
-        # Draw granules
-        for i in range(len(xs)):
-            color = 'orangered' if gt[i] == 0 else 'steelblue'
-            alpha = 0.75 if gt[i] == 0 else 0.55
-
-            if has_shape and not (a_arr[i] == b_arr[i] and ns_arr[i] == 2.0):
-                # Superellipse patch
-                verts = superellipse_polygon_pts(
-                    xs[i], ys[i], a_arr[i], b_arr[i], ns_arr[i], th_arr[i])
-                patch = Polygon(verts, closed=True, fc=color, ec='k',
-                                lw=0.3, alpha=alpha)
-            else:
-                patch = Circle((xs[i], ys[i]), rs[i], fc=color, ec='k',
-                               lw=0.3, alpha=alpha)
-            ax.add_patch(patch)
-
-        ax.set_title(f"t = {hist[si]['time']:.1f} h", fontsize=10)
-        if c == 0:
-            ax.plot([], [], 'o', color='orangered', ms=8, label='Functional')
-            ax.plot([], [], 'o', color='steelblue', ms=8, label='Inert')
-            ax.legend(fontsize=8, loc='upper right')
-
-    fig.suptitle('Granule Positions Over Time', fontsize=13, y=1.02)
-    plt.tight_layout(); return fig
-
-
-def plot_fields(snaps, hist, p, indices=None):
-    """Phase fields rendered from granule positions."""
-    if indices is None:
-        n = len(snaps)
-        indices = sorted(set([0, n//4, n//2, 3*n//4, n-1]))
-    nc = len(indices)
-    ext = [0, p.Lx, 0, p.Ly]
-    fig, ax = plt.subplots(3, nc, figsize=(3.2*nc, 9))
-    lbl = [r'$\phi_f$', r'$\phi_i$', r'$\phi_v$']
-    cm = ['Oranges', 'Blues', 'Greens']
-
-    for c, si in enumerate(indices):
-        snap = snaps[si]
-        if isinstance(snap, dict):
-            pf, pi, pv = snap['phi_f'], snap['phi_i'], snap['phi_v']
-        else:
-            pf, pi, pv = snap[0], snap[1], snap[2]
-        # For 3D fields, show midplane XY slice
-        if pf.ndim == 3:
-            mid_z = pf.shape[2] // 2
-            pf, pi, pv = pf[:,:,mid_z], pi[:,:,mid_z], pv[:,:,mid_z]
-        flds = [pf, pi, pv]
-        t = hist[si]['time']
-        for r in range(3):
-            a = ax[r, c]; vx = max(.01, flds[r].max()*1.05)
-            im = a.imshow(flds[r].T, origin='lower', extent=ext,
-                          cmap=cm[r], vmin=0, vmax=vx)
-            a.set_title(f't={t:.1f}h', fontsize=8)
-            if c == 0: a.set_ylabel(lbl[r], fontsize=11)
-            plt.colorbar(im, ax=a, fraction=.046, pad=.04)
-    fig.suptitle('Rendered Phase Fields', fontsize=13, y=1.01)
-    plt.tight_layout(); return fig
-
-
-def plot_timeseries(hist, p):
-    t = [h['time'] for h in hist]
-    fig, ax = plt.subplots(3, 3, figsize=(16, 13))
-
-    # (0,0) Cluster counts
-    ax[0,0].plot(t, [h['func_nc'] for h in hist], 'C1-o', ms=3, label='Functional')
-    ax[0,0].plot(t, [h['void_nc'] for h in hist], 'C2-s', ms=3, label='Void')
-    ax[0,0].plot(t, [h['inert_nc'] for h in hist], 'C0-^', ms=3, label='Inert')
-    ax[0,0].set(xlabel='time (h)', ylabel='# clusters',
-                title='Cluster Count')
-    ax[0,0].legend()
-
-    # (0,1) Largest cluster fraction
-    ax[0,1].plot(t, [h['func_lf'] for h in hist], 'C1-', lw=2, label='Functional')
-    ax[0,1].plot(t, [h['void_lf'] for h in hist], 'C2--', label='Void')
-    ax[0,1].axhline(1, ls=':', c='gray', lw=0.8)
-    ax[0,1].set(xlabel='time (h)', ylabel='largest / total',
-                title='Connectivity (1 = percolated)')
-    ax[0,1].legend()
-
-    # (0,2) Bridge count
-    ax[0,2].plot(t, [h['n_bridges'] for h in hist], 'C3-', lw=2)
-    ax[0,2].set(xlabel='time (h)', ylabel='# bridges',
-                title='Active Cell Bridges')
-
-    # (1,0) Displacement
-    ax[1,0].plot(t, [h['disp_func'] for h in hist], 'C1-', lw=2, label='Functional')
-    ax[1,0].plot(t, [h['disp_inert'] for h in hist], 'C0--', label='Inert')
-    ax[1,0].set(xlabel='time (h)', ylabel='mean disp (µm)',
-                title='Granule Displacement')
-    ax[1,0].legend()
-
-    # (1,1) Tissue & packing
-    ax[1,1].plot(t, [h['tissue_frac'] for h in hist], 'C3-', lw=2,
-                 label=r'Tissue ($\phi_f > 0.5$)')
-    ax[1,1].plot(t, [h['packing_func_rich'] for h in hist], 'C1--',
-                 label='Packing in func-rich')
-    ax[1,1].set(xlabel='time (h)', ylabel='fraction', title='Tissue Remodeling')
-    ax[1,1].legend()
-
-    # (1,2) Max cluster area
-    ax[1,2].plot(t, [h['func_max_area'] for h in hist], 'C1-', lw=2)
-    ax[1,2].set(xlabel='time (h)', ylabel='area (µm²)',
-                title='Largest Functional Cluster Area')
-
-    # (2,0) Cell attachment
-    ax[2,0].plot(t, [h['n_attached_total'] for h in hist], 'C4-', lw=2,
-                 label='Attached')
-    ax[2,0].plot(t, [h['n_seeded_total'] for h in hist], 'C7--', lw=1,
-                 label='Seeded')
-    ax[2,0].axvline(p.t_attach_onset, ls=':', c='gray', lw=0.8, label='Attach onset')
-    ax[2,0].set(xlabel='time (h)', ylabel='# cells',
-                title='Cell Attachment')
-    ax[2,0].legend()
-
-    # (2,1) Spread fraction & FA maturity
-    ax[2,1].plot(t, [h['mean_spread_frac'] for h in hist], 'C5-', lw=2,
-                 label='Spread fraction')
-    ax[2,1].plot(t, [h['mean_fa_maturity'] for h in hist], 'C6--', lw=2,
-                 label='FA maturity')
-    ax[2,1].set(xlabel='time (h)', ylabel='fraction [0–1]',
-                title='Cell Spreading & Focal Adhesion')
-    ax[2,1].set_ylim(-0.05, 1.05)
-    ax[2,1].legend()
-
-    # (2,2) Overcrowding
-    ax[2,2].plot(t, [h['n_overcrowded_total'] for h in hist], 'C3-', lw=2)
-    ax[2,2].set(xlabel='time (h)', ylabel='# cells',
-                title='Overcrowded Cells (crawling on others)')
-
-    plt.tight_layout(); return fig
-
-
-def plot_composite(snaps, hist, p, indices=None):
-    """RGB composite from rendered fields."""
-    if indices is None:
-        n = len(snaps)
-        indices = sorted(set([0, n//4, n//2, 3*n//4, n-1]))
-    nc = len(indices)
-    fig, axes = plt.subplots(1, nc, figsize=(3.8*nc, 3.5))
-    if nc == 1: axes = [axes]
-    for c, si in enumerate(indices):
-        snap = snaps[si]
-        if isinstance(snap, dict):
-            pf, pi, pv = snap['phi_f'], snap['phi_i'], snap['phi_v']
-        else:
-            pf, pi, pv = snap[0], snap[1], snap[2]
-        # For 3D fields, show midplane XY slice
-        if pf.ndim == 3:
-            mid_z = pf.shape[2] // 2
-            pf, pi, pv = pf[:,:,mid_z], pi[:,:,mid_z], pv[:,:,mid_z]
-        mx = max(pf.max(), pi.max(), pv.max(), 0.01)
-        rgb = np.stack([pf/mx, pv/mx, pi/mx], axis=-1)
-        axes[c].imshow(np.clip(np.transpose(rgb,(1,0,2)),0,1),
-                       origin='lower', extent=[0,p.Lx,0,p.Ly])
-        axes[c].set_title(f"t={hist[si]['time']:.1f}h", fontsize=9)
-    fig.suptitle("R=functional  G=void  B=inert", fontsize=11, y=1.02)
-    plt.tight_layout(); return fig
-
-
-# ══════════════════════════════════════════════════════════════════════
 # Main
 # ══════════════════════════════════════════════════════════════════════
 
 if __name__ == '__main__':
     print("="*65)
-    print("  GELLS-DEM V1.4: Cell-Driven Granular Rearrangement")
+    print("  GELLS-DEM V1.6: Cell-Driven Granular Rearrangement")
     print("="*65)
 
     p = Params()
@@ -3541,31 +3392,6 @@ if __name__ == '__main__':
     print(f"  Simulation: {p.t_total:.0f} h, dt={p.dt:.2f} h")
 
     hist, snaps, p, gs = run(p)
-
-    # Built-in plots
-    fig1 = plot_granules(snaps, hist, p)
-    fig2 = plot_fields(snaps, hist, p)
-    fig3 = plot_timeseries(hist, p)
-    fig4 = plot_composite(snaps, hist, p)
-
-    # V1.4 visualization scripts
-    outdir = 'results/default'
-    os.makedirs(outdir, exist_ok=True)
-
-    # Save built-in plots
-    fig1.savefig(os.path.join(outdir, 'granules.png'), dpi=150, bbox_inches='tight')
-    fig2.savefig(os.path.join(outdir, 'fields.png'), dpi=150, bbox_inches='tight')
-    fig3.savefig(os.path.join(outdir, 'timeseries.png'), dpi=150, bbox_inches='tight')
-    fig4.savefig(os.path.join(outdir, 'composite.png'), dpi=150, bbox_inches='tight')
-
-    import viz_compaction, viz_percolation, viz_movies, viz_phases
-    print("\n  Running visualization scripts...")
-    viz_compaction.run_all(hist, snaps=snaps, outdir=outdir)
-    viz_percolation.run_all(hist, outdir=outdir)
-    viz_movies.run_all(snaps, hist, p, outdir=outdir)
-    viz_phases.run_all(hist, snaps=snaps, p=p, outdir=outdir)
-
-    plt.show()
 
     h0, hf = hist[0], hist[-1]
     print("\n" + "="*65)

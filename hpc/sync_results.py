@@ -70,20 +70,39 @@ def list_remote_results(netid: str, repo_path: str):
         print("  Could not list remote results.\n")
 
 
-def sync_results(netid: str, repo_path: str, local_dir: str):
-    """Rsync results from cluster to local machine."""
-    remote = f"{netid}@filexfer.hpc.arizona.edu:{repo_path}/results/"
+def sync_results(netid: str, repo_path: str, local_dir: str,
+                 keep_remote: bool = False):
+    """Rsync results from cluster to local machine.
+
+    By default, successfully transferred files are deleted from the cluster
+    via rsync --remove-source-files.  Pass keep_remote=True to keep them.
+    """
+    filexfer = f"{netid}@filexfer.hpc.arizona.edu"
+    remote = f"{filexfer}:{repo_path}/results/"
     os.makedirs(local_dir, exist_ok=True)
 
     print(f"  Syncing: {remote}")
-    print(f"      ->   {os.path.abspath(local_dir)}/\n")
+    print(f"      ->   {os.path.abspath(local_dir)}/")
+    if not keep_remote:
+        print(f"  Remote files will be deleted after successful transfer.\n")
+    else:
+        print()
+
+    rsync_cmd = ["rsync", "-avz", "--progress", remote, f"{local_dir}/"]
+    if not keep_remote:
+        rsync_cmd.insert(2, "--remove-source-files")
 
     try:
-        result = subprocess.run(
-            ["rsync", "-avz", "--progress", remote, f"{local_dir}/"],
-            timeout=600)
+        result = subprocess.run(rsync_cmd, timeout=600)
         if result.returncode == 0:
             print(f"\n  Sync complete! Results in {os.path.abspath(local_dir)}/")
+            if not keep_remote:
+                # Prune empty directories left behind by --remove-source-files
+                subprocess.run(
+                    ["ssh", filexfer,
+                     f"find {repo_path}/results -type d -empty -delete 2>/dev/null"],
+                    capture_output=True, timeout=30)
+                print(f"  Cleaned up remote results.")
         else:
             print(f"\n  rsync exited with code {result.returncode}")
     except subprocess.TimeoutExpired:
@@ -98,6 +117,8 @@ def main():
     parser.add_argument("--config", default=HPC_CONFIG, help="HPC config JSON")
     parser.add_argument("--local-dir", default=LOCAL_DIR, help="Local output directory")
     parser.add_argument("--list-only", action="store_true", help="Just list remote results")
+    parser.add_argument("--keep-remote", action="store_true",
+                        help="Keep remote files after sync (default: delete after transfer)")
     args = parser.parse_args()
 
     with open(args.config) as f:
@@ -122,7 +143,7 @@ def main():
         return
 
     # Sync
-    sync_results(netid, repo_path, args.local_dir)
+    sync_results(netid, repo_path, args.local_dir, keep_remote=args.keep_remote)
 
 
 if __name__ == "__main__":

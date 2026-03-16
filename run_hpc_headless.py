@@ -11,18 +11,11 @@ Usage:
     python3 run_hpc_headless.py --E_modulus 5.0 --t_total 96
 """
 
-import matplotlib
-matplotlib.use('Agg')  # must be before any other matplotlib imports
-
 import argparse
 import json
 import os
 import sys
-from new_dem_0 import (
-    Params, run, plot_granules, plot_fields,
-    plot_timeseries, plot_composite, print_stiffness_info
-)
-import matplotlib.pyplot as plt
+from new_dem_0 import Params, run, print_stiffness_info
 
 
 def load_trial_json(path: str) -> dict:
@@ -227,30 +220,12 @@ def main():
               f"block_func={p.blockiness_func_mean}±{p.blockiness_func_std})")
     print_stiffness_info(p)
 
-    # Run simulation
-    hist, snaps, p, gs = run(p, seed=args.seed)
+    # Run simulation (data saved to out_dir by engine)
+    hist, _, p, _ = run(p, seed=args.seed)
 
-    # Save figures
-    fig1 = plot_granules(snaps, hist, p)
-    fig1.savefig(os.path.join(out_dir, "granules.png"), dpi=150, bbox_inches='tight')
-
-    fig2 = plot_fields(snaps, hist, p)
-    fig2.savefig(os.path.join(out_dir, "fields.png"), dpi=150, bbox_inches='tight')
-
-    fig3 = plot_timeseries(hist, p)
-    fig3.savefig(os.path.join(out_dir, "timeseries.png"), dpi=150, bbox_inches='tight')
-
-    fig4 = plot_composite(snaps, hist, p)
-    fig4.savefig(os.path.join(out_dir, "composite.png"), dpi=150, bbox_inches='tight')
-
-    # V1.4 visualization scripts
-    import viz_compaction, viz_percolation, viz_movies, viz_phases
-    viz_compaction.run_all(hist, snaps=snaps, outdir=out_dir)
-    viz_percolation.run_all(hist, outdir=out_dir)
-    viz_movies.run_all(snaps, hist, p, outdir=out_dir)
-    viz_phases.run_all(hist, snaps=snaps, p=p, outdir=out_dir)
-
-    plt.close('all')
+    # Post-process: all visualizations from saved data
+    from viz.postprocess import run_all as postprocess
+    postprocess(out_dir)
 
     # Print summary
     h0, hf = hist[0], hist[-1]

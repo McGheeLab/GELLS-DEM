@@ -12,8 +12,11 @@ Plots produced:
   5. Void connectivity / percolation indicator
 
 Usage:
-    python viz_percolation.py -i ./simulations/run1
+    python viz/percolation.py -i ./simulations/run1
 """
+
+import sys as _sys, os as _os
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 
 import numpy as np
 import matplotlib

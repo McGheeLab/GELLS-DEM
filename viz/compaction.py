@@ -11,9 +11,12 @@ Plots produced:
   5. Phase fraction evolution (stacked area)
 
 Usage:
-    python viz_compaction.py -i ./simulations/run1
-    python viz_compaction.py --hist history.json --outdir ./plots
+    python viz/compaction.py -i ./simulations/run1
+    python viz/compaction.py --hist history.json --outdir ./plots
 """
+
+import sys as _sys, os as _os
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 
 import numpy as np
 import matplotlib

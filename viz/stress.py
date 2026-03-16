@@ -12,13 +12,16 @@ Plots produced:
   4. Cell ellipsoid meshes for 3D cell rendering
 
 Usage:
-    python viz_stress.py -i ./results/run1
-    python viz_stress.py -i ./results/run1 -o ./plots
+    python viz/stress.py -i ./results/run1
+    python viz/stress.py -i ./results/run1 -o ./plots
 
 Or import programmatically:
-    import viz_stress
-    viz_stress.run_all(snaps, hist, p, outdir='plots/')
+    from viz.stress import run_all
+    run_all(snaps, hist, p, outdir='plots/')
 """
+
+import sys as _sys, os as _os
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 
 import numpy as np
 from pathlib import Path
@@ -594,9 +597,7 @@ def cell_ellipsoid_mesh(snap, ci, p=None, n_pts=16):
     sf = float(snap.get('spread_fraction', np.zeros(len(snap['x'])))[gi])
 
     # Shape depends on state
-    if state == int(CellState.UNATTACHED):
-        ax_a = ax_b = ax_c = r_cell
-    elif state == int(CellState.ATTACHED):
+    if state == int(CellState.ATTACHED):
         ax_c = r_cell * max(0.3, 1.0 - 0.5 * sf)
         ax_a = ax_b = np.sqrt(V_cell / ((4.0/3.0) * np.pi * ax_c))
     elif state == int(CellState.SPREADING):
@@ -760,7 +761,6 @@ def _add_cell_meshes(plotter, snap, group, p):
     group_set = set(group)
 
     COLORS = {
-        int(CellState.UNATTACHED):   '#AAAAAA',
         int(CellState.ATTACHED):     '#DAA520',
         int(CellState.SPREADING):    '#FF8C00',
         int(CellState.PROLIFERATING):'#228B22',

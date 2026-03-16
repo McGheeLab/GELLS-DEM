@@ -1,7 +1,7 @@
 # GELLS-DEM Architecture Document
 
-**Version:** V1.5.2
-**Last updated:** 2026-03-14
+**Version:** V1.8
+**Last updated:** 2026-03-15
 **Primary source file:** `new_dem_0.py`
 
 ---
@@ -51,21 +51,40 @@ relevant timescales (24--72 hours).
 │  │   └───────────────────────┘    └────────────────────────────┘  │  │
 │  └────────────────────────────────────────────────────────────────┘  │
 │                                                                      │
-│  ┌────────────────────────────────────────────────────────────────┐  │
-│  │                    Built-in Visualisation                      │  │
-│  │  plot_granules  plot_fields  plot_timeseries  plot_composite   │  │
-│  └────────────────────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────────────────────┘
+            │ saves data to disk (snapshots, fields, history, params)
+            ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│                  viz/postprocess.py (V1.8)                             │
+│                  Unified post-processing orchestrator                 │
+│                                                                      │
+│  Delegates to viz/ package:                                          │
+│  viz/compaction.py     Void-space evolution, packing, compaction     │
+│  viz/percolation.py    Darcy, Kozeny-Carman, dimensionless groups    │
+│  viz/movies.py         Rotating GIF, timelapse, z-sweep, composite   │
+│  viz/phases.py         Phase isosurfaces, fractions, tri-plane       │
+│  viz/cells.py          Cell morphology, stress maps, GIFs (V1.5.1)  │
+│  viz/stress.py         3D surface stress, isosurfaces, GIFs (V1.5.2)│
+│  viz/shapes.py         Granule shape gallery (superellipses/oids)    │
+│  viz/doe.py            DOE statistical analysis & visualization      │
+│  viz/dimensionless.py  Dimensionless analysis, data collapse (V1.7)  │
+│                                                                      │
+│  Delegates to analysis/ package:                                     │
+│  analysis/mean_field_model.py   Mean-field ODE compaction (V1.7)     │
+│  analysis/coarse_grain.py       Stress tensor, viscosity (V1.7)      │
+│  analysis/tissue_descriptors.py Tissue architecture vector (V1.7)    │
+│  analysis/arch_distance.py      Distance to organ targets (V1.7)     │
 └──────────────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────────────┐
-│                    Visualization Scripts (V1.4+)                      │
+│            analysis/ — Mathematical Analysis Framework (V1.7)         │
 │                                                                      │
-│  viz_compaction.py     Void-space evolution, packing, compaction     │
-│  viz_percolation.py    Darcy, Kozeny-Carman, dimensionless groups    │
-│  viz_movies.py         Rotating GIF, timelapse, z-sweep, composite   │
-│  viz_phases.py         Phase isosurfaces, fractions, tri-plane       │
-│  viz_cells.py          Cell morphology, stress maps, GIFs (V1.5.1)  │
-│  viz_stress.py         3D surface stress, isosurfaces, GIFs (V1.5.2)│
+│  mean_field_model.py    ODE: dφ_f/dt = -φ_f * (σ_cell - σ_resist)/η │
+│  coarse_grain.py        Love-Weber stress, strain rate, η_eff        │
+│  tissue_descriptors.py  BV/TV, Tb.Th, Tb.Sp, SMI, MIL, tortuosity  │
+│  organ_targets.py       7 organ target vectors (bone, lung, liver..) │
+│  arch_distance.py       Weighted Mahalanobis distance to organs      │
+│  MATHEMATICAL_MODEL.md  Formal model document for publications       │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -307,16 +326,33 @@ plot_timeseries plot_granules    plot_fields  plot_composite
 
 ---
 
-## 4. Visualization Scripts (V1.4)
+## 4. Visualization & Analysis Scripts
+
+### 4.1 Visualization Scripts — `viz/` package (V1.8)
 
 | Script | Plots | Input |
 |--------|-------|-------|
-| `viz_compaction.py` | Void fraction, packing fraction, compaction ratio, void cluster size distribution, stacked phase areas | `hist`, `snaps` |
-| `viz_percolation.py` | Kozeny-Carman K(t), porosity + RCP, dimensionless groups dashboard (2×3), Darcy flow rate, void connectivity | `hist` |
-| `viz_movies.py` | Rotating 3D isosurface GIF, time-lapse compaction, z-sweep cross-section, composite 2×2 | `snaps`, `hist`, `p` |
-| `viz_phases.py` | Phase isosurface strip, phase volume fractions, tri-plane evolution (XY/XZ/YZ), interface area vs time | `hist`, `snaps`, `p` |
+| `viz/compaction.py` | Void fraction, packing fraction, compaction ratio, void cluster size distribution, stacked phase areas | `hist`, `snaps` |
+| `viz/percolation.py` | Kozeny-Carman K(t), porosity + RCP, dimensionless groups dashboard (2×3), Darcy flow rate, void connectivity | `hist` |
+| `viz/movies.py` | Rotating 3D isosurface GIF, time-lapse compaction, z-sweep cross-section, composite 2×2 | `snaps`, `hist`, `p` |
+| `viz/phases.py` | Phase isosurface strip, phase volume fractions, tri-plane evolution (XY/XZ/YZ), interface area vs time | `hist`, `snaps`, `p` |
+| `viz/cells.py` | Cell morphology patches, stress map, cell timelapse GIF (V1.5.1) | `snaps`, `hist`, `p` |
+| `viz/stress.py` | 3D surface stress, granule isosurfaces, cell ellipsoids, evolution GIF (V1.5.2) | `snaps`, `hist`, `p` |
+| `viz/shapes.py` | Granule shape gallery (superellipses, superellipsoids) | `snaps`, `p` |
+| `viz/doe.py` | DOE statistical analysis & visualization | DOE `scan_dir` |
+| `viz/dimensionless.py` | β-collapse, Ca-scaling, jamming diagram, factor effects, phase space (V1.7) | DOE `scan_dir` |
 
-All scripts: CLI (`-i input_dir`), importable (`run_all()`), PyVista primary with matplotlib fallback.
+### 4.2 Mathematical Analysis Scripts — `analysis/` package (V1.7)
+
+| Script | Plots | Input |
+|--------|-------|-------|
+| `analysis/mean_field_model.py` | Model fit overlay, phase evolution, permeability evolution, stress balance | `run_dir` |
+| `analysis/coarse_grain.py` | Stress timeseries, strain rate, viscosity evolution, coordination number | `run_dir` |
+| `analysis/tissue_descriptors.py` | Descriptor summary, thickness distribution, S₂(r), pore size distribution | `run_dir` |
+| `analysis/arch_distance.py` | Distance radar, trajectory, heatmap, sensitivity, optimization landscape | `run_dir` or `scan_dir` |
+| `analysis/organ_targets.py` | Organ profile radar chart, organ comparison table | — |
+
+All scripts: CLI (`-i input_dir`), importable (`run_all()`), matplotlib Agg backend.
 
 ---
 
@@ -360,16 +396,69 @@ Missing `"mode"` defaults to `"2D"`. See `Trial15_3D.json` for a flat format exa
 | `hpc/sync_results.py` | Standalone result sync: check job status + rsync from cluster |
 | `hpc/Alex.json` | User HPC config (netid, group, cpus, walltime, paths) |
 
-### Post-Processing Scripts (Legacy)
+### Mathematical Analysis Framework — `analysis/` package (V1.7+)
 
 | File | Purpose |
 |------|---------|
-| `new_dem_visualization.py` | Full-featured post-processor (z-stacks, 3D isosurfaces, GIFs) |
-| `new_dem_postprocess.py` | Lightweight post-processor for JSON frames |
+| `analysis/mean_field_model.py` | Mean-field ODE compaction model: dφ_f/dt = -φ_f(σ_cell - σ_resist)/η_eff. Motor-clutch cell stress, jamming resistance, bridge kinetics. Fits η_eff, σ_0, α to simulation/experimental data. |
+| `analysis/coarse_grain.py` | Coarse-graining: Love-Weber stress tensor from per-contact data, strain rate from velocity field, effective viscosity η_eff = σ_dev/(2ε̇_dev). Spatial fields via Gaussian weighting. |
+| `analysis/tissue_descriptors.py` | Tissue architecture descriptor vector from 3D phase fields: BV/TV, Tb.Th, Tb.Sp, SMI, Euler characteristic, MIL tensor (anisotropy), tortuosity (Laplace), two-point correlation S₂(r), chord length distribution, pore size distribution. |
+| `analysis/organ_targets.py` | Literature-based target descriptor vectors for 7 organ systems: trabecular bone, lung alveoli, liver, kidney cortex, cardiac muscle, pancreatic islet, intestinal mucosa. |
+| `analysis/arch_distance.py` | Weighted Mahalanobis-like architectural distance: D = sqrt(Σ w_k((d_k - μ_k)/σ_k)²) with log-transform on scale-dependent descriptors. Distance trajectories, DOE optimization, sensitivity analysis. |
+| `viz/dimensionless.py` | Dimensionless analysis across DOE runs. Computes β (motor-clutch engagement), Ca (cellular capillary number), jamming proximity. Data collapse plots, factor effects, phase space. |
+| `CodeLog/Architecture/MATHEMATICAL_MODEL.md` | Formal mathematical model document: microscale DEM equations, coarse-graining, continuum model, mean-field ODE, dimensionless analysis, tissue characterization. |
 
 ---
 
-## 6. Design Constraints and Assumptions
+## 6. Performance (V1.6)
+
+### 6.1 Numba JIT Compilation
+
+~20 hot-path functions are decorated with `@njit(cache=True)`. When Numba is not installed,
+a no-op identity decorator is used as fallback. JIT'd function groups:
+
+| Group | Functions | Count |
+|-------|-----------|-------|
+| Quaternion | `quat_multiply`, `quat_conjugate`, `quat_normalize`, `quat_rotate`, `quat_rotate_inv`, `quat_to_rotation_matrix`, `quat_integrate` | 7 |
+| Superellipsoid | `_sgnpow`, `superellipsoid_point`, `superellipsoid_normal`, `superellipsoid_curvature_radii`, `superellipsoid_implicit` | 5 |
+| Superellipse | `superellipse_point`, `superellipse_tangent`, `superellipse_normal_vec`, `superellipse_curvature_radius`, `_world_to_body`, `_body_to_world`, `superellipse_implicit` | 7 |
+| Contact solvers | `find_contact_superellipses`, `find_contact_superellipse_wall`, `find_contact_spheres_3d`, `find_contact_superellipsoids_3d` | 4 |
+| Physics | `hertz_contact_force` | 1 |
+
+**JIT warmup**: `_warmup_jit(is_3d)` is called before the first timestep to trigger
+compilation with dummy data, avoiding a compilation delay on step 1.
+
+**Numba compatibility notes**: Scalar `np.clip` replaced with `min(max(x, lo), hi)`.
+`np.linalg.norm` on small arrays replaced with manual `np.sqrt(x**2+y**2+z**2)`.
+
+### 6.2 Vectorized Integration
+
+Both 2D and 3D integration paths in `step()` use array-wide NumPy operations instead of
+per-granule Python loops:
+
+- **Force → velocity**: `vel = F[:N] / gamma[:, None]`
+- **Velocity cap**: boolean mask on `speed > v_max`, rescale in-place
+- **Position update**: `gs.x[:N] += vel[:, 0] * dt` (vectorized)
+- **Boundary clamping**: `np.clip` on all coordinates simultaneously
+- **Rotational dynamics (2D)**: vectorized `omega = torque / gamma_rot`, clip, integrate
+- **Active noise**: vectorized per functional-granule subset
+
+### 6.3 Scaling
+
+Runtime bottleneck: Newton-Raphson contact solver (~80% of wall time).
+Empirical scaling: `T ≈ 1.106 * N^1.092` seconds per 20 timesteps (benchmarked on
+Puma HPC, single core). Near-linear in granule count due to cKDTree neighbour pruning.
+
+### 6.4 Walltime Estimation (run_all_trials.py)
+
+Power-law model predicts SLURM walltime from trial parameters:
+- Estimates granule count from domain volume, target phi, and mean radius
+- Applies RSA efficiency factor (0.55) for realistic packing
+- Scales by timestep count relative to benchmark reference
+- Adds overhead (120 s) and safety factor (2×)
+- Maximum across all trials sets SLURM `--time`
+
+## 7. Design Constraints and Assumptions
 
 1. **Three modes**: 2D, 2D-slice, and 3D. Default is 2D for backward compatibility.
 2. **Overdamped regime**: No inertial terms. Valid for cell-culture timescales
@@ -388,14 +477,14 @@ Missing `"mode"` defaults to `"2D"`. See `Trial15_3D.json` for a flat format exa
 
 ---
 
-## 7. Data Serialization (V1.5)
+## 8. Data Serialization (V1.5)
 
-### 7.1 CellState Enum
+### 8.1 CellState Enum
 
-`CellState(IntEnum)` with values: UNATTACHED(0), ATTACHED(1), SPREADING(2),
-PROLIFERATING(3), BRIDGING(4), SENESCENT(5). Stored as int arrays, extensible.
+`CellState(IntEnum)` with values: ATTACHED(0), SPREADING(1),
+PROLIFERATING(2), BRIDGING(3), SENESCENT(4). Stored as int arrays, extensible.
 
-### 7.2 Output Format
+### 8.2 Output Format
 
 ```
 results/<run_name>/
@@ -410,7 +499,7 @@ results/<run_name>/
   <run_name>.tar.gz     — archive of everything
 ```
 
-### 7.3 Per-Snapshot NPZ Contents
+### 8.3 Per-Snapshot NPZ Contents
 
 **Granule arrays (N):** x, y, z, r, gtype, a, b, c, n1, n2, vx, vy, vz,
 n_attached, spread_fraction, fa_maturity, n_overcrowded, n_cells,
@@ -425,7 +514,7 @@ contact_cx, contact_cy, contact_cz (contact point), contact_nx, contact_ny,
 contact_nz (contact normal), contact_overlap, contact_R_eff, contact_F_normal,
 contact_A_contact.
 
-### 7.4 Loading API
+### 8.4 Loading API
 
 - `load_run(run_dir)` → `(hist, snaps, p, metadata)` — from directory or .tar.gz
 - `load_cells(run_dir, snap_index=None)` — targeted cell data loading

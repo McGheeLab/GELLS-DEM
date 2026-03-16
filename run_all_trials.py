@@ -9,7 +9,7 @@ Run modes (set RUN_MODE below):
 """
 
 # ── USER CONFIGURATION ──────────────────────────────────────────────
-RUN_MODE = 1                        # 1 = Local, 2 = HPC, 3 = HPC (custom config)
+RUN_MODE = 3                        # 1 = Local, 2 = HPC, 3 = HPC (custom config)
 TRIALS_DIR = "Trials"               # directory containing trial .json files
 OUTPUT_DIR = "results/trials"       # base output directory
 SEED = None                         # random seed (None = random each run)
@@ -18,11 +18,89 @@ HPC_CONFIG = "hpc/Alex.json"       # HPC user config (used by modes 2 and 3)
 
 import glob
 import json
+import math
 import os
 import re
 import subprocess
 import sys
 import time
+
+
+# ── Wall-time estimation model ────────────────────────────────────
+# Power-law fit from L-scaling benchmarks (Trial22–27, V1.6, Numba JIT,
+# Puma 4-CPU, 3D superellipsoid with shape_enabled=True):
+#
+#   T_step ≈ 0.003 × N^1.5  seconds per timestep
+#
+# Calibration data (20 steps each, save_fields=True, Ngrid_3d≈80–200):
+#   N=  180 → T=  205s  (model:  205s,  -0.1%)
+#   N=  445 → T=  671s  (model:  623s,  -7.1%)
+#   N=  912 → T= 1673s  (model: 1713s,  +2.4%)
+#   N= 1540 → T= 2849s  (model: 3686s, +29.4%)
+#
+# Accurate to ±10% for N=100–1000, conservative for N>1000.
+# RSA typically achieves 85–95% of target packing for phi_total=0.4–0.7.
+_COEFF = 0.003          # power-law coefficient (seconds)
+_EXPONENT = 1.5         # power-law exponent (super-linear due to contact detection)
+_RSA_EFFICIENCY = 0.85  # fraction of target granules placed by RSA
+_OVERHEAD_S = 60        # fixed overhead: JIT compile + packing settle + archive
+_SAFETY_FACTOR = 2.0    # multiply predicted time for SLURM --time
+
+
+def estimate_walltime(trial_path: str) -> tuple:
+    """Estimate wall-clock time (seconds) for a trial from its JSON config.
+
+    Uses a power-law model calibrated on L-scaling benchmarks:
+        T = 0.003 × N^1.5 × n_steps + overhead
+
+    Returns (estimated_seconds, n_granules_est, n_steps).
+    """
+    with open(trial_path) as f:
+        t = json.load(f)
+
+    # Read params (flat format keys map directly to Params fields)
+    mode = t.get("mode", "2D")
+    Lx = float(t.get("Lx", 800))
+    Ly = float(t.get("Ly", 800))
+    Lz = float(t.get("Lz", 800))
+    R_f = float(t.get("R_func_mean", 40))
+    R_i = float(t.get("R_inert_mean", 60))
+    phi_f = float(t.get("phi_f_target", 0.25))
+    phi_i = float(t.get("phi_i_target", 0.20))
+    dt = float(t.get("dt", 0.1))
+    t_total = float(t.get("t_total", 48))
+
+    n_steps = int(round(t_total / dt))
+
+    if mode == "3D" or mode == "2D-slice":
+        domain_vol = Lx * Ly * Lz
+        vol_f = (4.0 / 3.0) * math.pi * R_f ** 3
+        vol_i = (4.0 / 3.0) * math.pi * R_i ** 3
+    else:
+        domain_vol = Lx * Ly
+        vol_f = math.pi * R_f ** 2
+        vol_i = math.pi * R_i ** 2
+
+    n_target = phi_f * domain_vol / vol_f
+    if phi_i > 0:
+        n_target += phi_i * domain_vol / vol_i
+    n_target = int(round(n_target))
+    n_est = max(1, int(round(n_target * _RSA_EFFICIENCY)))
+
+    # Power-law model: T_step = 0.003 * N^1.5
+    t_sim = _COEFF * n_est ** _EXPONENT * n_steps
+    t_total_est = t_sim + _OVERHEAD_S
+
+    return t_total_est, n_est, n_steps
+
+
+def seconds_to_slurm_time(seconds: int) -> str:
+    """Convert seconds to HH:MM:SS format for SLURM --time."""
+    seconds = max(seconds, 60)  # minimum 1 minute
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
+    return f"{h:02d}:{m:02d}:{s:02d}"
 
 
 def find_trials(trials_dir: str) -> list:
@@ -41,18 +119,9 @@ def natural_sort_key(path: str):
 
 def run_local(trials: list, output_base: str, seed=None):
     """Run all trials sequentially in the current process."""
-    # Import here so matplotlib backend is set
-    import matplotlib
-    matplotlib.use('Agg')
-
     from run_hpc_headless import load_trial_json
-    from new_dem_0 import (
-        Params, run, plot_granules, plot_fields,
-        plot_timeseries, plot_composite, print_stiffness_info
-    )
-    import viz_compaction, viz_percolation, viz_movies, viz_phases, viz_cells
-    import viz_stress
-    import matplotlib.pyplot as plt
+    from new_dem_0 import Params, run, print_stiffness_info
+    from viz.postprocess import run_all as postprocess
 
     os.makedirs(output_base, exist_ok=True)
 
@@ -84,31 +153,11 @@ def run_local(trials: list, output_base: str, seed=None):
         print(f"  E_modulus={p.E_modulus} kPa, t_total={p.t_total} h")
         print_stiffness_info(p)
 
-        # Run
-        hist, snaps, p, gs = run(p, seed=seed)
+        # Run simulation (data saved to out_dir by engine)
+        hist, _, p, _ = run(p, seed=seed)
 
-        # Save built-in figures
-        for plot_fn, fname in [
-            (plot_granules, "granules.png"),
-            (plot_fields, "fields.png"),
-            (plot_timeseries, "timeseries.png"),
-            (plot_composite, "composite.png"),
-        ]:
-            if fname == "timeseries.png":
-                fig = plot_fn(hist, p)
-            else:
-                fig = plot_fn(snaps, hist, p)
-            fig.savefig(os.path.join(out_dir, fname), dpi=150, bbox_inches='tight')
-
-        # V1.4 visualization scripts
-        viz_compaction.run_all(hist, snaps=snaps, outdir=out_dir)
-        viz_percolation.run_all(hist, outdir=out_dir)
-        viz_movies.run_all(snaps, hist, p, outdir=out_dir)
-        viz_phases.run_all(hist, snaps=snaps, p=p, outdir=out_dir)
-        viz_cells.run_all(snaps, hist, p, outdir=out_dir)
-        viz_stress.run_all(snaps, hist, p, outdir=out_dir)
-
-        plt.close('all')
+        # Post-process: all visualizations from saved data
+        postprocess(out_dir)
 
         # Summary
         h0, hf = hist[0], hist[-1]
@@ -140,6 +189,39 @@ def run_hpc(trials: list, output_base: str, seed, hpc_config_path: str):
             f.write(os.path.basename(t) + "\n")
     print(f"Wrote {trial_list_path} ({len(trials)} trials)")
 
+    # ── Estimate walltime from scaling model ──
+    # SLURM array jobs share one --time, so use the max across all trials.
+    max_est = 0
+    print("\n  Walltime estimates (scaling model):")
+    for t in trials:
+        name = os.path.splitext(os.path.basename(t))[0]
+        try:
+            est_s, n_est, n_steps = estimate_walltime(t)
+            est_safe = est_s * _SAFETY_FACTOR
+            max_est = max(max_est, est_safe)
+            print(f"    {name:30s}  ~{n_est:>6d} granules  "
+                  f"{n_steps:>5d} steps  "
+                  f"est {est_s/60:>6.1f} min  "
+                  f"(x{_SAFETY_FACTOR:.0f} = {est_safe/60:.0f} min)")
+        except Exception as e:
+            print(f"    {name:30s}  estimate failed: {e}")
+
+    # Use estimated walltime if it exceeds the HPC config default
+    default_walltime = hpc.get('walltime', '04:00:00')
+    if max_est > 0:
+        walltime = seconds_to_slurm_time(int(max_est))
+        # Clamp to SLURM max (240 hours)
+        max_slurm = 240 * 3600
+        if max_est > max_slurm:
+            walltime = "240:00:00"
+            print(f"\n  WARNING: Estimated time ({max_est/3600:.1f}h) exceeds "
+                  f"SLURM max (240h). Clamped to 240:00:00.")
+        print(f"\n  Using walltime: {walltime} "
+              f"(max estimate x{_SAFETY_FACTOR:.0f} safety factor)")
+    else:
+        walltime = default_walltime
+        print(f"\n  Using default walltime: {walltime}")
+
     # Expand ~ to $HOME for shell compatibility in SLURM scripts
     venv_path = hpc['venv_path'].replace('~', '$HOME')
 
@@ -154,7 +236,7 @@ def run_hpc(trials: list, output_base: str, seed, hpc_config_path: str):
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task={hpc.get('cpus', 4)}
-#SBATCH --time={hpc.get('walltime', '04:00:00')}
+#SBATCH --time={walltime}
 #SBATCH --array=1-{len(trials)}
 #SBATCH --output=slurm_logs/%x_%A_%a.out
 #SBATCH --error=slurm_logs/%x_%A_%a.err
@@ -212,6 +294,7 @@ def _sync_repo_to_cluster(hpc_config_path: str):
         ["ssh", filexfer, f"mkdir -p {repo_path} {repo_path}/slurm_logs"],
         capture_output=True, timeout=30)
     # Rsync via filexfer (UA HPC docs: always use filexfer for transfers)
+    # Exclude large data directories — only code + trial configs are needed.
     result = subprocess.run([
         "rsync", "-ravz", "--delete",
         "--exclude", "__pycache__",
@@ -220,9 +303,12 @@ def _sync_repo_to_cluster(hpc_config_path: str):
         "--exclude", "results/",
         "--exclude", "simulations/",
         "--exclude", "slurm_logs/",
+        "--exclude", "Trials/trials/",
+        "--exclude", "old/",
+        "--exclude", "*.tar.gz",
         local_repo + "/",
         f"{filexfer}:{repo_path}/"
-    ], capture_output=True, text=True, timeout=120)
+    ], capture_output=True, text=True, timeout=300)
     if result.returncode == 0:
         print("  Repo synced.")
     else:
@@ -286,31 +372,40 @@ def _wait_and_sync(netid: str, repo_path: str, job_id: str, n_tasks: int):
             print(f"  [{', '.join(status_parts)}]{elapsed_str}")
 
             # Incremental sync: when some tasks have finished, sync partial results
+            # Don't delete remote yet — other tasks may still be running
             if n_done > 0 and not synced_already:
                 synced_already = True
                 print(f"  Syncing {n_done} completed results...")
-                _do_sync(netid, repo_path)
+                _do_sync(netid, repo_path, delete_remote=False)
 
         except subprocess.TimeoutExpired:
             print(f"  (poll timed out, retrying...)")
         except Exception as e:
             print(f"  (poll error: {e}, retrying...)")
 
-    # Final sync
-    print(f"\n  Final sync of all results...")
-    _do_sync(netid, repo_path)
+    # Final sync — delete remote files after successful transfer
+    print(f"\n  Final sync of all results (will delete remote copies)...")
+    _do_sync(netid, repo_path, delete_remote=True)
     print(f"\n  Tip: Check resource efficiency with 'seff {job_id}' on the cluster.")
 
 
-def _do_sync(netid: str, repo_path: str):
-    """Rsync results from cluster to local."""
-    remote = f"{netid}@filexfer.hpc.arizona.edu:{repo_path}/results/"
+def _do_sync(netid: str, repo_path: str, delete_remote: bool = False):
+    """Rsync results from cluster to local.
+
+    If delete_remote is True, successfully transferred files are deleted
+    from the cluster via rsync --remove-source-files, and empty result
+    directories are pruned afterwards.
+    """
+    filexfer = f"{netid}@filexfer.hpc.arizona.edu"
+    remote = f"{filexfer}:{repo_path}/results/"
     local = OUTPUT_DIR
     os.makedirs(local, exist_ok=True)
+    rsync_cmd = ["rsync", "-avz", remote, f"{local}/"]
+    if delete_remote:
+        rsync_cmd.insert(2, "--remove-source-files")
     try:
         result = subprocess.run(
-            ["rsync", "-avz", remote, f"{local}/"],
-            capture_output=True, text=True, timeout=300)
+            rsync_cmd, capture_output=True, text=True, timeout=300)
         if result.returncode == 0:
             # Count transferred files
             lines = result.stdout.strip().splitlines()
@@ -318,6 +413,13 @@ def _do_sync(netid: str, repo_path: str):
                          not l.startswith('sent ') and not l.startswith('total ') and
                          not l.startswith('receiving'))
             print(f"  Synced to {os.path.abspath(local)}/ ({n_files} files)")
+            if delete_remote and n_files > 0:
+                # Prune empty directories left behind by --remove-source-files
+                subprocess.run(
+                    ["ssh", filexfer,
+                     f"find {repo_path}/results -type d -empty -delete 2>/dev/null"],
+                    capture_output=True, timeout=30)
+                print(f"  Cleaned up remote results.")
         else:
             print(f"  rsync warning: {result.stderr.strip()}")
     except subprocess.TimeoutExpired:

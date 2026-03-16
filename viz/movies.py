@@ -10,8 +10,11 @@ Animations produced:
   4. Composite 2x2: 3D isosurface + XY/XZ/YZ midplanes
 
 Usage:
-    python viz_movies.py -i ./simulations/run1
+    python viz/movies.py -i ./simulations/run1
 """
+
+import sys as _sys, os as _os
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 
 import numpy as np
 import matplotlib
@@ -318,5 +321,5 @@ if __name__ == '__main__':
         run_all(snaps, hist, p, outdir=outdir)
     except Exception as e:
         print(f"Could not load run data: {e}")
-        print(f"Use programmatically: from viz_movies import run_all")
+        print(f"Use programmatically: from viz.movies import run_all")
         print(f"  run_all(snaps, hist, p, outdir='{outdir}')")

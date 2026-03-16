@@ -11,8 +11,11 @@ Plots produced:
   4. Phase interface area vs time (isosurface area at phi=0.5)
 
 Usage:
-    python viz_phases.py -i ./simulations/run1
+    python viz/phases.py -i ./simulations/run1
 """
+
+import sys as _sys, os as _os
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 
 import numpy as np
 import matplotlib

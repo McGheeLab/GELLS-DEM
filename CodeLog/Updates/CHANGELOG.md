@@ -8,6 +8,122 @@ MINOR tracks feature additions and improvements.
 
 ---
 
+## [V1.8] - 2026-03-15
+
+### Changed
+- **Project restructured**: Organized ~20 root-level Python files into `viz/` and `analysis/`
+  packages. Root now contains only the simulation engine (`new_dem_0.py`) and 4 runner scripts.
+- **Visualization files** moved to `viz/` package (10 files): `viz_postprocess.py` → `viz/postprocess.py`,
+  `viz_cells.py` → `viz/cells.py`, `viz_stress.py` → `viz/stress.py`, etc. Import as
+  `from viz.postprocess import run_all`.
+- **Analysis files** moved to `analysis/` package (5 files): `mean_field_model.py` →
+  `analysis/mean_field_model.py`, `coarse_grain.py` → `analysis/coarse_grain.py`, etc.
+  Import as `from analysis.coarse_grain import compute_stress_tensor`.
+- **HPC files consolidated**: `run_hpc.slurm` and `setup_hpc_env.sh` moved into `hpc/`.
+
+### Removed
+- `dem_config.json` (legacy, unused)
+- `old/` directory (empty)
+
+---
+
+## [V1.7] - 2026-03-15
+
+### Added
+- **Mathematical analysis framework**: Complete continuum-scale mathematical model connecting
+  DEM particle simulations to tissue-level predictions and organ comparisons.
+- **`mean_field_model.py`**: Mean-field ODE model for cell-driven scaffold compaction.
+  `dφ_f/dt = -φ_f(σ_cell - σ_resist)/η_eff` with motor-clutch cell stress, jamming resistance,
+  and Poisson bridge formation kinetics. `CompactionModel` class with `solve()`, `fit_to_data()`,
+  and `from_run()` for automatic fitting to simulation data. Extracts η_eff (effective viscosity),
+  σ_0 (jamming stress), α (jamming exponent). Predicts permeability evolution via Kozeny-Carman
+  and Darcy flow rate. Plotting: fit overlay, phase evolution, permeability, stress balance.
+- **`coarse_grain.py`**: Coarse-graining routines extracting continuum quantities from DEM
+  snapshots. `compute_stress_tensor()` via Love-Weber formula (uses per-contact data from V1.5.2).
+  `compute_strain_rate()` from velocity field. `compute_effective_viscosity()` = σ_dev/(2ε̇_dev).
+  `compute_coordination()` decomposed by pair type. `extract_continuum_timeseries()` for full
+  time evolution. `coarse_grain_field()` for spatially-resolved stress/strain fields via
+  Gaussian weighting. Handles both 2D and 3D modes.
+- **`viz_dimensionless.py`**: Dimensionless analysis and data collapse across DOE runs.
+  Computes β (motor-clutch engagement), Ca (cellular capillary number), jamming proximity,
+  timescale ratio, composition ratio, size ratio. Seven plot types: β-collapse (rescaled
+  compaction trajectories), Ca-scaling (power-law fits), jamming diagram, composition effects,
+  DOE factor effects (main effects + interactions), dimensionless dashboard (3×2), phase space
+  (β vs Ca contour). Includes summary statistics table output.
+- **`tissue_descriptors.py`**: Comprehensive tissue architecture descriptor vector from 3D
+  phase fields (inert phase treated as pore space). 18 descriptors in 8 categories: volume
+  fractions (BV/TV, porosity, S/V), morphometry (Tb.Th, Tb.Sp, Tb.N via distance transform),
+  topology (Euler characteristic, connectivity density, SMI), spatial statistics (two-point
+  correlation S₂(r) via FFT, correlation length, chord length distribution), anisotropy (MIL
+  tensor, degree of anisotropy DA, fractional anisotropy FA), transport (tortuosity via Laplace
+  solver, Kozeny-Carman permeability), pore size distribution. Handles 2D gracefully.
+- **`organ_targets.py`**: Literature-based target descriptor vectors for 7 native organ systems:
+  trabecular bone, lung alveoli, liver, kidney cortex, cardiac muscle, pancreatic islet,
+  intestinal mucosa. Each with mean, standard deviation (natural variability), description,
+  and key references. Radar/spider chart for organ profile comparison.
+- **`arch_distance.py`**: Weighted Mahalanobis-like architectural distance between GELLS
+  scaffolds and organ targets. Log-transform for scale-dependent descriptors (BV/TV, Tb.Th,
+  etc.) so ratios drive comparison. `distance_trajectory()` tracks which organ the scaffold
+  converges toward over time. `optimal_parameters()` finds DOE conditions minimizing distance
+  to a target organ. `sensitivity_analysis()` quantifies DOE factor effects on organ matching.
+  Heatmap, radar, and optimization landscape plots.
+- **`CodeLog/Architecture/MATHEMATICAL_MODEL.md`**: Formal mathematical model document for
+  publications. Covers: microscale DEM equations (Hertz, motor-clutch, friction, adhesion,
+  bridge kinetics), mesoscale coarse-graining (Love-Weber, strain rate), macroscale continuum
+  model (phase conservation, Darcy flow), mean-field ODE, 6 dimensionless groups with scaling
+  laws, tissue architecture characterization framework, and experimental validation strategy.
+
+### Changed
+- **`viz/postprocess.py`** (was `viz_postprocess.py`): Pipeline expanded from 10 to 14 modules. New modules 11-14:
+  mean_field_model, coarse_grain, tissue_descriptors, arch_distance. Batch DOE processing
+  now auto-triggers dimensionless analysis and architectural distance. New skip names:
+  'mean_field', 'coarse_grain', 'tissue', 'arch_distance', 'dimensionless'.
+- **`CodeLog/Architecture/ARCHITECTURE.md`**: Updated to V1.7 with mathematical analysis
+  framework section. New architecture diagram shows analysis pipeline.
+
+---
+
+## [V1.6] - 2026-03-15
+
+### Changed
+- **Visualization decoupled from simulation engine** (`new_dem_0.py`): All matplotlib imports,
+  built-in plotting functions (`plot_granules`, `plot_fields`, `plot_timeseries`,
+  `plot_composite`), and visualization script calls removed from `new_dem_0.py`. The simulation
+  engine now only runs physics and saves data — no plotting dependencies.
+- **`save_fields` default changed to `True`**: Phase field grids (`phi_f`, `phi_i`, `phi_v`)
+  are now saved to disk by default so that postprocessing can produce all visualizations
+  without re-running the simulation.
+- **Removed UNATTACHED cell state**: Cells are now always attached from the start.
+  `CellState` enum: ATTACHED=0, SPREADING=1, PROLIFERATING=2, BRIDGING=3, SENESCENT=4.
+  Excess cells during packing go directly to SENESCENT instead of UNATTACHED.
+
+### Added
+- **`viz_postprocess.py`**: Unified post-processing script that loads saved simulation data
+  and produces all visualizations. Runs the 4 built-in plots (granules, fields, timeseries,
+  composite) plus all `viz_*.py` scripts (compaction, percolation, movies, phases, cells,
+  stress). CLI: `python viz_postprocess.py -i results/default`. Supports `--skip` to exclude
+  specific visualization modules. Programmatic API: `viz_postprocess.run_all(run_dir)`.
+- **Numba JIT acceleration** (`new_dem_0.py`): `@njit(cache=True)` applied to ~20 hot-path
+  functions: quaternion utilities (7), superellipsoid geometry (5), superellipse geometry (8),
+  contact solvers (4: `find_contact_superellipses`, `find_contact_superellipse_wall`,
+  `find_contact_spheres_3d`, `find_contact_superellipsoids_3d`), and `hertz_contact_force`.
+  Identity fallback when Numba is not installed. JIT warmup (`_warmup_jit()`) runs before
+  first timestep to avoid first-step compilation delay.
+- **Vectorized integration** (`new_dem_0.py`): Both 2D and 3D integration paths in `step()`
+  replaced per-granule Python for-loops with vectorized NumPy operations: force→velocity,
+  velocity cap, position update, boundary clamping, rotational dynamics. Active noise in
+  `compute_forces()` and `compute_forces_3d()` also vectorized.
+- **Walltime estimation** (`run_all_trials.py`): Power-law scaling model
+  `T = α * N^β * (steps/ref_steps)` with RSA efficiency correction and safety factor.
+  `estimate_walltime()` reads trial JSON, predicts wall time, and `run_hpc()` uses the
+  maximum estimate across all trials for SLURM `--time`.
+- **Scaling benchmark trials** (`Trials/Trial22-29`): 8 trials varying domain size from
+  200 µm to 2000 µm cube (6 to ~7300 granules) for compute-time benchmarking.
+- **Wall time recording**: `metadata.json` now includes `wall_time_s` and `n_steps` after
+  simulation completes.
+
+---
+
 ## [V1.5.2] - 2026-03-14
 
 ### Added

@@ -114,75 +114,89 @@ The Young's modulus `E_modulus` controls how much granules overlap under cell fo
 
 ```
 GELLS-DEM/
-├── new_dem_0.py                 # Main simulation engine (V1.5.2)
-├── viz_compaction.py            # Void-space & compaction plots
-├── viz_percolation.py           # Transport property analysis
-├── viz_movies.py                # 3D volumetric animations
-├── viz_phases.py                # Individual phase volumes
-├── viz_cells.py                 # Cell morphology, stress maps, GIFs (V1.5.1)
-├── viz_stress.py                # 3D surface stress, isosurfaces, GIFs (V1.5.2)
-├── new_dem_visualization.py     # Legacy post-processing
-├── new_dem_postprocess.py       # Legacy post-processing (JSON)
-├── run_hpc_headless.py          # HPC headless runner
+├── new_dem_0.py                 # Primary simulation engine (V1.8, no plotting)
+├── run_hpc_headless.py          # HPC headless runner (supports 2D/3D)
 ├── run_all_trials.py            # Batch trial runner (local / SLURM array)
-├── Trials/                      # Parameter sweep configs (flat JSON format)
-│   ├── Trial15_3D.json          # 3D trial (800x800x500)
-│   ├── Trial16_3D.json          # 3D small domain (400x400x400)
-│   └── Trial17_2D.json          # 2D baseline
+├── run_analysis_pipeline.py     # Full analysis pipeline orchestrator
+├── reconstruct_history.py       # Reconstruct history from snapshots
+├── viz/                         # Visualization package
+│   ├── postprocess.py           # Unified post-processing orchestrator
+│   ├── cells.py                 # Cell morphology & stress maps
+│   ├── stress.py                # 3D surface stress, isosurfaces
+│   ├── compaction.py            # Void-space & compaction plots
+│   ├── percolation.py           # Transport property analysis
+│   ├── movies.py                # 3D volumetric animations
+│   ├── phases.py                # Individual phase volumes
+│   ├── shapes.py                # Granule shape gallery
+│   ├── doe.py                   # DOE statistical analysis
+│   └── dimensionless.py         # Dimensionless analysis, data collapse
+├── analysis/                    # Mathematical analysis package
+│   ├── mean_field_model.py      # Mean-field ODE compaction model
+│   ├── coarse_grain.py          # Stress tensor, strain rate, viscosity
+│   ├── tissue_descriptors.py    # Tissue architecture descriptors
+│   ├── organ_targets.py         # Organ system target vectors
+│   └── arch_distance.py         # Architectural distance to organs
+├── Trials/                      # Parameter sweep configs (DOE)
+│   ├── generate_doe.py          # DOE config generator
+│   └── DOE_01.json ... DOE_24.json
 ├── CodeLog/
-│   ├── Architecture/ARCHITECTURE.md
+│   ├── Architecture/            # Architecture documents
 │   ├── Readme/README.md         # This file
 │   ├── References/              # Literature references
 │   └── Updates/CHANGELOG.md
 ├── hpc/                         # HPC setup, user configs, sync scripts
-├── old/                         # Archived legacy code
 └── CLAUDE.md                    # Developer guide + HPC best practices
 ```
 
 ---
 
-## Visualization
+## Post-Processing & Visualization
 
-### Built-in Plots
+Visualization is decoupled from the simulation engine (V1.6+). Run post-processing
+on saved output data:
 
-When run as a script, four matplotlib figures are generated:
-1. **Granule positions** at 5 time snapshots
-2. **Phase fields** (functional, inert, void) at 5 time snapshots
-3. **Metric time series** (3×3 grid: topology, dynamics, cell state)
-4. **RGB composite** (Red=functional, Green=void, Blue=inert)
-
-### Specialized Visualization Scripts (V1.4+)
-
-| Script | Plots |
-|--------|-------|
-| `viz_compaction.py` | Void fraction, packing fraction, compaction ratio, void size distribution, stacked phases |
-| `viz_percolation.py` | Kozeny-Carman permeability, porosity + RCP, dimensionless groups (Pe, Re, Da, compaction, porosity ratio), Darcy flow, void connectivity |
-| `viz_movies.py` | Rotating 3D isosurface, time-lapse compaction, z-sweep cross-section, composite 2×2 |
-| `viz_phases.py` | Phase isosurface strip, phase fractions vs time, tri-plane evolution (XY/XZ/YZ), interface area vs time |
-| `viz_cells.py` | Cell morphology patches, force-magnitude stress maps, cell timelapse GIF (V1.5.1) |
-| `viz_stress.py` | 3D Hertzian surface stress fields, cross-section stress maps, granule evolution GIFs, isosurface rendering (V1.5.2, requires PyVista) |
-
-Usage:
 ```bash
-python viz_compaction.py -i ./simulations/run1
-python viz_percolation.py -i ./simulations/run1
-python viz_movies.py -i ./simulations/run1
-python viz_phases.py -i ./simulations/run1
-python viz_cells.py -i ./simulations/run1
-python viz_stress.py -i ./simulations/run1
+# Run all visualizations on saved output:
+python viz/postprocess.py -i results/default
+
+# Skip specific modules:
+python viz/postprocess.py -i results/default --skip movies stress
+
+# Run individual viz scripts:
+python viz/compaction.py -i results/default
+python viz/stress.py -i results/default
 ```
 
 Or programmatically:
 ```python
-import viz_compaction, viz_percolation, viz_movies, viz_phases, viz_cells, viz_stress
-
-viz_compaction.run_all(hist, snaps=snaps, outdir='plots/')
-viz_percolation.run_all(hist, outdir='plots/')
-viz_movies.run_all(snaps, hist, p, outdir='plots/')
-viz_phases.run_all(hist, snaps=snaps, p=p, outdir='plots/')
-viz_cells.run_all(snaps, hist, p, outdir='plots/')
-viz_stress.run_all(snaps, hist, p, outdir='plots/')
+from viz.postprocess import run_all
+run_all('results/default')                          # all visualizations
+run_all('results/default', skip={'movies','stress'}) # selective
 ```
+
+### Visualization Modules (`viz/`)
+
+| Module | Plots |
+|--------|-------|
+| `viz/compaction.py` | Void fraction, packing fraction, compaction ratio, void size distribution, stacked phases |
+| `viz/percolation.py` | Kozeny-Carman permeability, porosity + RCP, dimensionless groups, Darcy flow, void connectivity |
+| `viz/movies.py` | Rotating 3D isosurface, time-lapse compaction, z-sweep cross-section, composite 2×2 |
+| `viz/phases.py` | Phase isosurface strip, phase fractions vs time, tri-plane evolution, interface area vs time |
+| `viz/cells.py` | Cell morphology patches, force-magnitude stress maps, cell timelapse GIF |
+| `viz/stress.py` | 3D Hertzian surface stress fields, cross-section stress maps, granule evolution GIFs (requires PyVista) |
+| `viz/shapes.py` | Granule shape gallery (superellipses, superellipsoids) |
+| `viz/doe.py` | DOE statistical analysis & visualization |
+| `viz/dimensionless.py` | Dimensionless analysis, data collapse by β/Ca |
+
+### Mathematical Analysis (`analysis/`)
+
+| Module | Purpose |
+|--------|---------|
+| `analysis/mean_field_model.py` | Mean-field ODE compaction model with fitting |
+| `analysis/coarse_grain.py` | Stress tensor, strain rate, viscosity from DEM |
+| `analysis/tissue_descriptors.py` | Tissue architecture descriptor vector |
+| `analysis/organ_targets.py` | Organ system target vectors (7 organs) |
+| `analysis/arch_distance.py` | Architectural distance to organ targets |
 
 All visualization scripts support PyVista (primary) with matplotlib fallback.
 

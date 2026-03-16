@@ -9,13 +9,16 @@ Plots produced:
   3. Cell timelapse — animated GIF of cell activity over time
 
 Usage:
-    python viz_cells.py -i ./results/run1
-    python viz_cells.py -i ./results/run1 -o ./plots
+    python viz/cells.py -i ./results/run1
+    python viz/cells.py -i ./results/run1 -o ./plots
 
 Or import programmatically:
-    import viz_cells
-    viz_cells.run_all(snaps, hist, p, outdir='plots/')
+    from viz.cells import run_all
+    run_all(snaps, hist, p, outdir='plots/')
 """
+
+import sys as _sys, os as _os
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 
 import numpy as np
 import matplotlib
@@ -34,7 +37,6 @@ from new_dem_0 import (
 
 # ── Color scheme per CellState ──────────────────────────────────────
 CELL_COLORS = {
-    int(CellState.UNATTACHED):   '#AAAAAA',  # gray
     int(CellState.ATTACHED):     '#DAA520',  # goldenrod
     int(CellState.SPREADING):    '#FF8C00',  # dark orange
     int(CellState.PROLIFERATING):'#228B22',  # forest green
@@ -43,7 +45,6 @@ CELL_COLORS = {
 }
 
 CELL_LABELS = {
-    int(CellState.UNATTACHED):   'Unattached',
     int(CellState.ATTACHED):     'Attached',
     int(CellState.SPREADING):    'Spreading',
     int(CellState.PROLIFERATING):'Proliferating',
@@ -224,12 +225,7 @@ def _draw_fibroblast(ax, wx, wy, state, angle=0.0, scale=1.0):
     color = CELL_COLORS.get(state, '#AAAAAA')
     s = state
 
-    if s == int(CellState.UNATTACHED):
-        r = 7.5 * scale
-        patch = Circle((wx, wy), r, fc=color, ec='k', lw=0.2, alpha=0.7)
-        ax.add_patch(patch)
-
-    elif s == int(CellState.ATTACHED):
+    if s == int(CellState.ATTACHED):
         from matplotlib.patches import Ellipse
         patch = Ellipse((wx, wy), width=18 * scale, height=14 * scale,
                         angle=np.degrees(angle),
@@ -522,7 +518,7 @@ def run_all(snaps, hist, p, outdir=None):
     is_3d = _is_3d(snaps[0], p) if snaps else False
     if is_3d:
         try:
-            import viz_stress
+            from viz import stress as viz_stress
             if viz_stress.HAS_PYVISTA:
                 print("  viz_cells: delegating 3D stress rendering to viz_stress...")
                 viz_stress.run_all(snaps, hist, p, outdir=outdir)
@@ -547,5 +543,5 @@ if __name__ == '__main__':
         run_all(snaps, hist, p, outdir=outdir)
     except Exception as e:
         print(f"Could not load run data: {e}")
-        print(f"Use programmatically: from viz_cells import run_all")
+        print(f"Use programmatically: from viz.cells import run_all")
         print(f"  run_all(snaps, hist, p, outdir='{outdir}')")

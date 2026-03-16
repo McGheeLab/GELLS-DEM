@@ -6,35 +6,46 @@
 is a 2D/3D overdamped particle dynamics simulator for modelling cell-driven rearrangement
 of hydrogel granular scaffolds. The primary simulation engine is `new_dem_0.py`.
 
-**Current version: V1.5.2**
+**Current version: V1.8**
 
 ## Repository Layout
 
 ```
 GELLS-DEM/
-├── new_dem_0.py                 # PRIMARY simulation engine (V1.5.2)
-├── viz_compaction.py            # Void-space & compaction visualization
-├── viz_percolation.py           # Transport property analysis (Darcy, Kozeny-Carman)
-├── viz_movies.py                # 3D volumetric animations (rotating, timelapse, sweep)
-├── viz_phases.py                # Individual phase volume visualization
-├── viz_cells.py                 # Cell morphology & stress map visualization (V1.5.1)
-├── viz_stress.py                # 3D surface stress, granule isosurfaces, cell ellipsoids (V1.5.2)
-├── new_dem_visualization.py     # Unified post-processing & visualisation (legacy)
-├── new_dem_postprocess.py       # Legacy-compatible post-processing (JSON frames)
+├── new_dem_0.py                 # PRIMARY simulation engine (V1.6, no plotting)
 ├── run_hpc_headless.py          # HPC headless runner (supports 2D/3D modes)
 ├── run_all_trials.py            # Batch trial runner (local / SLURM)
-├── dem_config.json              # Default JSON config (legacy format)
+├── run_analysis_pipeline.py     # Full V1.7 analysis pipeline orchestrator
+├── reconstruct_history.py       # Reconstruct history from snapshots
+├── viz/                         # Visualization package
+│   ├── __init__.py
+│   ├── postprocess.py           # Unified post-processing (loads data, runs all viz)
+│   ├── cells.py                 # Cell morphology & stress map visualization (V1.5.1)
+│   ├── stress.py                # 3D surface stress, granule isosurfaces (V1.5.2)
+│   ├── compaction.py            # Void-space & compaction visualization
+│   ├── percolation.py           # Transport property analysis (Darcy, Kozeny-Carman)
+│   ├── movies.py                # 3D volumetric animations (rotating, timelapse, sweep)
+│   ├── phases.py                # Individual phase volume visualization
+│   ├── shapes.py                # Granule shape gallery (superellipses, superellipsoids)
+│   ├── doe.py                   # DOE statistical analysis & visualization
+│   └── dimensionless.py         # Dimensionless analysis, data collapse by β/Ca (V1.7)
+├── analysis/                    # Mathematical analysis package
+│   ├── __init__.py
+│   ├── mean_field_model.py      # Mean-field ODE compaction model with fitting (V1.7)
+│   ├── coarse_grain.py          # Stress tensor, strain rate, viscosity from DEM (V1.7)
+│   ├── tissue_descriptors.py    # Tissue architecture descriptor vector (V1.7)
+│   ├── organ_targets.py         # Organ system target vectors (V1.7)
+│   └── arch_distance.py         # Architectural distance to organ targets (V1.7)
 ├── Trials/                      # Parameter sweep JSON configs
-│   ├── Trial15_3D.json          # 3D trial config (flat format)
-│   ├── Trial16_3D.json          # 3D small domain trial (flat format)
-│   └── Trial17_2D.json          # 2D baseline trial (flat format)
+│   ├── generate_doe.py          # DOE config generator
+│   └── DOE_01.json ... DOE_24.json
 ├── CodeLog/
 │   ├── Architecture/            # Architecture documents
 │   ├── Readme/                  # README documents
 │   ├── References/              # Literature references
 │   └── Updates/                 # Changelog / update log
 ├── hpc/                         # HPC setup scripts and user configs
-├── old/                         # Archived legacy code (3D superellipsoid, etc.)
+├── results/                     # Simulation output (gitignored)
 └── CLAUDE.md                    # THIS FILE
 ```
 
@@ -88,16 +99,19 @@ GELLS-DEM/
   names directly (e.g., `"E_modulus": 10.0`). **Legacy**: nested sections (domain,
   mechanics, shape, etc.) with translated key names. Flat format detected by `"_format": "flat"`.
 - **Individual cell tracking** (V1.5+): Each cell tracked individually via `CellState` enum
-  (UNATTACHED, ATTACHED, SPREADING, PROLIFERATING, BRIDGING, SENESCENT). Flat arrays in
+  (ATTACHED, SPREADING, PROLIFERATING, BRIDGING, SENESCENT). Flat arrays in
   `GranuleSystem` indexed by `cell_offset[i]:cell_offset[i+1]`. Per-granule aggregates
   remain authoritative for force computation (physics identical to V1.4.1).
 - **Data serialization** (V1.5+): Per-timepoint `.npz` snapshots with granule + cell arrays.
   Scalar metrics as CSV/JSON. Params and metadata as JSON. Archived as `.tar.gz`.
-  Controlled by `Params.save_data`, `save_fields`, `output_dir`, `compress_archive`.
+  Controlled by `Params.save_data`, `save_fields` (default `True`), `output_dir`,
+  `compress_archive`.
+- **Visualization decoupled** (V1.6+): `new_dem_0.py` has no matplotlib dependency. All
+  plotting is done via `viz/postprocess.py` which loads saved data and runs all viz scripts.
 - **Data loading** (V1.5+): `load_run(run_dir)` → `(hist, snaps, p, metadata)`. Also
   `load_cells(run_dir, snap_index)` for targeted cell analysis.
 - **Per-contact data** (V1.5.2+): Each contact stores point, normal, overlap, R_eff,
-  F_normal, A_contact. Serialized to `.npz` as structured arrays. Used by `viz_stress.py`
+  F_normal, A_contact. Serialized to `.npz` as structured arrays. Used by `viz/stress.py`
   for Hertzian surface stress mapping.
 - **Bridge formation kinetics** (V1.5.2+): Bridges form probabilistically via Poisson
   process, ramp force over `bridge_formation_time`, persist across timesteps, and transition
@@ -150,29 +164,29 @@ p = Params(mode='2D-slice', Lx=800, Ly=800, Lz=800, t_total=72.0)
 hist, snaps, p, gs = run(p)
 ```
 
-### Visualization Scripts
+### Post-Processing (Visualization)
+
+All visualization is done as a separate step after the simulation completes.
+The unified postprocessor loads saved data and runs all viz scripts:
 
 ```bash
-# After running a simulation that saves to ./simulations/run1:
-python viz_compaction.py -i ./simulations/run1
-python viz_percolation.py -i ./simulations/run1
-python viz_movies.py -i ./simulations/run1
-python viz_phases.py -i ./simulations/run1
-python viz_cells.py -i ./simulations/run1
-python viz_stress.py -i ./simulations/run1
+# Run all visualizations on saved output:
+python viz/postprocess.py -i results/default
+
+# Skip specific modules (e.g., movies and stress):
+python viz/postprocess.py -i results/default --skip movies stress
+
+# Or run individual viz scripts:
+python viz/compaction.py -i results/default
+python viz/stress.py -i results/default
 ```
 
 Or import programmatically:
 
 ```python
-import viz_compaction, viz_percolation, viz_movies, viz_phases, viz_cells
-
-viz_compaction.run_all(hist, snaps=snaps, outdir='plots/')
-viz_percolation.run_all(hist, outdir='plots/')
-viz_movies.run_all(snaps, hist, p, outdir='plots/')
-viz_phases.run_all(hist, snaps=snaps, p=p, outdir='plots/')
-viz_cells.run_all(snaps, hist, p, outdir='plots/')
-viz_stress.run_all(snaps, hist, p, outdir='plots/')  # requires pyvista
+from viz.postprocess import run_all
+run_all('results/default')                          # all visualizations
+run_all('results/default', skip={'movies','stress'}) # selective
 ```
 
 ### Loading Saved Data (V1.5)
