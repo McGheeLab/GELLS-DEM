@@ -796,3 +796,491 @@ moment of inertia, but in the overdamped regime drag replaces inertia).
 | blockiness_*_mean | 2.0 | — | Liu 2025 (n exponent) | §7 |
 | drag_scale_rot | 0.05 | — | Overdamped rotational scaling | §8 |
 | omega_max | 1.0 | rad/h | Angular velocity cap | §8 |
+
+---
+
+## 10. Jamming Physics & Yield Stress
+
+**Introduced in:** V1.7 (mean-field model), V1.11 (energy landscape)
+
+### 10.1 Jamming Transition
+
+> A. J. Liu and S. R. Nagel, "Jamming is not just cool any more," *Nature*,
+> vol. 396, pp. 21–22, 1998. doi:10.1038/23819
+
+Seminal perspective establishing the jamming phase diagram unifying granular
+materials, foams, emulsions, and glasses. The jamming point J defines the
+critical packing fraction φ_J above which a disordered assembly of repulsive
+particles develops a nonzero shear modulus. For our granular hydrogel scaffold,
+φ_J sets the boundary between a flowable suspension and a mechanically stable
+scaffold.
+
+### 10.2 Zero-Temperature Jamming
+
+> C. S. O'Hern, L. E. Silbert, A. J. Liu, and S. R. Nagel, "Jamming at
+> zero temperature and zero applied stress: The epitome of disorder,"
+> *Physical Review E*, vol. 68, no. 1, 011306, 2003.
+> doi:10.1103/PhysRevE.68.011306
+
+Defines the critical scaling laws near the jamming transition for frictionless
+soft spheres. The key results we adopt:
+
+**Equations adopted:**
+
+```
+σ_y ~ (φ − φ_J)^Δ        yield stress scaling near jamming
+G   ~ (φ − φ_J)^α        shear modulus scaling
+z − z_c ~ (φ − φ_J)^0.5  excess contacts above isostaticity
+```
+
+where Δ ≈ 1.0–1.5 depending on interaction potential (Δ = 3/2 for Hertzian
+particles). We use Δ = 1.5 in the energy landscape yield stress term G_yield,
+consistent with Hertzian (3/2-power) contacts.
+
+**Rationale:** The O'Hern scaling provides a physics-based form for the yield
+stress barrier in the free energy landscape, replacing ad hoc constitutive
+choices. The Herschel-Bulkley yield term G_yield = c_yield · σ_0 · max(0, ξ − ξ_J)^Δ
+derives directly from this scaling.
+
+### 10.3 Jamming Review
+
+> M. van Hecke, "Jamming of soft particles: geometry, mechanics, scaling and
+> isostaticity," *Journal of Physics: Condensed Matter*, vol. 22, no. 3,
+> 033101, 2010. doi:10.1088/0953-8984/22/3/033101
+
+Comprehensive review of the physics of jammed soft-particle packings.
+Establishes the geometric picture of isostaticity (z_iso = 2d for frictionless
+spheres in d dimensions), the role of excess contacts in determining mechanical
+properties, and the scaling of elastic moduli and yield stress with distance
+from φ_J. We adopt the general framework of treating granular scaffolds as
+soft jammed packings where mechanical response emerges from the network of
+Hertzian contacts.
+
+### 10.4 Herschel-Bulkley Rheology Near Jamming
+
+> P. Olsson and S. Teitel, "Critical scaling of shear viscosity at the
+> jamming transition," *Physical Review Letters*, vol. 99, 178001, 2007.
+> doi:10.1103/PhysRevLett.99.178001
+
+First demonstration that the jamming transition at finite shear rate exhibits
+critical scaling with a diverging viscosity η ~ |φ − φ_J|^{−β}. Establishes
+the connection between jamming and the Herschel-Bulkley constitutive law.
+
+> P. Olsson and S. Teitel, "Herschel-Bulkley shearing rheology near the
+> athermal jamming transition," *Physical Review Letters*, vol. 109, 108001,
+> 2012. doi:10.1103/PhysRevLett.109.108001
+
+Explicit derivation of Herschel-Bulkley rheology σ = σ_y + k·γ̇^n near the
+athermal jamming point. Shows that the yield stress σ_y and flow exponent
+emerge naturally from the jamming critical point. We adopt this framework
+in the mean-field ODE where resistance stress saturates at σ_y above φ_J,
+and in the energy landscape yield barrier term G_yield.
+
+**Equations adopted:**
+
+```
+σ(γ̇) = σ_y + k · γ̇^n     Herschel-Bulkley constitutive law
+σ_y   ~ (φ − φ_J)^Δ       yield stress from jamming
+```
+
+### 10.5 Stress Scaling Near Jamming
+
+> B. P. Tighe, E. Woldhuis, and M. van Hecke, "Model for the scaling of
+> stresses and fluctuations in flows near jamming," *Physical Review Letters*,
+> vol. 105, 088303, 2010. doi:10.1103/PhysRevLett.105.088303
+
+Develops a model for stress fluctuations near the jamming transition that
+explains the broad stress distributions observed in simulations. Relevant to
+our coarse-graining analysis (§analysis/coarse_grain.py) where we compute
+stress tensors from DEM contact data and observe large spatial fluctuations
+characteristic of proximity to jamming.
+
+---
+
+## 11. Random Close Packing & Polydispersity
+
+**Introduced in:** V1.4 (transport metrics), V1.7 (mean-field model)
+
+### 11.1 Definition of RCP
+
+> S. Torquato, T. M. Truskett, and P. G. Debenedetti, "Is random close
+> packing of spheres well defined?" *Physical Review Letters*, vol. 84,
+> no. 10, pp. 2064–2067, 2000. doi:10.1103/PhysRevLett.84.2064
+
+Critical analysis of the random close packing concept. Proposes replacing
+the ill-defined "RCP" with the "maximally random jammed" (MRJ) state. For
+monodisperse spheres, φ_RCP ≈ 0.64 (3D) or φ_RCP ≈ 0.84 (2D). We use
+these values as baselines and correct for polydispersity and shape effects
+via the formulas in §11.2–11.3.
+
+### 11.2 Polydisperse Packing
+
+> R. S. Farr and R. D. Groot, "Close packing density of polydisperse hard
+> spheres," *Journal of Chemical Physics*, vol. 131, no. 24, 244104, 2009.
+> doi:10.1063/1.3276799
+
+Analytic formula for the random close packing fraction of polydisperse hard
+spheres as a function of the size distribution. We adopt the first-order
+correction:
+
+**Equation adopted:**
+
+```
+φ_RCP(σ_R) ≈ φ_RCP,mono + 0.016 · CV_R²
+```
+
+where CV_R = σ_R / ⟨R⟩ is the coefficient of variation of the radius
+distribution. Wider size distributions pack more efficiently (small particles
+fill interstices between large ones), increasing the jamming fraction.
+
+### 11.3 Non-Spherical Packing
+
+> A. Donev, I. Cisse, D. Sachs, E. A. Variano, F. H. Stillinger,
+> R. Connelly, S. Torquato, and P. M. Chaikin, "Improving the density of
+> jammed disordered packings using ellipsoids," *Science*, vol. 303,
+> no. 5660, pp. 990–993, 2004. doi:10.1126/science.1093010
+
+Experimental and computational demonstration that slightly non-spherical
+particles (ellipsoids with aspect ratio ~1.25) pack more densely than spheres
+(φ ≈ 0.71 vs 0.64). We adopt the correction in `rcp_fraction_superellipsoid()`:
+
+**Equation adopted:**
+
+```
+Δφ_shape ≈ 0.013 · (AR − 1)    for AR close to 1
+```
+
+> Y. Yuan, K. VanderWerf, M. D. Shattuck, and C. S. O'Hern, "Jammed
+> packings of 3D superellipsoids with tunable packing fraction, coordination
+> number, and ordering," *Soft Matter*, vol. 15, pp. 9751, 2019.
+> doi:10.1039/C9SM01932D
+
+Systematic study of jammed packings of superellipsoids as a function of
+blockiness and aspect ratio. Provides φ_J values for the superellipsoid
+parameter space relevant to our simulation. Confirms that blockiness > 2
+increases packing fraction (more space-filling shapes).
+
+### 11.4 Superellipsoid Packing Properties
+
+> G. W. Delaney and P. W. Cleary, "The packing properties of
+> superellipsoids," *Europhysics Letters*, vol. 89, 34002, 2010.
+> doi:10.1209/0295-5075/89/34002
+
+Comprehensive study of packing fractions, coordination numbers, and ordering
+in superellipsoid packings. We use results from this paper in the function
+`rcp_fraction_superellipsoid()` to correct the baseline RCP fraction for
+blockiness effects.
+
+---
+
+## 12. Energy Landscape Theory
+
+**Introduced in:** V1.11
+
+### 12.1 Energy Landscape Formalism
+
+> D. J. Wales, *Energy Landscapes: Applications to Clusters, Biomolecules
+> and Glasses*, Cambridge University Press, 2003. ISBN: 978-0521814157
+
+Foundational monograph on energy landscape theory. Establishes the mathematical
+framework for analysing complex systems through their potential energy surface:
+minima correspond to stable states, saddle points to transition states, and the
+connectivity of minima determines kinetic pathways. We adopt this framework to
+construct a one-dimensional free energy landscape G(ξ) along the compaction
+coordinate ξ, where the minimum of G(ξ) gives the equilibrium compaction and
+the barrier height determines the kinetic timescale.
+
+**Key concepts adopted:**
+
+- **Minimum = equilibrium compaction ξ***: The compaction coordinate at which
+  dG/dξ = 0 and d²G/dξ² > 0.
+- **Barrier height ΔG‡**: Energy difference between the maximum of G(ξ) and
+  the uncompacted state G(0), determining the activation barrier for
+  compaction initiation.
+- **Landscape curvature κ = d²G/dξ²|_{ξ*}**: Determines the sharpness of the
+  equilibrium and fluctuation amplitude δξ ~ √(k_BT/κ).
+- **Overdamped descent**: In the viscous limit (cell-driven remodelling over
+  hours), the system follows the steepest descent path dξ/dt = −(1/η_eff)·dG/dξ.
+
+### 12.2 Kramers Theory for Overdamped Dynamics
+
+> H. A. Kramers, "Brownian motion in a field of force and the diffusion model
+> of chemical reactions," *Physica*, vol. 7, no. 4, pp. 284–304, 1940.
+> doi:10.1016/S0031-8914(40)90098-2
+
+Classic theory for escape rates over energy barriers in the overdamped
+(high-friction) limit. The overdamped Kramers rate is:
+
+**Equation adopted:**
+
+```
+k_escape = (ω_min · ω_barrier) / (2π γ) · exp(−ΔG‡ / k_BT)
+```
+
+We use the structure (not the thermal activation) of Kramers theory to
+formulate the kinetic equation for compaction dynamics. In our system, the
+"thermal energy" is replaced by the active cell traction σ_cell, so the
+relevant energy scale is G/σ_cell rather than G/k_BT. The overdamped descent
+equation dξ/dt = −(1/η_eff)·dG/dξ is the deterministic limit of the Kramers
+framework.
+
+### 12.3 Energy Barriers in Dense Tissues
+
+> D. Bi, J. H. Lopez, J. M. Schwarz, and M. L. Manning, "Energy barriers
+> and cell migration in densely packed tissues," *Soft Matter*, vol. 10,
+> pp. 1885–1890, 2014. doi:10.1039/C3SM52893F
+
+Computes energy barriers for cell rearrangements in confluent tissues using
+a vertex model. Shows that energy barriers scale with cell–cell interfacial
+tension and increase as cells become more rigid (higher shape parameter).
+Directly motivates our treatment of the inert-granule frustration term G_inert,
+which represents the energy cost of rearranging functional granules past
+inert obstacles.
+
+> D. Bi, J. H. Lopez, J. M. Schwarz, and M. L. Manning, "A density-independent
+> rigidity transition in biological tissues," *Nature Physics*, vol. 11,
+> pp. 1074–1079, 2015. doi:10.1038/nphys3471
+
+Discovers a rigidity transition in confluent tissues that depends on cell shape
+rather than packing fraction. Introduces the target shape parameter s_0 = P_0/√A_0
+as the control variable. Relevant to our framework because it demonstrates that
+energy landscape topology (barrier heights, number of minima) in biological
+tissues depends on geometric parameters — analogous to how our landscape depends
+on the dimensionless groups β, Ca, Φ_r, Ψ, and Γ.
+
+### 12.4 Energy Landscape Decomposition in Biology
+
+> J. Shi, K. Aihara, T. Li, and L. Chen, "Energy landscape decomposition
+> for cell differentiation with proliferation effect," *National Science
+> Review*, vol. 9, no. 8, nwac116, 2022. doi:10.1093/nsr/nwac116
+
+Develops an energy landscape decomposition approach for cell fate transitions,
+separating the landscape into contributions from different regulatory
+interactions. We adopt the conceptual approach of decomposing G(ξ) into
+physically distinct contributions (cell traction, elastic, yield, void,
+inert frustration, interfacial) so that each term can be independently
+varied and its effect on the equilibrium assessed.
+
+---
+
+## 13. Poroelasticity & Consolidation
+
+**Introduced in:** V1.7 (mean-field model), V1.11 (energy landscape)
+
+### 13.1 Biot Consolidation
+
+> M. A. Biot, "General theory of three-dimensional consolidation," *Journal
+> of Applied Physics*, vol. 12, no. 2, pp. 155–164, 1941.
+> doi:10.1063/1.1712886
+
+Foundational theory for coupled fluid flow and solid deformation in porous
+media. Biot's consolidation model describes how interstitial fluid is expelled
+from a deforming porous skeleton, producing time-dependent compaction. We adopt
+the conceptual framework (not the full PDE) for the void-redistribution energy
+term G_void, where osmotic pressure Π drives equilibration of void fraction
+between functional and inert zones as compaction proceeds.
+
+### 13.2 Brinkman Permeability
+
+> H. C. Brinkman, "A calculation of the viscous force exerted by a flowing
+> fluid on a dense swarm of particles," *Applied Scientific Research*,
+> vol. A1, pp. 27–34, 1949. doi:10.1007/BF02120313
+
+Extension of Darcy's law to account for viscous stress in the fluid phase,
+relevant at intermediate porosities. The Brinkman equation bridges the
+Stokes (dilute) and Darcy (dense) limits. We use the Kozeny-Carman
+permeability model (implemented in `kozeny_carman_permeability()`) which is
+the Darcy limit appropriate for our densely packed granular scaffolds (φ > 0.4).
+
+---
+
+## 14. Interfacial Tension in Emulsions & Foams
+
+**Introduced in:** V1.11
+
+### 14.1 Concentrated Emulsion Mechanics
+
+> H. M. Princen, "Highly concentrated emulsions. I. Cylindrical systems,"
+> *Journal of Colloid and Interface Science*, vol. 71, pp. 55–66, 1979.
+> doi:10.1016/0021-9797(79)90222-2
+
+First systematic treatment of the mechanics of concentrated emulsions
+(φ > φ_RCP). Derives the relationship between droplet deformation, interfacial
+tension, and osmotic pressure. Motivates our treatment of the granular scaffold
+as a dense emulsion where functional and inert granules play the role of
+deformable droplets separated by thin fluid films.
+
+### 14.2 Foam and Emulsion Rheology
+
+> H. M. Princen, "Rheology of foams and highly concentrated emulsions.
+> I. Elastic properties and yield stress of a cylindrical model system,"
+> *Journal of Colloid and Interface Science*, vol. 91, pp. 160–175, 1983.
+> doi:10.1016/0021-9797(83)90323-5
+
+Derives the elastic shear modulus and yield stress of ordered and disordered
+emulsions as functions of droplet volume fraction and interfacial tension:
+
+**Equations adopted (conceptual form):**
+
+```
+G_foam ~ (γ_s / R) · f(φ)         elastic modulus from interfacial tension
+σ_y   ~ (γ_s / R) · g(φ − φ_c)   yield stress from surface energy
+```
+
+where γ_s is the interfacial tension, R the droplet radius, and f, g are
+known functions of packing fraction. We use the scaling relationship
+G_surface ~ γ to parameterize the interfacial energy cost of compaction in
+our energy landscape.
+
+### 14.3 Osmotic Pressure of Foams
+
+> H. M. Princen, "Osmotic pressure of foams and highly concentrated
+> emulsions. I. Theoretical considerations," *Langmuir*, vol. 2,
+> pp. 519–524, 1986. doi:10.1021/la00070a023
+
+Derives the osmotic pressure Π(φ) for concentrated emulsions, which
+represents the thermodynamic cost of increasing the volume fraction by
+expelling continuous-phase fluid. We adopt this concept for the void
+redistribution energy G_void, where the osmotic pressure quantifies the
+energetic cost of transferring void space from the compacting functional
+zone to the inert zone.
+
+### 14.4 Foam Mechanics at the Bubble Scale
+
+> D. J. Durian, "Foam mechanics at the bubble scale," *Physical Review
+> Letters*, vol. 75, no. 26, pp. 4780–4783, 1995.
+> doi:10.1103/PhysRevLett.75.4780
+
+Introduces the "bubble model" for foam dynamics where each bubble interacts
+through spring-like repulsion and viscous drag. Demonstrates that macroscopic
+Herschel-Bulkley rheology emerges from microscopic bubble-scale interactions
+— the same paradigm we adopt in GELLS-DEM where macroscopic compaction
+behavior emerges from microscopic granule-granule Hertzian contacts and
+cell-driven forces.
+
+---
+
+## 15. Polymer Dynamics & Viscosity
+
+**Introduced in:** V1.7 (mean-field model), V1.11 (energy landscape)
+
+### 15.1 Polymer Dynamics Reference
+
+> M. Doi and S. F. Edwards, *The Theory of Polymer Dynamics*, Oxford
+> University Press, 1986. ISBN: 978-0198520337
+
+Standard reference for the dynamics of polymer systems. The overdamped
+Langevin equation (§6) used throughout GELLS-DEM derives from the same
+theoretical framework applied to colloidal and polymeric systems. We adopt
+the viscous-dominated, inertia-free dynamical equations that Doi and Edwards
+develop for concentrated polymer solutions, adapted to our granular system
+where effective viscosity η_eff governs the compaction rate.
+
+---
+
+## 16. Granular Hydrogel Mechanics
+
+**Introduced in:** V1.5 (individual cell tracking), V1.11 (energy landscape)
+
+### 16.1 Building Block Properties
+
+> S. Cai, B. Bhatt, et al., "Building block properties govern granular
+> hydrogel mechanics through contact deformations," *Science Advances*,
+> vol. 8, no. 50, eadd8570, 2022. doi:10.1126/sciadv.add8570
+
+Demonstrates that the mechanical properties of granular hydrogel scaffolds
+are governed by the Hertzian contact mechanics of individual building blocks
+(microgels), not by bulk material properties alone. The Young's modulus and
+size of individual granules determine the macroscopic storage modulus and
+yield stress through contact area and overlap. Directly supports our use of
+Hertzian contact mechanics (§1) as the primary mechanical interaction and
+validates our elastic energy term G_elastic.
+
+### 16.2 Programmed Shape Transformations
+
+> N. Di Caprio, A. J. Hughes, and J. A. Burdick, "Programmed shape
+> transformations in cell-laden granular composites," *Science Advances*,
+> vol. 11, no. 3, eadq5011, 2025. doi:10.1126/sciadv.adq5011
+
+Demonstrates that cell-driven compaction in granular composites produces
+programmable macroscopic shape changes. The functional (cell-laden) zones
+compact while inert zones resist, generating internal stresses that drive
+shape transformation. This is the primary experimental motivation for the
+GELLS-DEM simulation and the energy landscape framework: the competition
+between cell traction (driving compaction) and mechanical resistance (elastic,
+yield, geometric frustration) determines the final tissue architecture.
+
+---
+
+## 17. Tissue Architecture & Design Rules
+
+**Introduced in:** V1.7 (tissue descriptors), V1.11 (energy landscape design rules)
+
+### 17.1 Microstructural Anisotropy Tensors
+
+> T. P. Harrigan and R. W. Mann, "Characterization of microstructural
+> anisotropy in orthotropic materials using a second rank tensor," *Journal
+> of Materials Science*, vol. 19, no. 3, pp. 761–767, 1984.
+> doi:10.1007/BF00540446
+
+Introduces the use of a fabric tensor (second-rank symmetric tensor) to
+quantify microstructural anisotropy in porous materials. We adopt this
+approach in `analysis/tissue_descriptors.py` to characterize the directional
+organization of the granular scaffold through eigenvalues and eigenvectors
+of the void-space fabric tensor.
+
+### 17.2 3D Thickness Measurement
+
+> T. Hildebrand and P. Ruegsegger, "A new method for the model-independent
+> assessment of thickness in three-dimensional images," *Journal of
+> Microscopy*, vol. 185, no. 1, pp. 67–75, 1997.
+> doi:10.1046/j.1365-2818.1997.1340694.x
+
+Develops the "sphere-fitting" method for measuring trabecular thickness
+and spacing in 3D images without requiring a structural model. We adopt
+this approach conceptually in our tissue descriptor vector, where mean
+trabecular thickness (Tb.Th) and spacing (Tb.Sp) are computed from the
+phase fields φ_f and φ_i.
+
+### 17.3 Porous Scaffold Design
+
+> S. J. Hollister, "Porous scaffold design for tissue engineering," *Nature
+> Materials*, vol. 4, no. 7, pp. 518–524, 2005.
+> doi:10.1038/nmat1421
+
+Comprehensive review of computational approaches to designing tissue
+engineering scaffolds with specified pore architecture, mechanical properties,
+and transport characteristics. Establishes the design target framework: a
+scaffold must simultaneously satisfy constraints on porosity, pore size,
+connectivity, mechanical strength, and permeability. We adopt this
+multi-objective design philosophy in our energy landscape analysis, where
+the dimensionless groups (β, Ca, Φ_r, Ψ, Γ) define a design space and
+the energy landscape minimum ξ* maps to the achievable tissue architecture.
+
+### 17.4 Superquadric Geometry
+
+> A. Jaklic and A. Leonardis, "Superquadrics and their geometric properties,"
+> in *Segmentation and Recovery of Superquadrics*, pp. 13–39, Springer, 2000.
+> doi:10.1007/0-306-46857-1_2
+
+Mathematical reference for superquadric (including superellipse and
+superellipsoid) geometric properties: volume, surface area, curvature,
+and inside-outside functions. We use the analytic formulas from this
+reference for computing superellipse/superellipsoid areas, bounding radii,
+and local curvatures in the contact detection algorithm (§7).
+
+---
+
+## 18. Summary of Energy Landscape Parameters
+
+| Parameter | Value | Unit | Source | Section |
+|-----------|-------|------|--------|---------|
+| σ_cell | ~0.001 | kPa | Motor-clutch at hydrogel stiffness | §2, §12 |
+| σ_0 | 0.005·E_eff | kPa | ODE-consistent elastic prefactor | §12 |
+| ξ_J | ~0.25 | — | Proximity to jamming (ξ_max - Ψ) | §10, §12 |
+| c_yield | 0.25 | — | HB yield prefactor (Olsson & Teitel) | §10, §12 |
+| Δ | 1.5 | — | O'Hern Hertzian exponent | §10, §12 |
+| Π | 3·σ_cell | kPa | Osmotic void pressure | §13, §14 |
+| k_frust | 1.5·σ_cell | kPa | Inert frustration prefactor | §12 |
+| γ_surface | 2.5·σ_cell·(0.3+mismatch) | kPa·µm | Interfacial tension | §14, §12 |
+| η_eff | ~1 | kPa·h | Effective viscosity for compaction | §6, §15 |

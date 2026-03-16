@@ -8,6 +8,252 @@ MINOR tracks feature additions and improvements.
 
 ---
 
+## [V1.12] - 2026-03-16
+
+### Documentation
+- **REFERENCES.md**: Added 28 new literature references for energy landscape framework,
+  organized into 9 new sections (§10–§18): Jamming Physics & Yield Stress (O'Hern, van Hecke,
+  Olsson & Teitel, Tighe), Random Close Packing (Torquato, Farr & Groot, Donev, Yuan),
+  Energy Landscape Theory (Wales, Kramers, Bi et al., Shi et al.), Poroelasticity (Biot,
+  Brinkman), Interfacial Tension (Princen 1979/1983/1986, Durian), Polymer Dynamics
+  (Doi & Edwards), Granular Hydrogel Mechanics (Cai et al., Di Caprio et al.), Tissue
+  Architecture (Harrigan & Mann, Hildebrand & Ruegsegger, Hollister, Jaklic & Leonardis).
+  Summary table §18 added for energy landscape parameter sources.
+- **MATHEMATICAL_MODEL.docx**: Regenerated from updated markdown source with all new
+  sections 11–14 (volume-conserving two-zone model, free energy landscape, computational
+  results, design rules). Analysis figures inserted (110 total).
+
+### Added
+- **Jamming constraint** (`analysis/parameter_sweep.py`): Added physical requirement that
+  initial solid packing must be jammed (`phi_solid >= phi_RCP`) to justify ignoring
+  gravitational effects. Without jamming, granular scaffolds would collapse under gravity.
+  - `phi_solid` sampling range narrowed from [0.10, 0.92] to [0.75, 0.95] to focus on the
+    jammed regime and reduce wasted samples.
+  - Feasibility filter in `run_sweep()` now computes `phi_RCP` before filtering and rejects
+    samples below the shape-dependent jamming threshold.
+  - New plot: `jamming_phase_space.png` — three-panel figure showing (a) phi_solid vs phi_RCP
+    scatter with jamming boundary, (b) accessible BV/TV range with organ target lines, and
+    (c) jamming margin distribution histogram.
+  - Jamming boundary annotations (dashed line at phi_RCP=0.82) added to `compaction_heatmaps`
+    and `organ_landscapes` plots where phi_solid is an axis.
+  - Solid phase balance plot slices updated to reflect jammed phi_solid range [0.80-0.92].
+  - Key physical insight: low-BV/TV organs (lung, bone) remain accessible in the jammed
+    regime via low functional ratio (mostly inert granules provide structural jamming while
+    sparse functional granules define tissue architecture).
+
+---
+
+## [V1.11] - 2026-03-16
+
+### Added
+- **Energy landscape analysis** (`analysis/energy_landscape.py`): New `EnergyLandscape`
+  class decomposes the free energy of cell-driven scaffold compaction into six physically
+  motivated terms as a function of compaction coordinate ξ = 1 − x_f/x_{f,0}:
+  (1) G_cell — cell traction + bridge adhesion (negative, drives compaction, density-
+  enhanced via ln(1−ξ));
+  (2) G_elastic — Hertzian elastic contact (ODE-consistent parabolic onset at ξ_c where
+  φ_local = φ_RCP);
+  (3) G_yield — Herschel-Bulkley yield barrier near jamming (σ_y ~ σ_0·(φ/φ_J−1)^1.5);
+  (4) G_void — osmotic void redistribution (quadratic in Δφ_v);
+  (5) G_inert — geometric frustration from inert obstacles (quadratic in ξ);
+  (6) G_surface — interfacial tension at functional/inert boundary (γ depends on modulus
+  mismatch, favours compact round zones, penalises trapped inert granules).
+  Provides: `find_equilibrium()`, `find_barrier()`, `solve_kinetics()` (overdamped
+  dynamics with time-dependent bridge formation), `dimensionless_groups()` (β, Ca, Φ_r,
+  Ψ, Γ), and `energy_decomposition_at_eq()`. Energies normalised by σ_cell for O(1)
+  landscape structure. Calibrated to reproduce mean-field ODE equilibrium.
+- **Energy landscape visualization** (`viz/energy_landscape.py`): Four publication-quality
+  figures from the energy landscape analysis:
+  (1) `energy_landscape_organs.png` — 2×2 grid showing G̃(ξ) with all 6 decomposed terms
+  for 4 organ targets, marking equilibrium ξ* and barriers;
+  (2) `energy_landscape_evolution.png` — time-evolving landscape as bridges form (t=0→72h)
+  with kinetics trajectory ξ(t);
+  (3) `energy_decomposition.png` — stacked bar chart of driving vs resisting energy terms
+  at ξ* per organ, plus governing dimensionless numbers;
+  (4) `energy_design_space.png` — heat maps of ξ* over (E_func, φ_f), (φ_i, R_func),
+  and (E_func, E_inert) parameter planes for design rule extraction.
+  CLI: `python viz/energy_landscape.py -i results/parameter_sweep`.
+- **Timelapse temporal coherence** (`viz/scaffold_evolution.py`): Replaced per-frame
+  independent position computation with frame-to-frame state propagation using damped
+  motion (`_advance_positions()`) and pre-computed rendering (`_render_frame_from_pos()`).
+  Each frame inherits positions from the previous frame and moves 18% toward the target,
+  with gentle overlap resolution (10 iterations), eliminating unnatural inter-frame
+  jostling of granules.
+
+---
+
+## [V1.10] - 2026-03-16
+
+### Added
+- **Periodic boundary conditions** (`new_dem_0.py`): New `Params.boundary_mode` parameter
+  (`"walls"` default or `"periodic"`). When periodic, granule interactions use the minimum
+  image convention via `scipy.spatial.cKDTree(boxsize=...)`, positions wrap via modulo, and
+  wall forces are disabled. Eliminates artificial void accumulation near boundaries during
+  compaction, enabling bulk scaffold property studies.
+  - Packing (RSA + settle): Periodic placement in `[0, Lx)` with minimum-image overlap check.
+    Settle phase uses random jitter instead of centripetal attraction.
+  - Force computation: `compute_forces()` and `compute_forces_3d()` use periodic cKDTree,
+    minimum-image displacements, and virtual positions for superellipse/superellipsoid contacts.
+  - Step integration: Position wrapping via `wrap_positions()` instead of boundary clipping.
+    Unwrapped positions (`x_unwrap`, `y_unwrap`, `z_unwrap`) track true displacement.
+  - Field rendering: Ghost particle images stamped at periodic boundaries for correct phase fields.
+  - Metrics: `boundary_exclusion` forced to 0 for periodic (full domain used). Contact
+    diagnostics and bridge counting use periodic tree + minimum image.
+  - Displacement: `compute_displacement()` uses unwrapped positions for correct RMS displacement.
+  - Helper functions: `minimum_image_disp()`, `minimum_image_disp_3d()`, `wrap_positions()`.
+  - Backward compatible: `boundary_mode='walls'` produces identical results to V1.9.
+
+- **1D radial PDE mean-field model** (`analysis/parameter_sweep.py`): Replaced scalar ODE
+  `x_f(t)` with spatially-resolved 1D PDE `x_f(xi, t)` on N_x=20 radial grid points,
+  where xi is a normalized radial coordinate (center=0, edge=1).
+  - **Neighbor-count modifier**: `neighbor_factor(xi) = 0.5*(1 + cos(pi*xi))` — cells at
+    center sense all neighbors (factor=1), cells at edge sense none (factor=0). This
+    naturally produces a dense core with dilute periphery.
+  - **Stress-driven diffusion**: `D_eff * d²x_f/dxi²` with zero-flux BCs at xi=0 (symmetry)
+    and xi=1 (edge). CFL stability clamped: `D_eff * dt / dxi² < 0.45`.
+  - Domain-averaged outputs remain backward compatible with V1.9 sweep results.
+  - New spatial outputs: `x_f_final_std` (radial heterogeneity), `x_f_gradient` (edge-center
+    difference), `phi_v_f_local_std` (void fraction variability), `K_f_series` (harmonic mean
+    permeability for radial flow).
+  - `_integrate_trajectory()` updated to return spatial profiles for radial profile plotting.
+  - New `plot_radial_profiles()` function: shows x_f(xi) and phi_v(xi) at final time for
+    each organ's optimal scaffold.
+
+---
+
+## [V1.9] - 2026-03-16
+
+### Added
+- **Bridge force lock-in** (`new_dem_0.py`): Bridging fibroblasts whose force exceeds
+  `bridge_lock_force_threshold` (default 20 nN) now prefer to stay in the bridge
+  configuration indefinitely, bypassing the senescence timer. This models the
+  biological observation that high-tension bridges stabilize rather than turn over.
+  New parameter: `Params.bridge_lock_force_threshold`.
+- **Secondary bridge migration** (`new_dem_0.py`): Non-bridging fibroblasts can migrate
+  along existing bridges to form additional connections. When committed bridges already
+  exist between two granules, the bridge attempt rate for new cells is boosted by
+  `bridge_secondary_rate_mult` (default 3×). New parameter:
+  `Params.bridge_secondary_rate_mult`.
+- **Per-cell bridge force monitoring** (`new_dem_0.py`): Tracks force magnitude of every
+  bridging cell at each save point. New history metrics: `n_bridging_cells`,
+  `bridge_force_mean`, `bridge_force_max`, `bridge_force_min`, `bridge_force_std`,
+  `n_locked_in_cells`. Run output now shows `bCells`, `bF_avg`, `lock` columns.
+- **Bridge force diagnostic** (`new_dem_0.py`, `analysis/mean_field_model.py`): At end
+  of simulation, compares measured bridge forces to `expected_bridge_force` (default
+  100 nN) and warns if motor-clutch parameters may need tuning. New parameter:
+  `Params.expected_bridge_force`.
+- **Mean-field model updates** (`analysis/mean_field_model.py`): Bridge fraction now
+  accounts for lock-in (no senescence turnover when F_cell ≥ threshold) and secondary
+  migration rate boost. New constructor parameters: `bridge_senescence_time`,
+  `bridge_lock_force_threshold`, `bridge_secondary_rate_mult`, `expected_bridge_force`.
+- **`analysis/parameter_sweep.py`**: Mean-field parameter sweep and organ target prediction.
+  Sweeps 6 physical parameters (E_modulus, phi_f_target, phi_i_target, R_func_mean,
+  n_cells_per_granule, bridge_attempt_rate) through 50,400 combinations using the
+  mean-field ODE model. Physics-based scaling laws derive fitting parameters (eta_eff,
+  sigma_0, alpha) from granule mechanics without requiring DEM calibration data.
+  Computes scaffold descriptors (BV/TV, porosity, Kozeny-Carman permeability) and
+  architectural distance to all 7 organ targets for each combination.
+  Outputs: `sweep_data.csv` (45K+ rows), `recommendations.json`, and 10 publication-
+  quality figures including compaction heatmaps, solid phase balance diagrams,
+  compaction driver analysis, organ distance landscapes, recommendation tables,
+  radar comparisons, sensitivity tornado charts, closest-organ phase map,
+  permeability-porosity space, and compaction kinetics for optimal scaffolds.
+  CLI: `python analysis/parameter_sweep.py [-o DIR] [--quick] [--t-total H]`.
+- **`viz/scaffold_evolution.py`**: 2D spatial maps showing time evolution of
+  granular scaffold microstructure under cell-driven compaction. For 4 organ
+  targets (trabecular bone, intestinal mucosa, kidney cortex, cardiac muscle),
+  generates a packed 2D domain of superellipse granules (functional + inert)
+  and applies the mean-field compaction trajectory to animate clustering over
+  5 time snapshots (0, 6, 18, 36, 72 h). Shows cell bodies, cell bridges, and
+  void redistribution. Companion kinetics plot shows x_f(t), local void
+  fractions, and bridge fraction per organ.
+  Outputs: `scaffold_evolution.png`, `scaffold_kinetics.png`.
+  CLI: `python viz/scaffold_evolution.py -i results/parameter_sweep`.
+- **`viz/scaffold_evolution_3d.py`**: 3-D volumetric version of the scaffold
+  evolution visualization using PyVista off-screen rendering. Generates
+  superellipsoid granule packings in a 3-D cubic domain, applies mean-field
+  compaction trajectories, and renders semi-transparent isometric views showing
+  interior clustering. Cell bridges rendered as tubes, cells as small spheres.
+  Output: `scaffold_evolution_3d.png`.
+  CLI: `python viz/scaffold_evolution_3d.py -i results/parameter_sweep`.
+- **Packing constraint** (`new_dem_0.py`): Added `phi_solid_target` and `func_ratio`
+  parameters as an alternative to setting `phi_f_target`/`phi_i_target` independently.
+  When `phi_solid_target > 0`, derives `phi_f_target = phi_solid * func_ratio` and
+  `phi_i_target = phi_solid * (1 - func_ratio)`, ensuring physically consistent total
+  solid fractions (typically 0.55–0.75). Backward compatible: existing trials using
+  `phi_f_target`/`phi_i_target` directly continue to work unchanged.
+- **Parameter sweep packing physics** (`analysis/parameter_sweep.py`): Replaced independent
+  `phi_f`/`phi_i` LHS sampling with constrained `phi_solid` (0.10–0.92) and `func_ratio`
+  (0–1), deriving `phi_f = phi_solid * func_ratio` and `phi_i = phi_solid * (1 - func_ratio)`.
+  Wide phi_solid range covers all 7 organ porosity targets: cardiac muscle (0.12) through
+  lung alveoli (0.88). Initial x_f_0 clamped to deformable limit when initial packing
+  already exceeds phi_max. Sweep now accepts configurable motor-clutch and bridge parameters
+  via CLI.
+- **Volume-conserving two-zone mean-field model** (`analysis/mean_field_model.py`,
+  `analysis/parameter_sweep.py`): Fundamental physics rewrite. Granules are incompressible
+  so phi_f + phi_i = phi_solid = CONSTANT. State variable changed from phi_f (which
+  incorrectly decreased) to x_f (functional zone volume fraction). As cells compact,
+  x_f shrinks → functional granules pack tighter (approaching RCP) → void expelled from
+  functional zone → inert zone void increases. Global void fraction stays constant.
+  Outputs: x_f_final, phi_v_f_local, phi_v_i_local, compaction_ratio, zone-weighted
+  effective permeability. Organ distance uses heterogeneous pore structure.
+  All 11 plots updated for new physics.
+- **Deformable packing limit** (`analysis/parameter_sweep.py`, `analysis/mean_field_model.py`):
+  Soft, deformable superellipsoid granules can now pack beyond the rigid-particle RCP. The
+  hard floor `x_f_min = phi_f / phi_RCP` replaced with `x_f_min = phi_f / phi_max`, where
+  `phi_max > phi_RCP` depends on granule compliance (1/E, soft = more packable) and
+  superellipsoid blockiness (n2 > 2 = flatter faces = tighter interlocking). The contact
+  resistance function still grows above phi_RCP, providing physical pushback. Implemented
+  via `compute_phi_max_deformable()` in parameter_sweep.py and inline in CompactionModel.
+  New output: `phi_max` in sweep results. Example: E=0.5 kPa, phi_RCP=0.82 → phi_max≈0.90;
+  E=200 kPa → phi_max≈0.82 (near rigid limit).
+- **3D volume conservation** (`new_dem_0.py`): Added `overlap_lens_volume()` for exact 3D
+  sphere–sphere overlap volume, `compute_effective_radii_3d()` for volume-conserving display
+  radii (3D analogue of existing 2D `compute_effective_radii()`). `render_fields_3d()` now
+  uses effective radii for sphere mode, conserving total granule volume in the phase field.
+  New metric: `volume_conservation` (3D analogue of `area_conservation`). Metrics distance
+  calculations and force magnitudes now correctly use all 3 components in 3D mode.
+
+- **Organ-specific phase mapping** (`analysis/organ_targets.py`, `analysis/parameter_sweep.py`):
+  The three DEM phases map onto biological tissue architecture, but the mapping is
+  **organ-specific**. Each organ defines `perfusive_void_fraction` (f_perf) specifying what
+  fraction of non-tissue space is liquid-filled/perfusive vs structural void:
+  - phi_f (functional) → tissue parenchyma → BV/TV  [universal]
+  - phi_i (inert) → structural void spaces  [organ-dependent fraction]
+  - phi_v (liquid) → perfusive channels      [organ-dependent fraction]
+  Per-organ f_perf values: lung 0.05 (air sacs), bone 0.10 (marrow), intestine 0.15,
+  pancreas 0.30, kidney 0.70, cardiac 0.85, liver 0.90 (sinusoidal blood).
+  `compute_organ_distances()` rewritten with organ-specific logic:
+  - Permeability: K_f (functional zone) for perfusive-dominated organs (f_perf≥0.5),
+    K_i (inert zone) for structural-void-dominated organs (f_perf<0.5).
+  - Void-split penalty: z-score penalising scaffolds whose phi_i/(phi_i+phi_v) deviates
+    from the organ's expected (1 - f_perf).
+  - Per-zone pore radii (r_pore_f, r_pore_i) now exported from sweep for zone-specific
+    comparison.
+  Granule radius ranges widened (R_func=[5,150] µm, R_inert=[5,300] µm)
+  to cover all organ targets from liver sinusoids (8 µm) to trabecular bone spacing (600 µm).
+- **Fixed parameter support** (`analysis/parameter_sweep.py`): Parameters can now be held
+  constant rather than swept. `cell_sense_distance` fixed at 50 µm (filopodia sensing range).
+  `FIXED_PARAMS` dict injected into sample arrays during LHS generation and trajectory
+  integration. `func_ratio` constrained to [0.05, 0.95] to prevent degenerate zones.
+
+### Bug Fixes
+- **Volume conservation violation** (major): Previous mean-field model decreased phi_f
+  during compaction, implying functional granules were losing volume. Fixed by switching
+  to two-zone model where total solid fraction is always conserved.
+- **Negative compaction ratio**: When phi_solid is high and func_ratio is high, x_f_0 could
+  be less than x_f_min, causing spurious expansion. Fixed by clamping x_f_0 to
+  max(x_f_0, x_f_min) in both vectorised sweep and single-trajectory integration.
+- **cell_sense_distance KeyError**: After removing from swept parameters, `_integrate_trajectory`
+  and `recommend_parameters` failed. Fixed by injecting FIXED_PARAMS into sample dicts.
+- **Degenerate inert zone void fractions**: When func_ratio ≈ 1, phi_i is negligible and
+  phi_v_i becomes meaningless (0.99). Recommendation table now shows "—" when phi_i < 0.02.
+- Fixed `KeyError: 'phi_f'` in `plot_compaction_heatmaps` after packing constraint refactor.
+- Fixed `KeyError` in `_integrate_trajectory` and `plot_best_kinetics` where sample dicts
+  were built from `PARAM_NAMES` only, missing derived `phi_f`/`phi_i` keys.
+
+---
+
 ## [V1.8] - 2026-03-15
 
 ### Changed

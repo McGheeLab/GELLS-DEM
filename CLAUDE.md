@@ -6,13 +6,13 @@
 is a 2D/3D overdamped particle dynamics simulator for modelling cell-driven rearrangement
 of hydrogel granular scaffolds. The primary simulation engine is `new_dem_0.py`.
 
-**Current version: V1.8**
+**Current version: V1.12**
 
 ## Repository Layout
 
 ```
 GELLS-DEM/
-├── new_dem_0.py                 # PRIMARY simulation engine (V1.6, no plotting)
+├── new_dem_0.py                 # PRIMARY simulation engine (V1.12, no plotting)
 ├── run_hpc_headless.py          # HPC headless runner (supports 2D/3D modes)
 ├── run_all_trials.py            # Batch trial runner (local / SLURM)
 ├── run_analysis_pipeline.py     # Full V1.7 analysis pipeline orchestrator
@@ -28,19 +28,25 @@ GELLS-DEM/
 │   ├── phases.py                # Individual phase volume visualization
 │   ├── shapes.py                # Granule shape gallery (superellipses, superellipsoids)
 │   ├── doe.py                   # DOE statistical analysis & visualization
-│   └── dimensionless.py         # Dimensionless analysis, data collapse by β/Ca (V1.7)
+│   ├── dimensionless.py         # Dimensionless analysis, data collapse by β/Ca (V1.7)
+│   ├── scaffold_evolution.py    # 2D microstructure evolution + timelapse (V1.11)
+│   ├── scaffold_evolution_3d.py # 3D volumetric evolution (PyVista) per organ (V1.9)
+│   └── energy_landscape.py     # Energy landscape visualization (V1.11)
 ├── analysis/                    # Mathematical analysis package
 │   ├── __init__.py
-│   ├── mean_field_model.py      # Mean-field ODE compaction model with fitting (V1.7)
+│   ├── mean_field_model.py      # Volume-conserving two-zone compaction model (V1.9)
+│   ├── energy_landscape.py      # Free energy landscape decomposition (V1.11)
 │   ├── coarse_grain.py          # Stress tensor, strain rate, viscosity from DEM (V1.7)
 │   ├── tissue_descriptors.py    # Tissue architecture descriptor vector (V1.7)
 │   ├── organ_targets.py         # Organ system target vectors (V1.7)
-│   └── arch_distance.py         # Architectural distance to organ targets (V1.7)
+│   ├── arch_distance.py         # Architectural distance to organ targets (V1.7)
+│   └── parameter_sweep.py      # Mean-field 1D PDE sweep & organ prediction (V1.10)
 ├── Trials/                      # Parameter sweep JSON configs
 │   ├── generate_doe.py          # DOE config generator
-│   └── DOE_01.json ... DOE_24.json
+│   └── default_trial.json       # Default V1.9 trial config
 ├── CodeLog/
 │   ├── Architecture/            # Architecture documents
+│   ├── Paper/                   # Publication manuscript (LaTeX)
 │   ├── Readme/                  # README documents
 │   ├── References/              # Literature references
 │   └── Updates/                 # Changelog / update log
@@ -92,9 +98,20 @@ GELLS-DEM/
 - **Packing** (V1.4.1+): RSA placement followed by compression settle phase
   (`packing_settle_steps=200`) to achieve granule contact. No artificial gap
   (`packing_gap=0.0`). Seed is random by default (`seed=None`).
+- **Packing composition** (V1.9+): Two ways to specify functional/inert fractions.
+  Option A: `phi_f_target` + `phi_i_target` directly. Option B: `phi_solid_target` +
+  `func_ratio` — total solid fraction (0.55–0.75 typical) split by functional ratio.
+  When `phi_solid_target > 0`, derives `phi_f = phi_solid * func_ratio`,
+  `phi_i = phi_solid * (1 - func_ratio)`. Ensures physically consistent packing.
+- **Boundary modes** (V1.10+): `Params.boundary_mode` controls boundary conditions.
+  `"walls"` (default): rigid Hertzian wall contacts, position clipping, boundary exclusion
+  for metrics. `"periodic"`: minimum image convention for all pairwise interactions,
+  `cKDTree(boxsize=)` for periodic neighbour search, position wrapping via modulo,
+  ghost particle images for field rendering, no boundary exclusion. Unwrapped positions
+  (`x_unwrap`, `y_unwrap`, `z_unwrap`) track true displacement across periodic boundaries.
 - **Boundary exclusion** (V1.4.1+): `boundary_exclusion=0.2` excludes 20% from each
   domain edge when computing metrics (connectivity, porosity, permeability). Only the
-  inner 60% of the domain volume is sampled.
+  inner 60% of the domain volume is sampled. Forced to 0 for periodic boundaries.
 - **Trial JSON format** (V1.4.1+): Two formats supported. **Flat**: keys are `Params` field
   names directly (e.g., `"E_modulus": 10.0`). **Legacy**: nested sections (domain,
   mechanics, shape, etc.) with translated key names. Flat format detected by `"_format": "flat"`.
@@ -113,10 +130,14 @@ GELLS-DEM/
 - **Per-contact data** (V1.5.2+): Each contact stores point, normal, overlap, R_eff,
   F_normal, A_contact. Serialized to `.npz` as structured arrays. Used by `viz/stress.py`
   for Hertzian surface stress mapping.
-- **Bridge formation kinetics** (V1.5.2+): Bridges form probabilistically via Poisson
-  process, ramp force over `bridge_formation_time`, persist across timesteps, and transition
-  to SENESCENT after sustained load. Parameters: `bridge_attempt_rate`, `bridge_formation_time`,
-  `bridge_senescence_time`, `min_fa_for_bridge`, `bridge_break_gap`.
+- **Bridge formation kinetics** (V1.5.2+, updated V1.9): Bridges form probabilistically via
+  Poisson process, ramp force over `bridge_formation_time`, persist across timesteps, and
+  transition to SENESCENT after sustained load. **Bridge lock-in** (V1.9): bridges whose force
+  exceeds `bridge_lock_force_threshold` bypass senescence and persist indefinitely.
+  **Secondary migration** (V1.9): non-bridging cells can migrate along existing bridges
+  (`bridge_secondary_rate_mult`). Parameters: `bridge_attempt_rate`, `bridge_formation_time`,
+  `bridge_senescence_time`, `min_fa_for_bridge`, `bridge_break_gap`,
+  `bridge_lock_force_threshold`, `bridge_secondary_rate_mult`, `expected_bridge_force`.
 
 ## Conventions
 

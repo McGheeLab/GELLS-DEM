@@ -78,6 +78,7 @@ class Params:
     Lx: float = 800.0
     Ly: float = 800.0
     Lz: float = 800.0              # depth (used in 3D and 2D-slice modes)
+    boundary_mode: str = "walls"    # "walls" (default) or "periodic"
 
     # ── Granule physical properties ──
     R_func_mean: float = 40.0       # functional radius (µm)
@@ -86,8 +87,14 @@ class Params:
     R_inert_std: float = 8.0
 
     # ── Composition ──
+    # Option A: set phi_f_target + phi_i_target directly.
+    # Option B: set phi_solid_target + func_ratio to derive them.
+    #   phi_f = phi_solid * func_ratio, phi_i = phi_solid * (1 - func_ratio)
+    # If phi_solid_target is set (> 0), it overrides phi_f/phi_i targets.
     phi_f_target: float = 0.25      # functional area fraction target
     phi_i_target: float = 0.20      # inert area fraction target
+    phi_solid_target: float = 0.0   # total solid fraction (0 = use phi_f/phi_i directly)
+    func_ratio: float = 0.5         # fraction of solids that are functional (0-1)
 
     # ── Cell geometry ──
     n_cells_per_granule: int = 8    # cells seeded per functional granule
@@ -124,6 +131,9 @@ class Params:
     bridge_senescence_time: float = 24.0  # h, sustained bridge load → senescence
     min_fa_for_bridge: float = 0.3     # min FA maturity to attempt bridging
     bridge_break_gap: float = 60.0     # µm, gap at which committed bridge ruptures
+    bridge_lock_force_threshold: float = 20.0  # nN, force above which bridging cells lock in (won't go senescent)
+    bridge_secondary_rate_mult: float = 3.0    # rate multiplier for new bridges when existing bridge present
+    expected_bridge_force: float = 100.0       # nN, expected force per bridging cell (diagnostic reference)
 
     # ── Contact mechanics (Hertzian) ──
     E_modulus: float = 10.0         # kPa, Young's modulus of hydrogel
@@ -204,6 +214,12 @@ class Params:
     @property
     def save_every(self):
         return max(1, int(self.save_every_h / self.dt))
+
+    def __post_init__(self):
+        """Derive phi_f/phi_i from phi_solid + func_ratio if phi_solid_target > 0."""
+        if self.phi_solid_target > 0:
+            self.phi_f_target = self.phi_solid_target * self.func_ratio
+            self.phi_i_target = self.phi_solid_target * (1.0 - self.func_ratio)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -300,6 +316,11 @@ class GranuleSystem:
         self.vy = np.zeros(self.N)
         self.vz = np.zeros(self.N)
 
+        # ── Unwrapped positions (for displacement tracking with periodic BC) ──
+        self.x_unwrap = self.x.copy()
+        self.y_unwrap = self.y.copy()
+        self.z_unwrap = self.z.copy()
+
         # ── Per-cell tracking (V1.5) ──
         total_cells = int(np.sum(n_cells))
         self.total_cells = total_cells
@@ -334,6 +355,33 @@ class GranuleSystem:
     @property
     def is_3d(self):
         return self.mode == "3D"
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Periodic boundary helpers
+# ══════════════════════════════════════════════════════════════════════
+
+def minimum_image_disp(dx, dy, Lx, Ly):
+    """Minimum image displacement for 2D periodic boundaries."""
+    dx = dx - Lx * np.round(dx / Lx)
+    dy = dy - Ly * np.round(dy / Ly)
+    return dx, dy
+
+
+def minimum_image_disp_3d(dx, dy, dz, Lx, Ly, Lz):
+    """Minimum image displacement for 3D periodic boundaries."""
+    dx = dx - Lx * np.round(dx / Lx)
+    dy = dy - Ly * np.round(dy / Ly)
+    dz = dz - Lz * np.round(dz / Lz)
+    return dx, dy, dz
+
+
+def wrap_positions(gs, p):
+    """Wrap particle positions into [0, L) using modulo."""
+    gs.x[:gs.N] %= p.Lx
+    gs.y[:gs.N] %= p.Ly
+    if gs.mode == "3D":
+        gs.z[:gs.N] %= p.Lz
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -955,9 +1003,64 @@ def overlap_lens_area(R1, R2, d):
            - 0.5 * np.sqrt(max(0.0, arg))
 
 
+def overlap_lens_volume(R1, R2, d):
+    """
+    Volume of the lens-shaped intersection of two 3D spheres.
+
+    R1, R2 : radii (µm)
+    d      : centre-to-centre distance (µm)
+    Returns volume in µm³.
+    """
+    if d >= R1 + R2:
+        return 0.0
+    if d <= abs(R1 - R2):
+        return (4.0 / 3.0) * np.pi * min(R1, R2)**3
+    if d < 1e-12:
+        return (4.0 / 3.0) * np.pi * min(R1, R2)**3
+    # V = π(R1+R2-d)²(d² + 2d(R1+R2) - 3(R1-R2)²) / (12d)
+    s = R1 + R2 - d
+    numer = s * s * (d * d + 2.0 * d * (R1 + R2) - 3.0 * (R1 - R2)**2)
+    return np.pi * numer / (12.0 * d)
+
+
+def compute_effective_radii_3d(gs):
+    """
+    Volume-conserving effective radii for 3D spheres.
+
+    When DEM spheres overlap, the lens-shaped intersection is material
+    that is geometrically double-counted.  To conserve volume, each
+    granule's display radius is inflated:
+
+        4/3 π r_eff³ = 4/3 π r³ + ΔV_i
+
+    where ΔV_i is granule i's share of its total overlap volume, split
+    proportionally to r³.
+
+    Returns (r_eff, overlap_volume_per_granule).
+    """
+    pos = gs.positions()
+    max_r = np.max(gs.r)
+    tree = cKDTree(pos)
+    pairs = tree.query_pairs(2 * max_r, output_type='ndarray')
+
+    overlap_vol = np.zeros(gs.N)
+    for idx in range(len(pairs)):
+        i, j = pairs[idx]
+        dv = pos[j] - pos[i]
+        d = np.sqrt(np.dot(dv, dv))
+        if d < gs.r[i] + gs.r[j]:
+            V_lens = overlap_lens_volume(gs.r[i], gs.r[j], d)
+            frac_i = gs.r[i]**3 / (gs.r[i]**3 + gs.r[j]**3)
+            overlap_vol[i] += frac_i * V_lens
+            overlap_vol[j] += (1.0 - frac_i) * V_lens
+
+    r_eff = (gs.r**3 + 3.0 * overlap_vol / (4.0 * np.pi)) ** (1.0 / 3.0)
+    return r_eff, overlap_vol
+
+
 def compute_effective_radii(gs):
     """
-    Volume-conserving effective radii.
+    Volume-conserving effective radii (2D).
 
     When DEM circles overlap, the lens-shaped intersection is material
     that is geometrically double-counted.  To conserve 2D area (proxy
@@ -1177,7 +1280,13 @@ def _update_individual_cells(gs: GranuleSystem, p: Params, rng=None):
             # ── Preserve committed bridges ──
             if gs.cell_state[ci] == int(CellState.BRIDGING):
                 gs.cell_bridge_age[ci] += p.dt
-                # Sustained mechanical load → senescence
+                # Check force magnitude from previous timestep (still in cell_fx/fy/fz)
+                F_mag = np.sqrt(gs.cell_fx[ci]**2 + gs.cell_fy[ci]**2
+                                + gs.cell_fz[ci]**2)
+                # High-force bridges lock in: cell prefers to stay bridging
+                if F_mag >= p.bridge_lock_force_threshold:
+                    continue  # locked in, skip senescence check
+                # Sustained mechanical load without lock-in → senescence
                 if gs.cell_bridge_age[ci] >= p.bridge_senescence_time:
                     gs.cell_state[ci] = int(CellState.SENESCENT)
                     gs.cell_bridge_target[ci] = -1
@@ -1231,36 +1340,53 @@ def _settle_packing_2d(gs, p):
     each granule is gently pushed toward the domain centre while
     overlapping neighbours are repelled. This produces a jammed
     packing where most granules are touching at least one neighbour.
+
+    For periodic boundaries, centripetal attraction is replaced with
+    random perturbation (no preferred centre), and positions are wrapped.
     """
     N = gs.N
+    periodic = (p.boundary_mode == 'periodic')
     cx_dom, cy_dom = p.Lx / 2, p.Ly / 2
     dt_settle = 0.02  # micro-step size (µm per step)
     repulsion_k = 2.0  # overlap repulsion strength
 
     print(f"  Settling packing ({p.packing_settle_steps} steps)...", end="", flush=True)
 
-    for step in range(p.packing_settle_steps):
+    rng_settle = np.random.default_rng(12345)
+
+    for step_i in range(p.packing_settle_steps):
         pos = gs.positions()  # (N, 2)
         fx = np.zeros(N)
         fy = np.zeros(N)
 
-        # Gentle centripetal attraction (decays with step count)
-        attract = max(0.5 * (1.0 - step / p.packing_settle_steps), 0.05)
-        for i in range(N):
-            dx = cx_dom - pos[i, 0]
-            dy = cy_dom - pos[i, 1]
-            d = np.sqrt(dx*dx + dy*dy) + 1e-12
-            fx[i] += attract * dx / d * gs.r_bound[i]
-            fy[i] += attract * dy / d * gs.r_bound[i]
+        if periodic:
+            # Small random jitter instead of centripetal attraction
+            jitter = 0.3 * max(0.5 * (1.0 - step_i / p.packing_settle_steps), 0.05)
+            fx += jitter * rng_settle.standard_normal(N)
+            fy += jitter * rng_settle.standard_normal(N)
+        else:
+            # Gentle centripetal attraction (decays with step count)
+            attract = max(0.5 * (1.0 - step_i / p.packing_settle_steps), 0.05)
+            for i in range(N):
+                dx = cx_dom - pos[i, 0]
+                dy = cy_dom - pos[i, 1]
+                d = np.sqrt(dx*dx + dy*dy) + 1e-12
+                fx[i] += attract * dx / d * gs.r_bound[i]
+                fy[i] += attract * dy / d * gs.r_bound[i]
 
         # Pairwise repulsion for overlapping bounding spheres
-        tree = cKDTree(pos)
+        if periodic:
+            tree = cKDTree(pos, boxsize=[p.Lx, p.Ly])
+        else:
+            tree = cKDTree(pos)
         max_rb = float(np.max(gs.r_bound))
         pairs = tree.query_pairs(2 * max_rb, output_type='ndarray')
         for idx in range(len(pairs)):
             i, j = pairs[idx]
             dx = pos[j, 0] - pos[i, 0]
             dy = pos[j, 1] - pos[i, 1]
+            if periodic:
+                dx, dy = minimum_image_disp(dx, dy, p.Lx, p.Ly)
             d = np.sqrt(dx*dx + dy*dy) + 1e-12
             overlap = gs.r_bound[i] + gs.r_bound[j] - d
             if overlap > 0:
@@ -1276,20 +1402,30 @@ def _settle_packing_2d(gs, p):
         gs.x += fx * dt_settle
         gs.y += fy * dt_settle
 
-        # Clamp to domain
-        for i in range(N):
-            rb = gs.r_bound[i]
-            gs.x[i] = np.clip(gs.x[i], rb, p.Lx - rb)
-            gs.y[i] = np.clip(gs.y[i], rb, p.Ly - rb)
+        # Boundary handling
+        if periodic:
+            gs.x[:N] %= p.Lx
+            gs.y[:N] %= p.Ly
+        else:
+            for i in range(N):
+                rb = gs.r_bound[i]
+                gs.x[i] = np.clip(gs.x[i], rb, p.Lx - rb)
+                gs.y[i] = np.clip(gs.y[i], rb, p.Ly - rb)
 
     # Count contacts after settling
     pos = gs.positions()
-    tree = cKDTree(pos)
+    if periodic:
+        tree = cKDTree(pos, boxsize=[p.Lx, p.Ly])
+    else:
+        tree = cKDTree(pos)
     pairs = tree.query_pairs(2 * float(np.max(gs.r_bound)) + 1.0, output_type='ndarray')
     n_contacts = 0
     for idx in range(len(pairs)):
         i, j = pairs[idx]
-        d = np.sqrt(np.sum((pos[j] - pos[i])**2))
+        dv = pos[j] - pos[i]
+        if periodic:
+            dv[0], dv[1] = minimum_image_disp(dv[0], dv[1], p.Lx, p.Ly)
+        d = np.sqrt(np.dot(dv, dv))
         gap = d - gs.r_bound[i] - gs.r_bound[j]
         if gap < 1.0:  # within 1 µm = effectively touching
             n_contacts += 1
@@ -1300,8 +1436,11 @@ def _settle_packing_3d(gs, p):
     """Run short isotropic compression micro-steps for 3D packing.
 
     Same algorithm as 2D but with z-coordinate.
+    For periodic boundaries, uses random jitter instead of centripetal
+    attraction and wraps positions.
     """
     N = gs.N
+    periodic = (p.boundary_mode == 'periodic')
     cx_dom = p.Lx / 2
     cy_dom = p.Ly / 2
     cz_dom = p.Lz / 2
@@ -1310,26 +1449,37 @@ def _settle_packing_3d(gs, p):
 
     print(f"  Settling 3D packing ({p.packing_settle_steps} steps)...", end="", flush=True)
 
-    for step in range(p.packing_settle_steps):
+    rng_settle = np.random.default_rng(12345)
+
+    for step_i in range(p.packing_settle_steps):
         pos = gs.positions()  # (N, 3)
         fx = np.zeros(N)
         fy = np.zeros(N)
         fz = np.zeros(N)
 
-        # Centripetal attraction
-        attract = max(0.5 * (1.0 - step / p.packing_settle_steps), 0.05)
-        for i in range(N):
-            dx = cx_dom - pos[i, 0]
-            dy = cy_dom - pos[i, 1]
-            dz = cz_dom - pos[i, 2]
-            d = np.sqrt(dx*dx + dy*dy + dz*dz) + 1e-12
-            scale = attract * gs.r_bound[i] / d
-            fx[i] += scale * dx
-            fy[i] += scale * dy
-            fz[i] += scale * dz
+        if periodic:
+            jitter = 0.3 * max(0.5 * (1.0 - step_i / p.packing_settle_steps), 0.05)
+            fx += jitter * rng_settle.standard_normal(N)
+            fy += jitter * rng_settle.standard_normal(N)
+            fz += jitter * rng_settle.standard_normal(N)
+        else:
+            # Centripetal attraction
+            attract = max(0.5 * (1.0 - step_i / p.packing_settle_steps), 0.05)
+            for i in range(N):
+                dx = cx_dom - pos[i, 0]
+                dy = cy_dom - pos[i, 1]
+                dz = cz_dom - pos[i, 2]
+                d = np.sqrt(dx*dx + dy*dy + dz*dz) + 1e-12
+                scale = attract * gs.r_bound[i] / d
+                fx[i] += scale * dx
+                fy[i] += scale * dy
+                fz[i] += scale * dz
 
         # Pairwise repulsion
-        tree = cKDTree(pos)
+        if periodic:
+            tree = cKDTree(pos, boxsize=[p.Lx, p.Ly, p.Lz])
+        else:
+            tree = cKDTree(pos)
         max_rb = float(np.max(gs.r_bound))
         pairs = tree.query_pairs(2 * max_rb, output_type='ndarray')
         for idx in range(len(pairs)):
@@ -1337,6 +1487,9 @@ def _settle_packing_3d(gs, p):
             dx = pos[j, 0] - pos[i, 0]
             dy = pos[j, 1] - pos[i, 1]
             dz = pos[j, 2] - pos[i, 2]
+            if periodic:
+                dx, dy, dz = minimum_image_disp_3d(
+                    dx, dy, dz, p.Lx, p.Ly, p.Lz)
             d = np.sqrt(dx*dx + dy*dy + dz*dz) + 1e-12
             overlap = gs.r_bound[i] + gs.r_bound[j] - d
             if overlap > 0:
@@ -1350,21 +1503,33 @@ def _settle_packing_3d(gs, p):
         gs.y += fy * dt_settle
         gs.z += fz * dt_settle
 
-        # Clamp to domain
-        for i in range(N):
-            rb = gs.r_bound[i]
-            gs.x[i] = np.clip(gs.x[i], rb, p.Lx - rb)
-            gs.y[i] = np.clip(gs.y[i], rb, p.Ly - rb)
-            gs.z[i] = np.clip(gs.z[i], rb, p.Lz - rb)
+        # Boundary handling
+        if periodic:
+            gs.x[:N] %= p.Lx
+            gs.y[:N] %= p.Ly
+            gs.z[:N] %= p.Lz
+        else:
+            for i in range(N):
+                rb = gs.r_bound[i]
+                gs.x[i] = np.clip(gs.x[i], rb, p.Lx - rb)
+                gs.y[i] = np.clip(gs.y[i], rb, p.Ly - rb)
+                gs.z[i] = np.clip(gs.z[i], rb, p.Lz - rb)
 
     # Count contacts
     pos = gs.positions()
-    tree = cKDTree(pos)
+    if periodic:
+        tree = cKDTree(pos, boxsize=[p.Lx, p.Ly, p.Lz])
+    else:
+        tree = cKDTree(pos)
     pairs = tree.query_pairs(2 * float(np.max(gs.r_bound)) + 1.0, output_type='ndarray')
     n_contacts = 0
     for idx in range(len(pairs)):
         i, j = pairs[idx]
-        d = np.sqrt(np.sum((pos[j] - pos[i])**2))
+        dv = pos[j] - pos[i]
+        if periodic:
+            dv[0], dv[1], dv[2] = minimum_image_disp_3d(
+                dv[0], dv[1], dv[2], p.Lx, p.Ly, p.Lz)
+        d = np.sqrt(np.dot(dv, dv))
         gap = d - gs.r_bound[i] - gs.r_bound[j]
         if gap < 1.0:
             n_contacts += 1
@@ -1478,12 +1643,19 @@ def generate_packing(p: Params, seed=42) -> GranuleSystem:
         r_bound_val = max(a_val, b_val)
 
         placed = False
+        periodic = (p.boundary_mode == 'periodic')
         for _ in range(800):
-            cx = rng.uniform(r_bound_val + gap, p.Lx - r_bound_val - gap)
-            cy = rng.uniform(r_bound_val + gap, p.Ly - r_bound_val - gap)
+            if periodic:
+                cx = rng.uniform(0, p.Lx)
+                cy = rng.uniform(0, p.Ly)
+            else:
+                cx = rng.uniform(r_bound_val + gap, p.Lx - r_bound_val - gap)
+                cy = rng.uniform(r_bound_val + gap, p.Ly - r_bound_val - gap)
             ok = True
             for j in range(len(xs)):
                 dx = cx - xs[j]; dy = cy - ys[j]
+                if periodic:
+                    dx, dy = minimum_image_disp(dx, dy, p.Lx, p.Ly)
                 rj_bound = max(a_list[j], b_list[j]) if p.shape_enabled else rs[j]
                 if dx*dx + dy*dy < (r_bound_val + rj_bound + gap)**2:
                     ok = False; break
@@ -1612,13 +1784,22 @@ def generate_packing_3d(p: Params, seed=42) -> GranuleSystem:
         r_bound_val = max(a_val, b_val, c_val)
 
         placed = False
+        periodic = (p.boundary_mode == 'periodic')
         for _ in range(800):
-            cx = rng.uniform(r_bound_val + gap, p.Lx - r_bound_val - gap)
-            cy = rng.uniform(r_bound_val + gap, p.Ly - r_bound_val - gap)
-            cz = rng.uniform(r_bound_val + gap, p.Lz - r_bound_val - gap)
+            if periodic:
+                cx = rng.uniform(0, p.Lx)
+                cy = rng.uniform(0, p.Ly)
+                cz = rng.uniform(0, p.Lz)
+            else:
+                cx = rng.uniform(r_bound_val + gap, p.Lx - r_bound_val - gap)
+                cy = rng.uniform(r_bound_val + gap, p.Ly - r_bound_val - gap)
+                cz = rng.uniform(r_bound_val + gap, p.Lz - r_bound_val - gap)
             ok = True
             for j in range(len(xs)):
                 dx = cx - xs[j]; dy = cy - ys[j]; dz = cz - zs[j]
+                if periodic:
+                    dx, dy, dz = minimum_image_disp_3d(
+                        dx, dy, dz, p.Lx, p.Ly, p.Lz)
                 rj_b = max(a_list[j], b_list[j], c_list[j])
                 if dx*dx + dy*dy + dz*dz < (r_bound_val + rj_b + gap)**2:
                     ok = False; break
@@ -2004,19 +2185,28 @@ def _service_committed_bridges(gs, gi, gj, gap, p, F_per_cell, nx, ny, nz, F):
     return n_ci, n_cj
 
 
-def _attempt_new_bridges(gs, gi, gj, gap, p, rng, F_per_cell, nx, ny, nz, F):
+def _attempt_new_bridges(gs, gi, gj, gap, p, rng, F_per_cell, nx, ny, nz, F,
+                         n_existing_bridges=0):
     """Probabilistically initiate new bridges between granules gi and gj.
 
     Only cells that are SPREADING or PROLIFERATING with sufficient FA maturity
     can attempt bridging.  Each eligible cell has a Poisson-distributed
     probability of finding and committing to a bridge target per timestep.
+
+    When existing bridges are present (n_existing_bridges > 0), non-bridging
+    cells can migrate along the established bridge and form additional
+    connections, boosted by bridge_secondary_rate_mult.
     """
     bridgeable_states = (int(CellState.SPREADING), int(CellState.PROLIFERATING))
     min_fa = p.min_fa_for_bridge
 
     # Proximity modulates probability: closer gaps → easier to find target
     proximity = 1.0 - gap / p.cell_sense_distance
-    p_bridge = (1.0 - np.exp(-p.bridge_attempt_rate * p.dt)) * proximity
+    rate = p.bridge_attempt_rate
+    # Secondary migration: existing bridges act as highways for new cells
+    if n_existing_bridges > 0:
+        rate *= p.bridge_secondary_rate_mult
+    p_bridge = (1.0 - np.exp(-rate * p.dt)) * proximity
 
     # Eligible cells on granule i (sufficient FA maturity, not already bridging)
     for ci in range(gs.cell_offset[gi], gs.cell_offset[gi + 1]):
@@ -2113,13 +2303,19 @@ def compute_forces(gs: GranuleSystem, p: Params, rng):
     # ── Neighbour search ──
     max_r = float(np.max(gs.r_bound))
     cutoff = 2*max_r + p.L_max
-    tree = cKDTree(pos)
+    periodic = (p.boundary_mode == 'periodic')
+    if periodic:
+        tree = cKDTree(pos, boxsize=[p.Lx, p.Ly])
+    else:
+        tree = cKDTree(pos)
     pairs = tree.query_pairs(cutoff, output_type='ndarray')
 
     for idx in range(len(pairs)):
         i, j = pairs[idx]
         dx = pos[j,0] - pos[i,0]
         dy = pos[j,1] - pos[i,1]
+        if periodic:
+            dx, dy = minimum_image_disp(dx, dy, p.Lx, p.Ly)
         d = np.sqrt(dx*dx + dy*dy)
         if d < 1e-6:
             continue
@@ -2142,9 +2338,12 @@ def compute_forces(gs: GranuleSystem, p: Params, rng):
                 contact_x = contact_y = 0.0
         else:
             # Superellipse contact (common normal method)
+            # For periodic BCs, use virtual position of j (nearest image)
+            xj_v = pos[i,0] + dx  # pos_i + minimum-image displacement
+            yj_v = pos[i,1] + dy
             result = find_contact_superellipses(
                 pos[i,0], pos[i,1], gs.a[i], gs.b[i], gs.n_shape[i], gs.theta[i],
-                pos[j,0], pos[j,1], gs.a[j], gs.b[j], gs.n_shape[j], gs.theta[j])
+                xj_v, yj_v, gs.a[j], gs.b[j], gs.n_shape[j], gs.theta[j])
             if result is not None:
                 in_contact = True
                 _, overlap, nx, ny, contact_x, contact_y, R_loc_i, R_loc_j = result
@@ -2232,45 +2431,49 @@ def compute_forces(gs: GranuleSystem, p: Params, rng):
             F_per_cell = motor_clutch_force(p.E_modulus, p, avg_maturity)
 
             # 1) Service committed bridges (apply force with maturity ramp)
+            n_existing = 0
             if gap > p.L_rest:
-                _service_committed_bridges(
+                n_ci, n_cj = _service_committed_bridges(
                     gs, i, j, gap, p, F_per_cell, nx, ny, 0.0, F)
+                n_existing = n_ci + n_cj
 
             # 2) Probabilistic new bridge formation
             if 0 < gap < p.cell_sense_distance and gap > p.L_rest:
                 _attempt_new_bridges(
-                    gs, i, j, gap, p, rng, F_per_cell, nx, ny, 0.0, F)
+                    gs, i, j, gap, p, rng, F_per_cell, nx, ny, 0.0, F,
+                    n_existing_bridges=n_existing)
 
-    # ── Wall repulsion ──
-    for i in range(N):
-        if gs.is_circle:
-            r = gs.r[i]
-            for pen, axis, sign in [
-                (r - gs.x[i],            0, +1),   # left
-                (gs.x[i] - (p.Lx - r),   0, -1),   # right
-                (r - gs.y[i],            1, +1),   # bottom
-                (gs.y[i] - (p.Ly - r),   1, -1),   # top
-            ]:
-                if pen > 0:
-                    Fw = hertz_contact_force(E_star_gw, r, pen)
-                    F[i, axis] += sign * Fw
-        else:
-            # Superellipse wall contact
-            walls = [
-                (0.0,    0, +1),   # left wall at x=0
-                (p.Lx,   0, -1),   # right wall at x=Lx
-                (0.0,    1, +1),   # bottom wall at y=0
-                (p.Ly,   1, -1),   # top wall at y=Ly
-            ]
-            for wall_pos, wall_axis, wall_sign in walls:
-                wresult = find_contact_superellipse_wall(
-                    gs.x[i], gs.y[i], gs.a[i], gs.b[i],
-                    gs.n_shape[i], gs.theta[i],
-                    wall_pos, wall_axis, wall_sign)
-                if wresult is not None:
-                    pen, R_local = wresult
-                    Fw = hertz_contact_force(E_star_gw, R_local, pen)
-                    F[i, wall_axis] += wall_sign * Fw
+    # ── Wall repulsion (skip for periodic boundaries) ──
+    if not periodic:
+        for i in range(N):
+            if gs.is_circle:
+                r = gs.r[i]
+                for pen, axis, sign in [
+                    (r - gs.x[i],            0, +1),   # left
+                    (gs.x[i] - (p.Lx - r),   0, -1),   # right
+                    (r - gs.y[i],            1, +1),   # bottom
+                    (gs.y[i] - (p.Ly - r),   1, -1),   # top
+                ]:
+                    if pen > 0:
+                        Fw = hertz_contact_force(E_star_gw, r, pen)
+                        F[i, axis] += sign * Fw
+            else:
+                # Superellipse wall contact
+                walls = [
+                    (0.0,    0, +1),   # left wall at x=0
+                    (p.Lx,   0, -1),   # right wall at x=Lx
+                    (0.0,    1, +1),   # bottom wall at y=0
+                    (p.Ly,   1, -1),   # top wall at y=Ly
+                ]
+                for wall_pos, wall_axis, wall_sign in walls:
+                    wresult = find_contact_superellipse_wall(
+                        gs.x[i], gs.y[i], gs.a[i], gs.b[i],
+                        gs.n_shape[i], gs.theta[i],
+                        wall_pos, wall_axis, wall_sign)
+                    if wresult is not None:
+                        pen, R_local = wresult
+                        Fw = hertz_contact_force(E_star_gw, R_local, pen)
+                        F[i, wall_axis] += wall_sign * Fw
 
     # ── Active noise on functional granules (vectorized) ──
     if p.T_active > 0:
@@ -2319,28 +2522,36 @@ def compute_forces_3d(gs: GranuleSystem, p: Params, rng):
     # Neighbour search (3D)
     max_r = float(np.max(gs.r_bound))
     cutoff = 2*max_r + p.L_max
-    tree = cKDTree(pos)
+    periodic = (p.boundary_mode == 'periodic')
+    if periodic:
+        tree = cKDTree(pos, boxsize=[p.Lx, p.Ly, p.Lz])
+    else:
+        tree = cKDTree(pos)
     pairs = tree.query_pairs(cutoff, output_type='ndarray')
 
     for idx in range(len(pairs)):
         i, j = pairs[idx]
         dp = pos[j] - pos[i]
+        if periodic:
+            dp[0], dp[1], dp[2] = minimum_image_disp_3d(
+                dp[0], dp[1], dp[2], p.Lx, p.Ly, p.Lz)
         d = np.linalg.norm(dp)
         if d < 1e-6:
             continue
         nv = dp / d  # unit normal i->j
 
-        # Contact detection
+        # Contact detection — use virtual position of j for periodic BCs
+        pj_v = pos[i] + dp  # nearest image of j relative to i
         if gs.is_circle:
             result = find_contact_spheres_3d(
                 pos[i,0], pos[i,1], pos[i,2], gs.r[i],
-                pos[j,0], pos[j,1], pos[j,2], gs.r[j])
+                pj_v[0], pj_v[1], pj_v[2], gs.r[j])
         else:
             result = find_contact_superellipsoids_3d(
                 pos[i,0], pos[i,1], pos[i,2],
                 gs.a[i], gs.b[i], gs.c[i], gs.n1[i], gs.n2[i],
                 gs.quat[i],
-                pos[j,0], pos[j,1], pos[j,2],
+                pj_v[0], pj_v[1], pj_v[2],
                 gs.a[j], gs.b[j], gs.c[j], gs.n1[j], gs.n2[j],
                 gs.quat[j])
 
@@ -2412,46 +2623,50 @@ def compute_forces_3d(gs: GranuleSystem, p: Params, rng):
             F_per_cell = motor_clutch_force(p.E_modulus, p, avg_maturity)
 
             # 1) Service committed bridges (apply force with maturity ramp)
+            n_existing = 0
             if gap > p.L_rest:
-                _service_committed_bridges(
+                n_ci, n_cj = _service_committed_bridges(
                     gs, i, j, gap, p, F_per_cell,
                     nv[0], nv[1], nv[2], F)
+                n_existing = n_ci + n_cj
 
             # 2) Probabilistic new bridge formation
             if 0 < gap < p.cell_sense_distance and gap > p.L_rest:
                 _attempt_new_bridges(
                     gs, i, j, gap, p, rng, F_per_cell,
-                    nv[0], nv[1], nv[2], F)
+                    nv[0], nv[1], nv[2], F,
+                    n_existing_bridges=n_existing)
 
-    # Wall repulsion (6 faces)
-    for i in range(N):
-        walls = [
-            (0.0, 0, +1), (p.Lx, 0, -1),  # x walls
-            (0.0, 1, +1), (p.Ly, 1, -1),  # y walls
-            (0.0, 2, +1), (p.Lz, 2, -1),  # z walls
-        ]
-        if gs.is_circle:
-            r = gs.r[i]
-            coords = [gs.x[i], gs.y[i], gs.z[i]]
-            for wall_pos, axis, sign in walls:
-                if sign > 0:
-                    pen = r - (coords[axis] - wall_pos)
-                else:
-                    pen = (coords[axis] + r) - wall_pos
-                if pen > 0:
-                    Fw = hertz_contact_force(E_star_gw, r, pen)
-                    F[i, axis] += sign * Fw
-        else:
-            for wall_pos, axis, sign in walls:
-                wresult = find_contact_wall_3d(
-                    gs.x[i], gs.y[i], gs.z[i],
-                    gs.a[i], gs.b[i], gs.c[i],
-                    gs.n1[i], gs.n2[i], gs.quat[i], gs.r_bound[i],
-                    wall_pos, axis, sign)
-                if wresult is not None:
-                    pen, R_local = wresult
-                    Fw = hertz_contact_force(E_star_gw, R_local, pen)
-                    F[i, axis] += sign * Fw
+    # Wall repulsion (6 faces) — skip for periodic boundaries
+    if not periodic:
+        for i in range(N):
+            walls = [
+                (0.0, 0, +1), (p.Lx, 0, -1),  # x walls
+                (0.0, 1, +1), (p.Ly, 1, -1),  # y walls
+                (0.0, 2, +1), (p.Lz, 2, -1),  # z walls
+            ]
+            if gs.is_circle:
+                r = gs.r[i]
+                coords = [gs.x[i], gs.y[i], gs.z[i]]
+                for wall_pos, axis, sign in walls:
+                    if sign > 0:
+                        pen = r - (coords[axis] - wall_pos)
+                    else:
+                        pen = (coords[axis] + r) - wall_pos
+                    if pen > 0:
+                        Fw = hertz_contact_force(E_star_gw, r, pen)
+                        F[i, axis] += sign * Fw
+            else:
+                for wall_pos, axis, sign in walls:
+                    wresult = find_contact_wall_3d(
+                        gs.x[i], gs.y[i], gs.z[i],
+                        gs.a[i], gs.b[i], gs.c[i],
+                        gs.n1[i], gs.n2[i], gs.quat[i], gs.r_bound[i],
+                        wall_pos, axis, sign)
+                    if wresult is not None:
+                        pen, R_local = wresult
+                        Fw = hertz_contact_force(E_star_gw, R_local, pen)
+                        F[i, axis] += sign * Fw
 
     # Active noise (vectorized)
     if p.T_active > 0:
@@ -2490,9 +2705,16 @@ def step(gs: GranuleSystem, p: Params, rng, t: float):
         gs.vx[:gs.N] = vel[:, 0]
         gs.vy[:gs.N] = vel[:, 1]
         gs.vz[:gs.N] = vel[:, 2]
-        gs.x[:gs.N] += vel[:, 0] * p.dt
-        gs.y[:gs.N] += vel[:, 1] * p.dt
-        gs.z[:gs.N] += vel[:, 2] * p.dt
+        dx_step = vel[:, 0] * p.dt
+        dy_step = vel[:, 1] * p.dt
+        dz_step = vel[:, 2] * p.dt
+        gs.x[:gs.N] += dx_step
+        gs.y[:gs.N] += dy_step
+        gs.z[:gs.N] += dz_step
+        # Track unwrapped positions for displacement calculation
+        gs.x_unwrap[:gs.N] += dx_step
+        gs.y_unwrap[:gs.N] += dy_step
+        gs.z_unwrap[:gs.N] += dz_step
 
         # 3D rotational dynamics (quaternion — must be per-granule)
         if not gs.is_circle:
@@ -2506,11 +2728,14 @@ def step(gs: GranuleSystem, p: Params, rng, t: float):
                     gs.omega_3d[i] = omega
                     gs.quat[i] = quat_integrate(gs.quat[i], omega, p.dt)
 
-        # Boundary clipping (vectorized)
-        rb = gs.r_bound[:gs.N]
-        gs.x[:gs.N] = np.clip(gs.x[:gs.N], rb + 0.5, p.Lx - rb - 0.5)
-        gs.y[:gs.N] = np.clip(gs.y[:gs.N], rb + 0.5, p.Ly - rb - 0.5)
-        gs.z[:gs.N] = np.clip(gs.z[:gs.N], rb + 0.5, p.Lz - rb - 0.5)
+        # Boundary handling
+        if p.boundary_mode == 'periodic':
+            wrap_positions(gs, p)
+        else:
+            rb = gs.r_bound[:gs.N]
+            gs.x[:gs.N] = np.clip(gs.x[:gs.N], rb + 0.5, p.Lx - rb - 0.5)
+            gs.y[:gs.N] = np.clip(gs.y[:gs.N], rb + 0.5, p.Ly - rb - 0.5)
+            gs.z[:gs.N] = np.clip(gs.z[:gs.N], rb + 0.5, p.Lz - rb - 0.5)
     else:
         # ── 2D integration (vectorized) ──
         gamma = p.drag_scale * gs.r[:gs.N]         # (N,)
@@ -2520,8 +2745,12 @@ def step(gs: GranuleSystem, p: Params, rng, t: float):
         vel[over] *= (p.v_max / speed[over])[:, None]
         gs.vx[:gs.N] = vel[:, 0]
         gs.vy[:gs.N] = vel[:, 1]
-        gs.x[:gs.N] += vel[:, 0] * p.dt
-        gs.y[:gs.N] += vel[:, 1] * p.dt
+        dx_step = vel[:, 0] * p.dt
+        dy_step = vel[:, 1] * p.dt
+        gs.x[:gs.N] += dx_step
+        gs.y[:gs.N] += dy_step
+        gs.x_unwrap[:gs.N] += dx_step
+        gs.y_unwrap[:gs.N] += dy_step
 
         # 2D rotational dynamics (superellipses only, vectorized)
         if not gs.is_circle:
@@ -2531,10 +2760,13 @@ def step(gs: GranuleSystem, p: Params, rng, t: float):
             gs.omega[:gs.N] = np.clip(gs.omega[:gs.N], -p.omega_max, p.omega_max)
             gs.theta[:gs.N] += gs.omega[:gs.N] * p.dt
 
-        # Boundary clipping (vectorized)
-        rb = gs.r_bound[:gs.N]
-        gs.x[:gs.N] = np.clip(gs.x[:gs.N], rb + 0.5, p.Lx - rb - 0.5)
-        gs.y[:gs.N] = np.clip(gs.y[:gs.N], rb + 0.5, p.Ly - rb - 0.5)
+        # Boundary handling
+        if p.boundary_mode == 'periodic':
+            wrap_positions(gs, p)
+        else:
+            rb = gs.r_bound[:gs.N]
+            gs.x[:gs.N] = np.clip(gs.x[:gs.N], rb + 0.5, p.Lx - rb - 0.5)
+            gs.y[:gs.N] = np.clip(gs.y[:gs.N], rb + 0.5, p.Ly - rb - 0.5)
 
     return F, contacts
 
@@ -2543,11 +2775,50 @@ def step(gs: GranuleSystem, p: Params, rng, t: float):
 # Phase field rendering (from particle positions)
 # ══════════════════════════════════════════════════════════════════════
 
+def _stamp_circle_2d(X, Y, cx, cy, r_eff_i, w, phi_f, phi_i, gtype):
+    """Stamp a single circle profile onto the 2D field."""
+    dist = np.sqrt((X - cx)**2 + (Y - cy)**2)
+    profile = 0.5 * (1.0 - np.tanh((dist - r_eff_i) / w))
+    if gtype == 0:
+        np.maximum(phi_f, profile, out=phi_f)
+    else:
+        np.maximum(phi_i, profile, out=phi_i)
+
+
+def _stamp_superellipse_2d(X, Y, cx, cy, a, b, n_s, theta, r, w, phi_f, phi_i, gtype):
+    """Stamp a single superellipse profile onto the 2D field."""
+    bx, by = _world_to_body(X, Y, cx, cy, theta)
+    se_val = (np.abs(bx) / a)**n_s + (np.abs(by) / b)**n_s
+    n_inv = 1.0 / n_s
+    dist_approx = (se_val**n_inv - 1.0) * r
+    profile = 0.5 * (1.0 - np.tanh(dist_approx / w))
+    if gtype == 0:
+        np.maximum(phi_f, profile, out=phi_f)
+    else:
+        np.maximum(phi_i, profile, out=phi_i)
+
+
+def _periodic_image_offsets_2d(cx, cy, rb, Lx, Ly):
+    """Return list of (dx, dy) offsets for ghost images near periodic boundaries."""
+    offsets = [(0, 0)]
+    for sx in (-Lx, 0, Lx):
+        for sy in (-Ly, 0, Ly):
+            if sx == 0 and sy == 0:
+                continue
+            # Only add if ghost image could overlap the domain
+            gx = cx + sx
+            gy = cy + sy
+            if -rb < gx < Lx + rb and -rb < gy < Ly + rb:
+                offsets.append((sx, sy))
+    return offsets
+
+
 def render_fields(gs: GranuleSystem, p: Params):
     """
     Stamp each granule as tanh-profile shape onto grid.
     For circles: radial profile with volume-conserving effective radii.
     For superellipses: implicit-function-based signed distance.
+    For periodic boundaries, ghost images are stamped at boundary crossings.
     Returns φ_f, φ_i, φ_v arrays of shape (Ngrid, Ngrid).
     """
     Ng = p.Ngrid
@@ -2559,33 +2830,35 @@ def render_fields(gs: GranuleSystem, p: Params):
     phi_f = np.zeros((Ng, Ng))
     phi_i = np.zeros((Ng, Ng))
     w = p.interface_width
+    periodic = (p.boundary_mode == 'periodic')
 
     if gs.is_circle:
-        # Volume-conserving radii (V1.2 path)
         r_eff, _ = compute_effective_radii(gs)
         for i in range(gs.N):
-            dist = np.sqrt((X - gs.x[i])**2 + (Y - gs.y[i])**2)
-            profile = 0.5 * (1.0 - np.tanh((dist - r_eff[i]) / w))
-            if gs.gtype[i] == 0:
-                phi_f = np.maximum(phi_f, profile)
+            if periodic:
+                rb = r_eff[i] + 3*w
+                for sx, sy in _periodic_image_offsets_2d(
+                        gs.x[i], gs.y[i], rb, p.Lx, p.Ly):
+                    _stamp_circle_2d(X, Y, gs.x[i]+sx, gs.y[i]+sy,
+                                     r_eff[i], w, phi_f, phi_i, gs.gtype[i])
             else:
-                phi_i = np.maximum(phi_i, profile)
+                _stamp_circle_2d(X, Y, gs.x[i], gs.y[i],
+                                 r_eff[i], w, phi_f, phi_i, gs.gtype[i])
     else:
-        # Superellipse implicit function
         for i in range(gs.N):
-            # Transform grid to body frame
-            bx, by = _world_to_body(X, Y, gs.x[i], gs.y[i], gs.theta[i])
-            # Implicit function value: < 1 inside, > 1 outside
-            se_val = (np.abs(bx) / gs.a[i])**gs.n_shape[i] + \
-                     (np.abs(by) / gs.b[i])**gs.n_shape[i]
-            # Approximate signed distance
-            n_inv = 1.0 / gs.n_shape[i]
-            dist_approx = (se_val**n_inv - 1.0) * gs.r[i]
-            profile = 0.5 * (1.0 - np.tanh(dist_approx / w))
-            if gs.gtype[i] == 0:
-                phi_f = np.maximum(phi_f, profile)
+            if periodic:
+                rb = gs.r_bound[i] + 3*w
+                for sx, sy in _periodic_image_offsets_2d(
+                        gs.x[i], gs.y[i], rb, p.Lx, p.Ly):
+                    _stamp_superellipse_2d(
+                        X, Y, gs.x[i]+sx, gs.y[i]+sy,
+                        gs.a[i], gs.b[i], gs.n_shape[i], gs.theta[i],
+                        gs.r[i], w, phi_f, phi_i, gs.gtype[i])
             else:
-                phi_i = np.maximum(phi_i, profile)
+                _stamp_superellipse_2d(
+                    X, Y, gs.x[i], gs.y[i],
+                    gs.a[i], gs.b[i], gs.n_shape[i], gs.theta[i],
+                    gs.r[i], w, phi_f, phi_i, gs.gtype[i])
 
     # Prevent total > 1
     total = phi_f + phi_i
@@ -2597,9 +2870,53 @@ def render_fields(gs: GranuleSystem, p: Params):
     return phi_f, phi_i, 1.0 - phi_f - phi_i
 
 
+def _stamp_granule_3d(phi_f, phi_i, gs, i, cx, cy, cz, r_eff_3d_i,
+                      xg, yg, zg, dx_g, dy_g, dz_g, Ng, w):
+    """Stamp one 3D granule image at (cx, cy, cz) onto the field grids."""
+    rb = gs.r_bound[i] + 3*w
+    ix0 = max(0, int((cx - rb) / dx_g))
+    ix1 = min(Ng, int((cx + rb) / dx_g) + 1)
+    iy0 = max(0, int((cy - rb) / dy_g))
+    iy1 = min(Ng, int((cy + rb) / dy_g) + 1)
+    iz0 = max(0, int((cz - rb) / dz_g))
+    iz1 = min(Ng, int((cz + rb) / dz_g) + 1)
+    if ix0 >= ix1 or iy0 >= iy1 or iz0 >= iz1:
+        return
+
+    X, Y, Z = np.meshgrid(xg[ix0:ix1], yg[iy0:iy1], zg[iz0:iz1],
+                           indexing='ij')
+
+    if gs.is_circle:
+        dist = np.sqrt((X - cx)**2 + (Y - cy)**2 + (Z - cz)**2)
+        profile = 0.5 * (1.0 - np.tanh((dist - r_eff_3d_i) / w))
+    else:
+        dx_l = X - cx
+        dy_l = Y - cy
+        dz_l = Z - cz
+        R_mat = quat_to_rotation_matrix(gs.quat[i])
+        bx = R_mat[0,0]*dx_l + R_mat[1,0]*dy_l + R_mat[2,0]*dz_l
+        by = R_mat[0,1]*dx_l + R_mat[1,1]*dy_l + R_mat[2,1]*dz_l
+        bz = R_mat[0,2]*dx_l + R_mat[1,2]*dy_l + R_mat[2,2]*dz_l
+
+        se_val = ((np.abs(bx/gs.a[i])**gs.n1[i] +
+                   np.abs(by/gs.b[i])**gs.n1[i])**(gs.n2[i]/gs.n1[i]) +
+                  np.abs(bz/gs.c[i])**gs.n2[i])
+        n_inv = 1.0 / gs.n2[i]
+        dist_approx = (se_val**n_inv - 1.0) * gs.r[i]
+        profile = 0.5 * (1.0 - np.tanh(dist_approx / w))
+
+    if gs.gtype[i] == 0:
+        phi_f[ix0:ix1, iy0:iy1, iz0:iz1] = np.maximum(
+            phi_f[ix0:ix1, iy0:iy1, iz0:iz1], profile)
+    else:
+        phi_i[ix0:ix1, iy0:iy1, iz0:iz1] = np.maximum(
+            phi_i[ix0:ix1, iy0:iy1, iz0:iz1], profile)
+
+
 def render_fields_3d(gs: GranuleSystem, p: Params):
     """
     Stamp each granule onto 3D grid using superellipsoid implicit function.
+    For periodic boundaries, ghost images are stamped at boundary crossings.
     Returns φ_f, φ_i, φ_v arrays of shape (Ng, Ng, Ng).
     """
     Ng = p.Ngrid_3d
@@ -2613,52 +2930,36 @@ def render_fields_3d(gs: GranuleSystem, p: Params):
     phi_f = np.zeros((Ng, Ng, Ng))
     phi_i = np.zeros((Ng, Ng, Ng))
     w = p.interface_width
+    periodic = (p.boundary_mode == 'periodic')
+
+    if gs.is_circle:
+        r_eff_3d, _ = compute_effective_radii_3d(gs)
+    else:
+        r_eff_3d = gs.r
 
     for i in range(gs.N):
-        rb = gs.r_bound[i] + 3*w  # include interface region
-        # Bounding box in grid indices
-        ix0 = max(0, int((gs.x[i] - rb) / dx_g))
-        ix1 = min(Ng, int((gs.x[i] + rb) / dx_g) + 1)
-        iy0 = max(0, int((gs.y[i] - rb) / dy_g))
-        iy1 = min(Ng, int((gs.y[i] + rb) / dy_g) + 1)
-        iz0 = max(0, int((gs.z[i] - rb) / dz_g))
-        iz1 = min(Ng, int((gs.z[i] + rb) / dz_g) + 1)
-        if ix0 >= ix1 or iy0 >= iy1 or iz0 >= iz1:
-            continue
-
-        X, Y, Z = np.meshgrid(xg[ix0:ix1], yg[iy0:iy1], zg[iz0:iz1],
-                               indexing='ij')
-
-        if gs.is_circle:
-            # Sphere: radial distance
-            dist = np.sqrt((X - gs.x[i])**2 + (Y - gs.y[i])**2 +
-                           (Z - gs.z[i])**2)
-            profile = 0.5 * (1.0 - np.tanh((dist - gs.r[i]) / w))
+        r_eff_i = r_eff_3d[i]
+        if periodic:
+            rb = gs.r_bound[i] + 3*w
+            # Generate ghost offsets for this granule
+            for sx in (-p.Lx, 0, p.Lx):
+                for sy in (-p.Ly, 0, p.Ly):
+                    for sz in (-p.Lz, 0, p.Lz):
+                        gx = gs.x[i] + sx
+                        gy = gs.y[i] + sy
+                        gz = gs.z[i] + sz
+                        # Only stamp if image overlaps the domain
+                        if (gx + rb > 0 and gx - rb < p.Lx and
+                            gy + rb > 0 and gy - rb < p.Ly and
+                            gz + rb > 0 and gz - rb < p.Lz):
+                            _stamp_granule_3d(
+                                phi_f, phi_i, gs, i, gx, gy, gz,
+                                r_eff_i, xg, yg, zg,
+                                dx_g, dy_g, dz_g, Ng, w)
         else:
-            # Superellipsoid implicit function
-            dx_l = X - gs.x[i]
-            dy_l = Y - gs.y[i]
-            dz_l = Z - gs.z[i]
-            # Transform to body frame
-            R_mat = quat_to_rotation_matrix(gs.quat[i])
-            # Vectorized rotation: body = R^T @ world_offset
-            bx = R_mat[0,0]*dx_l + R_mat[1,0]*dy_l + R_mat[2,0]*dz_l
-            by = R_mat[0,1]*dx_l + R_mat[1,1]*dy_l + R_mat[2,1]*dz_l
-            bz = R_mat[0,2]*dx_l + R_mat[1,2]*dy_l + R_mat[2,2]*dz_l
-
-            se_val = ((np.abs(bx/gs.a[i])**gs.n1[i] +
-                       np.abs(by/gs.b[i])**gs.n1[i])**(gs.n2[i]/gs.n1[i]) +
-                      np.abs(bz/gs.c[i])**gs.n2[i])
-            n_inv = 1.0 / gs.n2[i]
-            dist_approx = (se_val**n_inv - 1.0) * gs.r[i]
-            profile = 0.5 * (1.0 - np.tanh(dist_approx / w))
-
-        if gs.gtype[i] == 0:
-            phi_f[ix0:ix1, iy0:iy1, iz0:iz1] = np.maximum(
-                phi_f[ix0:ix1, iy0:iy1, iz0:iz1], profile)
-        else:
-            phi_i[ix0:ix1, iy0:iy1, iz0:iz1] = np.maximum(
-                phi_i[ix0:ix1, iy0:iy1, iz0:iz1], profile)
+            _stamp_granule_3d(
+                phi_f, phi_i, gs, i, gs.x[i], gs.y[i], gs.z[i],
+                r_eff_i, xg, yg, zg, dx_g, dy_g, dz_g, Ng, w)
 
     total = phi_f + phi_i
     over = total > 0.99
@@ -2706,9 +3007,11 @@ def connectivity(field, thresh_frac=0.3):
 
 def compute_metrics(gs, p, phi_f, phi_i, phi_v, t, forces):
     m = dict(time=t)
+    periodic = (p.boundary_mode == 'periodic')
 
     # ── Boundary exclusion: compute metrics on inner region only ──
-    bx = p.boundary_exclusion
+    # For periodic boundaries, use full domain (no exclusion needed)
+    bx = 0.0 if periodic else p.boundary_exclusion
     if bx > 0:
         shape = phi_f.shape
         # Index ranges for inner region (exclude bx fraction from each edge)
@@ -2769,7 +3072,10 @@ def compute_metrics(gs, p, phi_f, phi_i, phi_v, t, forces):
     m['packing_func_rich'] = float(np.mean(pt[fr])) if np.any(fr) else 0.0
 
     # Mean force magnitude
-    F_mag = np.sqrt(forces[:,0]**2 + forces[:,1]**2)
+    if forces.shape[1] >= 3 and gs.is_3d:
+        F_mag = np.sqrt(forces[:,0]**2 + forces[:,1]**2 + forces[:,2]**2)
+    else:
+        F_mag = np.sqrt(forces[:,0]**2 + forces[:,1]**2)
     m['F_mean'] = float(np.mean(F_mag))
     m['F_max'] = float(np.max(F_mag))
     m['F_func_mean'] = float(np.mean(F_mag[gs.func_mask])) if np.any(gs.func_mask) else 0.0
@@ -2777,7 +3083,13 @@ def compute_metrics(gs, p, phi_f, phi_i, phi_v, t, forces):
     # Overlap & contact diagnostics
     pos = gs.positions()
     max_rb = float(np.max(gs.r_bound))
-    tree = cKDTree(pos)
+    if periodic:
+        if gs.is_3d:
+            tree = cKDTree(pos, boxsize=[p.Lx, p.Ly, p.Lz])
+        else:
+            tree = cKDTree(pos, boxsize=[p.Lx, p.Ly])
+    else:
+        tree = cKDTree(pos)
     pairs = tree.query_pairs(2 * max_rb, output_type='ndarray')
 
     n_contacts = 0
@@ -2785,21 +3097,31 @@ def compute_metrics(gs, p, phi_f, phi_i, phi_v, t, forces):
     n_contacts_if = 0   # inert–functional
     n_contacts_ii = 0   # inert–inert
     max_overlap_ratio = 0.0
-    total_overlap_area = 0.0
+    total_overlap_area = 0.0   # 2D: area; 3D: volume
     n_bridges = 0
 
     for idx in range(len(pairs)):
         i, j = pairs[idx]
-        dx = pos[j,0] - pos[i,0]; dy = pos[j,1] - pos[i,1]
-        d = np.sqrt(dx*dx + dy*dy)
+        dv = pos[j] - pos[i]
+        if periodic:
+            if gs.is_3d:
+                dv[0], dv[1], dv[2] = minimum_image_disp_3d(
+                    dv[0], dv[1], dv[2], p.Lx, p.Ly, p.Lz)
+            else:
+                dv[0], dv[1] = minimum_image_disp(dv[0], dv[1], p.Lx, p.Ly)
+        d = np.sqrt(np.dot(dv, dv))
 
         if gs.is_circle:
             overlap = gs.r[i] + gs.r[j] - d
         else:
-            result = find_contact_superellipses(
-                pos[i,0], pos[i,1], gs.a[i], gs.b[i], gs.n_shape[i], gs.theta[i],
-                pos[j,0], pos[j,1], gs.a[j], gs.b[j], gs.n_shape[j], gs.theta[j])
-            overlap = result[1] if result is not None else 0.0
+            if gs.is_3d:
+                # 3D superellipsoid: approximate overlap from bounding sphere
+                overlap = gs.r_bound[i] + gs.r_bound[j] - d
+            else:
+                result = find_contact_superellipses(
+                    pos[i,0], pos[i,1], gs.a[i], gs.b[i], gs.n_shape[i], gs.theta[i],
+                    pos[j,0], pos[j,1], gs.a[j], gs.b[j], gs.n_shape[j], gs.theta[j])
+                overlap = result[1] if result is not None else 0.0
 
         if overlap > 0:
             n_contacts += 1
@@ -2812,12 +3134,20 @@ def compute_metrics(gs, p, phi_f, phi_i, phi_v, t, forces):
                 n_contacts_if += 1
             R_min = min(gs.r[i], gs.r[j])
             max_overlap_ratio = max(max_overlap_ratio, overlap / R_min)
-            if gs.is_circle:
-                total_overlap_area += overlap_lens_area(gs.r[i], gs.r[j], d)
+            if gs.is_3d:
+                if gs.is_circle:
+                    total_overlap_area += overlap_lens_volume(gs.r[i], gs.r[j], d)
+                else:
+                    # Approximate overlap volume for superellipsoids
+                    R_eff = gs.r[i] * gs.r[j] / (gs.r[i] + gs.r[j])
+                    total_overlap_area += (4.0/3.0) * np.pi * R_eff * overlap**2
             else:
-                # Approximate overlap area for superellipses
-                R_eff = gs.r[i] * gs.r[j] / (gs.r[i] + gs.r[j])
-                total_overlap_area += np.pi * R_eff * overlap
+                if gs.is_circle:
+                    total_overlap_area += overlap_lens_area(gs.r[i], gs.r[j], d)
+                else:
+                    # Approximate overlap area for superellipses
+                    R_eff = gs.r[i] * gs.r[j] / (gs.r[i] + gs.r[j])
+                    total_overlap_area += np.pi * R_eff * overlap
 
     # Bridge count (functional-functional pairs with attached cells in sensing range)
     cutoff_bridge = 2 * max_rb + p.cell_sense_distance
@@ -2830,8 +3160,14 @@ def compute_metrics(gs, p, phi_f, phi_i, phi_v, t, forces):
         n_avail_j = max(0.0, gs.n_attached[j] - gs.n_overcrowded[j])
         if n_avail_i < 0.1 or n_avail_j < 0.1:
             continue
-        dx = pos[j,0] - pos[i,0]; dy = pos[j,1] - pos[i,1]
-        d = np.sqrt(dx*dx + dy*dy)
+        dv = pos[j] - pos[i]
+        if periodic:
+            if gs.is_3d:
+                dv[0], dv[1], dv[2] = minimum_image_disp_3d(
+                    dv[0], dv[1], dv[2], p.Lx, p.Ly, p.Lz)
+            else:
+                dv[0], dv[1] = minimum_image_disp(dv[0], dv[1], p.Lx, p.Ly)
+        d = np.sqrt(np.dot(dv, dv))
         if gs.is_circle:
             gap = d - gs.r[i] - gs.r[j]
         else:
@@ -2841,19 +3177,29 @@ def compute_metrics(gs, p, phi_f, phi_i, phi_v, t, forces):
         if 0 < gap < p.cell_sense_distance:
             n_bridges += 1
 
-    if gs.is_circle:
-        total_granule_area = float(np.sum(np.pi * gs.r**2))
+    if gs.is_3d:
+        if gs.is_circle:
+            total_granule_vol = float(np.sum((4.0/3.0) * np.pi * gs.r**3))
+        else:
+            # Approximate superellipsoid volume using bounding sphere
+            total_granule_vol = float(np.sum((4.0/3.0) * np.pi * gs.r**3))
+        total_granule_area = total_granule_vol  # reuse variable name for conservation ratio
     else:
-        total_granule_area = float(sum(
-            superellipse_area(gs.a[i], gs.b[i], gs.n_shape[i])
-            for i in range(gs.N)))
+        if gs.is_circle:
+            total_granule_area = float(np.sum(np.pi * gs.r**2))
+        else:
+            total_granule_area = float(sum(
+                superellipse_area(gs.a[i], gs.b[i], gs.n_shape[i])
+                for i in range(gs.N)))
     m['n_contacts'] = n_contacts
     m['n_contacts_ff'] = n_contacts_ff
     m['n_contacts_if'] = n_contacts_if
     m['n_contacts_ii'] = n_contacts_ii
     m['max_overlap_ratio'] = float(max_overlap_ratio)
     m['total_overlap_area'] = float(total_overlap_area)
-    m['area_conservation'] = 1.0 - total_overlap_area / total_granule_area
+    m['area_conservation'] = 1.0 - total_overlap_area / max(total_granule_area, 1e-30)
+    if gs.is_3d:
+        m['volume_conservation'] = m['area_conservation']  # same ratio, 3D volumes
     m['n_bridges'] = n_bridges
 
     # ── Shape descriptors (V1.3) ──
@@ -2878,6 +3224,27 @@ def compute_metrics(gs, p, phi_f, phi_i, phi_v, t, forces):
     m['mean_spread_frac'] = float(np.mean(gs.spread_fraction[func])) if np.any(func) else 0.0
     m['mean_fa_maturity'] = float(np.mean(gs.fa_maturity[func])) if np.any(func) else 0.0
     m['n_overcrowded_total'] = float(np.sum(gs.n_overcrowded[func]))
+
+    # ── Per-cell bridge force monitoring (V1.9) ──
+    bridging_mask = gs.cell_state == int(CellState.BRIDGING)
+    n_bridging_cells = int(np.sum(bridging_mask))
+    m['n_bridging_cells'] = n_bridging_cells
+    n_locked_in = 0
+    if n_bridging_cells > 0:
+        cell_F_mag = np.sqrt(gs.cell_fx**2 + gs.cell_fy**2 + gs.cell_fz**2)
+        bridge_forces = cell_F_mag[bridging_mask]
+        m['bridge_force_mean'] = float(np.mean(bridge_forces))
+        m['bridge_force_max'] = float(np.max(bridge_forces))
+        m['bridge_force_min'] = float(np.min(bridge_forces))
+        m['bridge_force_std'] = float(np.std(bridge_forces))
+        # Count locked-in cells (above force threshold)
+        n_locked_in = int(np.sum(bridge_forces >= p.bridge_lock_force_threshold))
+    else:
+        m['bridge_force_mean'] = 0.0
+        m['bridge_force_max'] = 0.0
+        m['bridge_force_min'] = 0.0
+        m['bridge_force_std'] = 0.0
+    m['n_locked_in_cells'] = n_locked_in
 
     # ── Transport metrics (V1.4, inner region) ──
     porosity = float(np.mean(pv_inner))
@@ -2907,10 +3274,13 @@ def compute_metrics(gs, p, phi_f, phi_i, phi_v, t, forces):
 
 
 def compute_displacement(gs, x0, y0, z0=None):
-    """RMS displacement from initial positions."""
-    dx = gs.x - x0; dy = gs.y - y0
+    """RMS displacement from initial positions.
+    Uses unwrapped positions for correct displacement under periodic BCs.
+    """
+    # Use unwrapped coords if available (periodic BCs accumulate wraps)
+    dx = gs.x_unwrap - x0; dy = gs.y_unwrap - y0
     if gs.is_3d and z0 is not None:
-        dz = gs.z - z0
+        dz = gs.z_unwrap - z0
         disp = np.sqrt(dx**2 + dy**2 + dz**2)
     else:
         disp = np.sqrt(dx**2 + dy**2)
@@ -3315,12 +3685,15 @@ def run(p=None, seed=None):
     m = save(0.0, F0, contacts0)
     print(f"\n  {'t(h)':>6} {'f_cl':>5} {'f_lf':>6} {'v_cl':>5} "
           f"{'tissue':>7} {'bridges':>7} {'attach':>7} {'spread':>6} "
-          f"{'FA_mat':>6} {'disp_f':>7} {'K_KC':>8}")
+          f"{'FA_mat':>6} {'disp_f':>7} {'K_KC':>8} "
+          f"{'bCells':>6} {'bF_avg':>6} {'lock':>4}")
     print(f"  {0:6.1f} {m['func_nc']:5d} {m['func_lf']:6.2f} {m['void_nc']:5d} "
           f"{m['tissue_frac']:7.3f} {m['n_bridges']:7d} "
           f"{m['n_attached_total']:7.0f} {m['mean_spread_frac']:6.2f} "
           f"{m['mean_fa_maturity']:6.2f} {m['disp_func']:7.1f} "
-          f"{m['K_kozeny_carman']:8.1f}")
+          f"{m['K_kozeny_carman']:8.1f} "
+          f"{m['n_bridging_cells']:6d} {m['bridge_force_mean']:6.1f} "
+          f"{m['n_locked_in_cells']:4d}")
 
     wall_t0 = timer.time()
     t = 0.0
@@ -3334,10 +3707,34 @@ def run(p=None, seed=None):
                   f"{m['void_nc']:5d} {m['tissue_frac']:7.3f} "
                   f"{m['n_bridges']:7d} {m['n_attached_total']:7.0f} "
                   f"{m['mean_spread_frac']:6.2f} {m['mean_fa_maturity']:6.2f} "
-                  f"{m['disp_func']:7.1f} {m['K_kozeny_carman']:8.1f}")
+                  f"{m['disp_func']:7.1f} {m['K_kozeny_carman']:8.1f} "
+                  f"{m['n_bridging_cells']:6d} {m['bridge_force_mean']:6.1f} "
+                  f"{m['n_locked_in_cells']:4d}")
 
     elapsed = timer.time() - wall_t0
     print(f"\n  Done in {elapsed:.1f}s ({n_steps} steps, {gs.N} granules)")
+
+    # ── Bridge force diagnostic (V1.9) ──
+    if hist:
+        final = hist[-1]
+        n_bc = final.get('n_bridging_cells', 0)
+        bf_mean = final.get('bridge_force_mean', 0.0)
+        n_lock = final.get('n_locked_in_cells', 0)
+        if n_bc > 0:
+            print(f"\n  Bridge force diagnostic:")
+            print(f"    Bridging cells:   {n_bc}")
+            print(f"    Locked-in cells:  {n_lock}")
+            print(f"    Mean bridge force: {bf_mean:.2f} nN")
+            print(f"    Expected force:    {p.expected_bridge_force:.1f} nN")
+            ratio = bf_mean / p.expected_bridge_force if p.expected_bridge_force > 0 else 0.0
+            if ratio < 0.25:
+                print(f"    WARNING: Bridge force is {ratio:.0%} of expected "
+                      f"({p.expected_bridge_force:.0f} nN). Motor-clutch parameters "
+                      f"may need tuning (n_motors={p.n_motors}, "
+                      f"F_motor_stall={p.F_motor_stall}, F_max_per_cell={p.F_max_per_cell}).")
+            elif ratio < 0.5:
+                print(f"    NOTE: Bridge force is {ratio:.0%} of expected. "
+                      f"Consider increasing n_motors or F_motor_stall.")
 
     # V1.5: Save history and create archive
     if p.save_data:

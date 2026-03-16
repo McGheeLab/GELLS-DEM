@@ -1,6 +1,7 @@
 # Simulation outputs (large, regenerable)
 simulations/
 results/
+Trials/trials/
 *.npy
 *.npz
 *.pkl
@@ -28,9 +29,21 @@ build/
 # OS
 .DS_Store
 Thumbs.db
+~$*
 
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
+
+# LaTeX build artifacts
+*.aux
+*.bbl
+*.blg
+*.log
+*.out
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+CodeLog/Paper/tectonic/

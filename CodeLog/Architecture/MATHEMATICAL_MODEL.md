@@ -860,18 +860,609 @@ in adult human trabecular bone) and tortuosity.
 
 ---
 
+## 11. Volume-Conserving Two-Zone Mean-Field Model
+
+### 11.1 Physical Motivation
+
+The mean-field model of Section 5, which tracks the bulk functional volume fraction
+$\phi_f(t)$, contains a fundamental inconsistency: it implicitly assumes that granular
+material is created or destroyed during compaction. Hydrogel granules are
+incompressible on the timescale of cell-driven rearrangement ($\sim$10--100 h). The
+total solid volume fraction $\phi_s = \phi_f + \phi_i$ must therefore remain constant
+throughout the compaction process.
+
+We resolve this by introducing a **two-zone model** in which the scaffold domain is
+partitioned into a functional zone (volume fraction $x_f$ of the total domain) and an
+inert zone (volume fraction $x_i = 1 - x_f$). Cell-driven compaction shrinks the
+functional zone, concentrating functional granules into a smaller volume while
+expanding the inert zone to accommodate displaced material. The global solid fraction
+$\phi_s$ is conserved exactly; only its spatial distribution changes.
+
+This reformulation is analogous to the poroelastic consolidation of Biot (1941), where
+fluid is squeezed from a compressing region into a dilating region, and to the osmotic
+compression of concentrated emulsions described by Princen (1986).
+
+### 11.2 State Variable and Conservation Law
+
+Let $x_f(t)$ denote the volume fraction of the domain occupied by the functional zone
+at time $t$. The initial value is
+
+$$x_{f,0} = \max\!\left(\frac{\phi_f}{\phi_s}, \; \frac{\phi_f}{\phi_{\max}}\right)$$
+
+where $\phi_{\max}$ is the maximum deformable packing fraction (Section 11.4). The
+inert zone occupies $x_i = 1 - x_f$.
+
+**Conservation.** The total solid area (2D) or volume (3D) is
+
+$$\phi_f \cdot A_{\text{domain}} + \phi_i \cdot A_{\text{domain}} = \phi_s \cdot A_{\text{domain}} = \text{const}$$
+
+The **local** packing fractions within each zone are:
+
+$$\phi_{f}^{\text{local}}(t) = \frac{\phi_f}{x_f(t)}, \qquad \phi_{i}^{\text{local}}(t) = \frac{\phi_i}{1 - x_f(t)}$$
+
+As cells compact the functional zone ($x_f$ decreases), $\phi_f^{\text{local}}$
+increases toward random close packing while $\phi_i^{\text{local}}$ decreases (inert
+granules spread into a larger volume). The local void fractions are:
+
+$$\phi_{v,f}^{\text{local}} = 1 - \phi_f^{\text{local}}, \qquad \phi_{v,i}^{\text{local}} = 1 - \phi_i^{\text{local}}$$
+
+The global void fraction $\phi_v = 1 - \phi_s$ is exactly conserved; only its spatial
+distribution between the two zones changes.
+
+### 11.3 Compaction ODE
+
+The functional zone fraction evolves according to the overdamped force balance:
+
+$$\frac{dx_f}{dt} = -x_f \cdot \frac{\max\!\left(0, \; \sigma_{\text{cell}}(t) - \sigma_{\text{resist}}(x_f)\right)}{\eta_{\text{eff}}}$$
+
+where $\sigma_{\text{cell}}$ is the volume-averaged cell traction stress (Section 5.2)
+and $\sigma_{\text{resist}}$ is the elastic resistance from contact deformation.
+The $x_f$ prefactor ensures that compaction rate scales with the size of the zone
+being compressed, vanishing as $x_f \to 0$.
+
+The resistance stress is
+
+$$\sigma_{\text{resist}} = \sigma_0 \cdot \max\!\left(0, \; \frac{\phi_f^{\text{local}}}{\phi_{\text{RCP}}} - 1\right)$$
+
+where $\sigma_0 = 0.005 \, E_{\text{eff}}$ is the elastic resistance scale derived from
+Hertzian contact mechanics, and $\phi_{\text{RCP}}$ is the random close packing fraction
+for the bidisperse superellipsoidal granule mixture (Section 11.5). Resistance vanishes
+when $\phi_f^{\text{local}} < \phi_{\text{RCP}}$ and grows linearly with excess packing
+beyond RCP.
+
+### 11.4 Deformable Packing Limit
+
+Rigid particles cannot exceed $\phi_{\text{RCP}}$, but soft hydrogel granules deform at
+contacts and can pack beyond this limit. Following the approach of Cai et al. (2022),
+who showed that Hertzian contact deformations predict the bulk modulus of granular
+hydrogels, we define a deformable packing limit:
+
+$$\phi_{\max} = \phi_{\text{RCP}} + (1 - \phi_{\text{RCP}}) \cdot \left[1 - \exp\!\left(-\frac{0.5}{E_f^{0.3}}\right)\right] \cdot (1 + 0.1(n_2 - 2))$$
+
+Softer granules (lower $E_f$) deform more at contacts, permitting higher packing. Blockier
+shapes ($n_2 > 2$) interlock more efficiently, further increasing $\phi_{\max}$. The
+compaction minimum is $x_{f,\min} = \phi_f / \phi_{\max}$.
+
+### 11.5 Random Close Packing of Bidisperse Shaped Granules
+
+The rigid-particle RCP fraction $\phi_{\text{RCP}}$ depends on granule shape and size
+distribution. We adopt the following empirical model, informed by Farr and Groot (2009)
+for polydisperse spheres, Donev et al. (2004) for ellipsoids, and Yuan et al. (2019)
+for superellipsoids:
+
+$$\phi_{\text{RCP}} = \phi_{\text{RCP}}^{\text{mono}} + \Delta\phi_{\text{AR}} + \Delta\phi_n + \Delta\phi_{\text{bi}}$$
+
+where:
+
+- $\phi_{\text{RCP}}^{\text{mono}} = 0.82$ (2D) or $0.64$ (3D) for monodisperse circles/spheres
+- $\Delta\phi_{\text{AR}} = 0.04(\text{AR} - 1) - 0.015(\text{AR} - 1)^2$ accounts for aspect
+  ratio effects, peaking near $\text{AR} \approx 1.3$ (Donev et al. 2004)
+- $\Delta\phi_n = 0.015(n_2 - 2)$ accounts for blockiness (squarer shapes pack denser; Delaney
+  and Cleary, 2010)
+- $\Delta\phi_{\text{bi}} = 0.18 \, x_s(1 - x_s)(1 - 1/r)$ is the Farr--Groot bidisperse
+  correction, where $x_s$ is the volume fraction of small particles and $r$ is the size ratio
+
+The effective contact modulus is the composition-weighted harmonic mean:
+
+$$E_{\text{eff}} = \frac{w_{ff} E_f + w_{fi}\bar{E}_{fi} + w_{ii} E_i}{w_{ff} + w_{fi} + w_{ii}}$$
+
+where $w_{ff} = \phi_f^2$, $w_{ii} = \phi_i^2$, $w_{fi} = 2\phi_f\phi_i$, and
+$\bar{E}_{fi} = 2E_f E_i / (E_f + E_i)$ is the Hertzian reduced modulus for a
+functional--inert contact.
+
+---
+
+## 12. Free Energy Landscape for Scaffold Compaction
+
+### 12.1 Motivation: From Kinetics to Thermodynamics
+
+The volume-conserving ODE (Section 11.3) describes the kinetics of compaction but does
+not reveal the underlying energetic driving forces and barriers. To develop rational
+design rules for tissue-specific scaffold architectures, we require a thermodynamic
+framework that decomposes the total free energy into physically distinct contributions.
+This approach, inspired by the energy landscape formalism in soft matter physics
+(Wales, 2003) and its applications to cell rearrangements in dense tissues (Bi et al.,
+2014, 2015), enables identification of the controlling mechanisms for each organ target.
+
+We define a free energy density $G(\xi)$ as a function of a single compaction coordinate
+$\xi$, such that the overdamped dynamics of the system correspond to gradient descent on
+this landscape:
+
+$$\frac{d\xi}{dt} = -\frac{1}{\eta_{\text{eff}}} \frac{dG}{d\xi}$$
+
+This formulation, standard for overdamped systems in colloidal and granular physics
+(Kramers, 1940; Doi and Edwards, 1986; Tighe et al., 2010), connects the equilibrium
+scaffold architecture ($\xi^*$ at the energy minimum) to the balance of six competing
+physical mechanisms.
+
+### 12.2 Compaction Coordinate
+
+We parameterize the degree of compaction by the dimensionless coordinate
+
+$$\xi = 1 - \frac{x_f}{x_{f,0}} \in [0, \, \xi_{\max}]$$
+
+where $\xi = 0$ is the initial (uncompacted) state and $\xi_{\max} = 1 - x_{f,\min}/x_{f,0}$
+is the maximum compaction permitted by the deformable packing limit. The functional zone
+fraction at compaction $\xi$ is
+
+$$x_f(\xi) = x_{f,0}(1 - \xi)$$
+
+and the local packing fractions (Section 11.2) become explicit functions of $\xi$:
+
+$$\phi_f^{\text{local}}(\xi) = \frac{\phi_f}{x_{f,0}(1 - \xi)}, \qquad \phi_i^{\text{local}}(\xi) = \frac{\phi_i}{1 - x_{f,0}(1 - \xi)}$$
+
+### 12.3 Decomposition of the Free Energy
+
+The total free energy density is decomposed into six terms, each corresponding to a
+distinct physical mechanism:
+
+$$G(\xi) = G_{\text{cell}}(\xi) + G_{\text{elastic}}(\xi) + G_{\text{yield}}(\xi) + G_{\text{void}}(\xi) + G_{\text{inert}}(\xi) + G_{\gamma}(\xi)$$
+
+The first term is the driving force (negative, favoring compaction); the remaining five
+are resistance terms (positive, opposing compaction) that arise from distinct physical
+origins. We derive each term below.
+
+### 12.4 Cell Traction Energy ($G_{\text{cell}}$)
+
+Cells encapsulated within functional granules generate contractile traction through the
+motor-clutch mechanism (Chan and Odde, 2008; Section 2.5) and transmit this force to
+neighboring granules through intercellular bridges (Section 2.6). The volume-averaged
+cell traction stress is
+
+$$\sigma_{\text{cell}} = \rho_{\text{cell}} \cdot F_{\text{MC}}(E_f) \cdot f_{\text{bridge}} \cdot m$$
+
+where $\rho_{\text{cell}}$ is the cell number density (cells/$\mu$m$^2$),
+$F_{\text{MC}}(E_f)$ is the motor-clutch traction force at substrate stiffness $E_f$
+(Section 2.5), $f_{\text{bridge}}$ is the fraction of cells that have formed bridges
+(Poisson kinetics, Section 2.6), and $m$ is the focal adhesion maturity.
+
+As the functional zone compacts, the local cell density increases as $1/(1 - \xi)$,
+enhancing the bridging probability and effective traction. The cell traction energy is
+obtained by integrating the density-enhanced driving stress:
+
+$$G_{\text{cell}}(\xi) = \sigma_{\text{cell}} \cdot \ln(1 - \xi)$$
+
+This expression is strictly negative for $\xi > 0$, reflecting the thermodynamic driving
+force for compaction. The logarithmic divergence as $\xi \to 1$ captures the physical
+reality that cell density (and hence contractile stress) grows without bound as the
+functional zone shrinks to zero volume --- though in practice, compaction is arrested by
+the resistance terms long before this limit.
+
+**Decision rationale.** The logarithmic form arises naturally from the density
+enhancement $\rho(\xi) = \rho_0/(1 - \xi)$ and the assumption that per-cell traction
+force is independent of local density (valid in the sub-saturated regime where cells do
+not compete for adhesion sites). This is a conservative assumption; cooperative effects
+between nearby cells could further enhance traction at high density (Di Caprio et al.,
+2025).
+
+### 12.5 Hertzian Elastic Energy ($G_{\text{elastic}}$)
+
+When compaction drives the local functional packing fraction above the random close
+packing threshold $\phi_{\text{RCP}}$, granules are forced into elastic contact and
+store Hertzian elastic energy. This is the primary resistance mechanism identified by
+the mean-field ODE (Section 11.3).
+
+We derive the elastic energy by integrating the ODE-consistent resistance stress
+$\sigma_{\text{resist}} = \sigma_0 \max(0, \phi_f^{\text{local}}/\phi_{\text{RCP}} - 1)$
+over the compaction coordinate. Defining the elastic onset
+
+$$\xi_c = 1 - \frac{\phi_f}{x_{f,0} \phi_{\text{RCP}}}$$
+
+as the compaction at which $\phi_f^{\text{local}}$ first reaches $\phi_{\text{RCP}}$,
+the integrated elastic energy is (to leading order near $\xi_c$):
+
+$$G_{\text{elastic}}(\xi) = \frac{\sigma_0}{2} \max(0, \, \xi - \xi_c)^2$$
+
+where $\sigma_0 = 0.005 \, E_{\text{eff}}$. This parabolic form is exact for the
+linearized mean-field model near the elastic onset and ensures that the energy landscape
+equilibrium is consistent with the ODE's force balance. The quadratic growth above $\xi_c$
+captures the progressive stiffening of the granular assembly as contacts deform under
+Hertzian mechanics (Johnson, 1985). Cai et al. (2022) demonstrated experimentally that
+Hertzian contact deformations accurately predict the bulk mechanical response of granular
+hydrogel assemblies, supporting this formulation.
+
+**Decision rationale.** We use the ODE-derived parabolic form rather than the full
+Hertz energy ($\propto \delta^{5/2}$) to maintain analytical consistency between the
+energy landscape and the mean-field kinetics. The two formulations agree near the onset
+$\xi_c$ and diverge only at very high compaction where additional physics (granule
+plasticity, network percolation) would in any case require model extensions.
+
+### 12.6 Herschel-Bulkley Yield Barrier ($G_{\text{yield}}$)
+
+Dense granular materials exhibit a yield stress below which no macroscopic flow occurs
+(Liu and Nagel, 1998; O'Hern et al., 2003). For packing fractions above the jamming
+point $\phi_J$, the yield stress scales as a power law in the distance from jamming
+(Olsson and Teitel, 2007, 2012; van Hecke, 2010):
+
+$$\sigma_y = c_y \, \sigma_0 \cdot \max\!\left(0, \; \frac{\phi_f^{\text{local}}}{\phi_J} - 1\right)^{\!\Delta}$$
+
+where $\phi_J = 0.92 \, \phi_{\text{RCP}}$ is the jamming fraction (slightly below RCP,
+consistent with the observation that jamming onset precedes close packing for frictional
+particles; van Hecke, 2010), $c_y = 0.25$ is a dimensionless yield coefficient, and
+$\Delta = 3/2$ is the O'Hern scaling exponent for frictionless soft spheres (O'Hern
+et al., 2003). The connection to the Herschel-Bulkley constitutive law
+$\sigma = \sigma_y + K\dot{\gamma}^n$ enters through the yield stress term, which
+sets the threshold for initiating granular rearrangement.
+
+The yield stress generates an energy barrier in the compaction landscape:
+
+$$G_{\text{yield}}(\xi) = \sigma_y(\xi) \cdot \max(0, \xi - \xi_J)$$
+
+where $\xi_J$ is the compaction at which $\phi_f^{\text{local}}$ first reaches $\phi_J$.
+Since $\phi_J < \phi_{\text{RCP}}$, the yield barrier activates before the elastic
+resistance ($\xi_J < \xi_c$), creating an activation threshold that cells must overcome
+before macroscopic rearrangement can proceed. This is consistent with the observation
+that granular scaffolds maintain their shape under gravity but can be slowly restructured
+by sustained biological forces (Riley et al., 2019).
+
+**Decision rationale.** The Herschel-Bulkley framework is the standard constitutive model
+for yield-stress fluids, encompassing dense granular suspensions, foams, and emulsions
+(Olsson and Teitel, 2012). The $\Delta = 3/2$ exponent is well-established for soft
+frictionless particles (O'Hern et al., 2003) and provides a physically grounded
+scaling near jamming without introducing free parameters. The Durian bubble model
+(Durian, 1995) and subsequent theoretical work (Tighe et al., 2010) confirm that
+overdamped soft-particle systems exhibit this scaling.
+
+### 12.7 Void Redistribution Energy ($G_{\text{void}}$)
+
+Compaction expels interstitial fluid from the functional zone into the inert zone,
+altering the local void fractions from their initial equilibrium values. This
+redistribution incurs an osmotic free energy cost analogous to the osmotic pressure
+in concentrated emulsions (Princen, 1986) and the consolidation resistance in
+poroelastic media (Biot, 1941).
+
+The osmotic energy is modeled as a quadratic penalty for deviation from the initial
+void fractions, weighted by the zone volumes:
+
+$$G_{\text{void}}(\xi) = \Pi \left[\left(\phi_{v,f}^{\text{local}} - \phi_{v,f}^{0}\right)^2 x_f(\xi) + \left(\phi_{v,i}^{\text{local}} - \phi_{v,i}^{0}\right)^2 (1 - x_f(\xi))\right]$$
+
+where $\Pi = 3 \, \sigma_{\text{cell}}$ is the osmotic compressibility modulus (scaled
+to the cell traction stress, consistent with the observation that biological forces, not
+thermal fluctuations, drive void redistribution at the granular scale), and the
+superscript 0 denotes initial values.
+
+The quadratic form is the leading-order expansion of the free energy of mixing for a
+compressible pore fluid in a granular skeleton. At the granular scale, the "osmotic
+pressure" arises not from thermal fluctuations but from the elastic and geometric
+constraints of the pore network, as analyzed by Brinkman (1949) for viscous flow through
+dense particle swarms.
+
+**Decision rationale.** The void redistribution cost is essential for capturing the
+observation that compaction stalls before the elastic hard wall is reached: even at
+packing fractions below $\phi_{\text{RCP}}$, the cost of expelling fluid from the
+densifying functional zone creates a soft resistance that opposes further compaction.
+Scaling $\Pi$ to $\sigma_{\text{cell}}$ (rather than $E_{\text{eff}}$) ensures that
+this term acts as a perturbative correction to the cell-elastic balance, consistent with
+the mean-field ODE predictions.
+
+### 12.8 Inert Granule Frustration Energy ($G_{\text{inert}}$)
+
+Inert granules act as geometric obstacles to the compaction of the functional zone. As
+the functional zone contracts, inert granules at the zone boundary must be displaced,
+creating an energetic cost that grows with the amount of compaction and the relative
+abundance of inert material. This frustration mechanism is analogous to the geometric
+frustration that prevents crystallization in binary hard-sphere mixtures and to the
+jamming-induced rigidity in tissue cell layers with mixed cell types (Bi et al., 2015).
+
+The frustration energy is modeled as a quadratic function of compaction, weighted by the
+inert-to-functional volume ratio:
+
+$$G_{\text{inert}}(\xi) = k_f \cdot \frac{\phi_i}{\phi_f} \cdot \xi^2$$
+
+where $k_f = 1.5 \, \sigma_{\text{cell}}$ is the frustration coefficient (scaled to the
+cell traction stress). The quadratic growth reflects the increasing difficulty of
+displacing inert granules as the functional zone contracts: early compaction pushes aside
+peripheral inert granules easily, while later compaction requires rearranging granules that
+are more deeply embedded in the scaffold.
+
+**Decision rationale.** The $\phi_i/\phi_f$ prefactor captures the intuition that
+scaffolds with more inert content relative to functional content are harder to compact,
+consistent with the DEM simulation results (Section 10) showing that high
+$\phi_i/\phi_f$ runs exhibit less compaction at equal cell traction. The quadratic
+scaling is the simplest monotonically increasing resistance consistent with dimensional
+analysis.
+
+### 12.9 Interfacial Tension Energy ($G_{\gamma}$)
+
+The boundary between the functional and inert zones constitutes a material interface
+with an effective surface tension $\gamma_{fi}$ arising from the modulus mismatch and
+differential adhesion between the two granule types. This interfacial energy plays a
+role analogous to the surface tension in foam rheology (Princen, 1979, 1983) and the
+cortical tension at cell-cell boundaries in tissue mechanics (Bi et al., 2015).
+
+The interfacial tension is estimated as
+
+$$\gamma_{fi} = c_\gamma \, \sigma_{\text{cell}} \left(0.3 + \frac{|E_f - E_i|}{E_f + E_i}\right)$$
+
+where $c_\gamma = 2.5$ is a dimensionless coefficient and the modulus mismatch factor
+reflects the observation that interfaces between mechanically dissimilar materials have
+higher effective surface tension (greater disruption of the contact force network at
+the boundary).
+
+The interfacial energy contains two competing contributions:
+
+$$G_{\gamma}(\xi) = \gamma_{fi} \left[\sqrt{1 - \xi} - 1\right] + \frac{\gamma_{fi} \phi_i}{2} \xi$$
+
+The first term represents the energy change due to the geometric contraction of the
+zone boundary. In 2D, a circular zone of area fraction $x_f$ has perimeter
+$P \propto \sqrt{x_f} = \sqrt{x_{f,0}(1 - \xi)}$, so the perimeter ratio is
+$P/P_0 = \sqrt{1 - \xi}$. Since $\sqrt{1 - \xi} < 1$ for $\xi > 0$, this term is
+**negative** and favors compaction (the system lowers its interfacial energy by reducing
+the boundary area). This is the same driving force responsible for Ostwald ripening in
+emulsions and coarsening in foams.
+
+The second term is a **mixing penalty** that accounts for inert granules trapped at or
+within the zone boundary. As compaction proceeds, the convoluted interphase boundary
+contains more inert granules, increasing the total interfacial area and opposing further
+compaction.
+
+**Decision rationale.** Interfacial tension is a well-established driving force in the
+mechanics of concentrated emulsions and foams (Princen, 1979, 1983). In granular
+scaffolds, the "interface" between functional and inert zones is not a sharp material
+boundary but an emergent mesoscale feature of the biphasic packing. We assign it an
+effective surface tension using dimensional arguments and the modulus mismatch as a proxy
+for the disruption of the local force network at the zone boundary. The functional form
+($\sqrt{1-\xi}$ for area change, linear mixing penalty) is consistent with the scaling
+of interfacial area with volume fraction in 2D biphasic systems.
+
+### 12.10 Total Free Energy and Equilibrium
+
+The total free energy density is
+
+$$G(\xi) = \sigma_{\text{cell}} \ln(1 - \xi) + \frac{\sigma_0}{2}(\xi - \xi_c)_+^2 + \sigma_y(\xi)(\xi - \xi_J)_+ + \Pi \sum_\alpha (\Delta\phi_{v,\alpha})^2 x_\alpha + k_f \frac{\phi_i}{\phi_f} \xi^2 + G_\gamma(\xi)$$
+
+where $(\cdot)_+ = \max(0, \cdot)$.
+
+**Equilibrium.** The equilibrium compaction $\xi^*$ is the global minimum of $G(\xi)$
+on $[0, \xi_{\max}]$, satisfying
+
+$$\left.\frac{dG}{d\xi}\right|_{\xi^*} = 0, \qquad \left.\frac{d^2G}{d\xi^2}\right|_{\xi^*} > 0$$
+
+The equilibrium condition is equivalent to a generalized force balance among all six
+mechanisms: cells pull the system toward higher $\xi$, while elastic contacts, yield
+stress, void redistribution, inert frustration, and interfacial mixing push back. The
+position of the minimum $\xi^*$ determines the final tissue architecture.
+
+**Barrier.** If the yield and void terms create a local maximum at $\xi_b < \xi^*$, an
+activation barrier $\Delta G^* = G(\xi_b) - G(0)$ must be overcome for compaction to
+initiate. This barrier is crossed when the cell traction stress exceeds the yield stress:
+$\sigma_{\text{cell}} > \sigma_y(\phi_J)$.
+
+### 12.11 Normalised Energy and Landscape Structure
+
+To reveal the landscape structure, we normalize the free energy by the cell traction
+scale:
+
+$$\tilde{G}(\xi) = \frac{G(\xi)}{\sigma_{\text{cell}}}$$
+
+In normalized units, the cell driving term $\tilde{G}_{\text{cell}} = \ln(1 - \xi)$ is
+$O(1)$, and the resistance terms are scaled by their ratio to $\sigma_{\text{cell}}$.
+The key ratio governing the landscape shape is
+
+$$\frac{\sigma_0}{\sigma_{\text{cell}}} = \frac{0.005 \, E_{\text{eff}}}{\rho_{\text{cell}} \cdot F_{\text{MC}}(E_f) \cdot f_b \cdot m}$$
+
+When this ratio is large (stiff scaffold, few cells), the elastic parabola rises steeply
+and compaction is limited. When the ratio is small (soft scaffold, many cells), cells
+drive compaction nearly to $\xi_{\max}$.
+
+### 12.12 Overdamped Kinetics on the Landscape
+
+The compaction dynamics follow overdamped gradient descent with time-dependent driving:
+
+$$\frac{d\xi}{dt} = -\frac{1}{\eta_{\text{eff}}} \frac{dG}{d\xi}\bigg|_{f_b(t), \, m(t)}$$
+
+where $f_b(t)$ and $m(t)$ evolve according to the bridge kinetics (Section 2.6) and
+focal adhesion maturation (Section 2.5), respectively. At early times ($f_b \approx 0$),
+the cell driving term vanishes and the landscape is flat; as bridges form ($f_b \to 1$),
+the cell traction deepens the energy well and the system rolls toward $\xi^*$.
+
+This time-dependent landscape is analogous to the evolving energy landscape in protein
+folding (Wales, 2003) and cell differentiation (Shi et al., 2022), where external
+parameters (temperature, signaling molecules) reshape the landscape over time, guiding
+the system through a sequence of metastable states toward the final equilibrium.
+
+### 12.13 Governing Dimensionless Groups
+
+Five dimensionless numbers govern the shape of the energy landscape and hence the
+equilibrium scaffold architecture:
+
+| Group | Symbol | Definition | Physical meaning |
+|-------|--------|-----------|-----------------|
+| Cell-to-elastic ratio | $\beta$ | $\sigma_{\text{cell}} / \sigma_0$ | Driving force vs. contact resistance |
+| Cell-to-yield ratio (capillary number) | $Ca$ | $\sigma_{\text{cell}} / \sigma_y$ | Can cells overcome the yield barrier? |
+| Inert obstruction | $\Phi_r$ | $\phi_i / \phi_f$ | Geometric frustration from inert granules |
+| Packing proximity | $\Psi$ | $\phi_f^{\text{local}}(0) / \phi_{\text{RCP}}$ | How close is initial packing to RCP? |
+| Interfacial number | $\Gamma$ | $\gamma_{fi} / \sigma_{\text{cell}}$ | Surface tension vs. cell driving |
+
+**Design interpretation.** To achieve a target compaction $\xi^*_{\text{target}}$
+(corresponding to the desired organ architecture), the scaffold parameters ($E_f$,
+$E_i$, $\phi_f$, $\phi_i$, $R_f$, $n_{\text{cells}}$) must be chosen such that the
+energy minimum falls at $\xi^*_{\text{target}}$. The dimensionless groups provide a
+reduced parameter space for this optimization:
+
+- Increasing $\beta$ (softer scaffold or more cells) deepens the well and shifts $\xi^*$
+  rightward (more compaction).
+- Increasing $Ca$ above 1 ensures the yield barrier is overcome.
+- Increasing $\Phi_r$ (more inert content) raises the frustration floor and shifts $\xi^*$
+  leftward (less compaction).
+- Increasing $\Psi$ toward 1 means the initial packing is already near RCP, leaving little
+  room for compaction ($\xi_c$ is small).
+- Large $\Gamma$ means interfacial effects dominate; the mixing penalty can prevent
+  compaction if inert granules are densely distributed at the zone boundary.
+
+---
+
+## 13. Computational Results: Energy Landscape Analysis
+
+### 13.1 Landscape Structure Across Organ Targets
+
+The energy landscape was computed for four representative organ targets using optimal
+scaffold parameters identified by the mean-field parameter sweep (Section 10). The
+results reveal qualitatively distinct landscape shapes:
+
+| Organ Target | $D_{\text{arch}}$ | $\xi_{\max}$ | $\xi^*$ | $\tilde{G}^*$ | Dominant resistance |
+|-------------|-------------------|---------------|---------|---------------|---------------------|
+| Trabecular bone | 5.7 | 0.589 | 0.577 | $-0.56$ | Elastic (near $\xi_{\max}$) |
+| Intestinal mucosa | 7.7 | 0.382 | 0.375 | $-0.57$ | Elastic + void |
+| Kidney cortex | 9.1 | 0.217 | 0.213 | $-0.19$ | Elastic + inert |
+| Cardiac muscle | 9.2 | 0.218 | 0.096 | $-0.14$ | Yield + inert + elastic |
+
+**Trabecular bone** ($D = 5.7$, the most accessible target) exhibits a deep well with
+$\xi^*$ approaching $\xi_{\max}$, indicating that cell traction can drive nearly
+maximal compaction. The landscape is dominated by the cell-elastic balance, with
+perturbative contributions from the other terms.
+
+**Cardiac muscle** ($D = 9.2$, the most challenging target) shows a shallow well with
+$\xi^* \approx 0.10$, reflecting the strong resistance from a stiff scaffold with
+high inert content. The yield barrier is significant, and the inert frustration term
+contributes substantially to limiting compaction.
+
+### 13.2 Time Evolution of the Landscape
+
+The energy landscape evolves as cells mature and bridges form. At $t = 0$ (no bridges),
+the landscape is flat (no cell driving). As $f_b$ increases from 0 to 1 over
+approximately 10--20 hours, the cell traction well deepens progressively, pulling the
+equilibrium toward higher $\xi$. The final landscape shape (at $f_b = 1$, $m = 1$)
+determines the long-time compaction.
+
+The kinetics on the evolving landscape show a characteristic S-shaped trajectory
+$\xi(t)$, with three phases:
+
+1. **Lag phase** (0--5 h): Cells attach and spread; $f_b \approx 0$; no compaction.
+2. **Rapid compaction** (5--20 h): Bridges form rapidly; the energy well deepens; the
+   system accelerates toward the minimum.
+3. **Equilibration** (20--72 h): $\xi(t)$ asymptotes to $\xi^*$ as the driving stress
+   equilibrates with the resistance.
+
+### 13.3 Energy Decomposition at Equilibrium
+
+The stacked decomposition of energy terms at $\xi^*$ reveals the relative importance of
+each mechanism for each organ target. The cell traction and interfacial tension terms
+are consistently negative (driving), while elastic, yield, void, and inert terms are
+positive (resisting). The balance varies by organ: bone and mucosa are cell-dominated
+(large negative $\tilde{G}_{\text{cell}}$), while kidney and cardiac are
+resistance-dominated (large positive $\tilde{G}_{\text{elastic}} + \tilde{G}_{\text{inert}}$).
+
+### 13.4 Design Space Maps
+
+Two-dimensional heat maps of $\xi^*$ over key parameter pairs reveal the design
+sensitivities:
+
+- **$E_f$ vs. $\phi_f$:** Compaction increases with $\phi_f$ (more functional material
+  to compact) and decreases with $E_f$ (stiffer scaffold resists deformation).
+  The gradient is steeper along $\phi_f$, indicating composition is a stronger lever than
+  stiffness.
+
+- **$\phi_i$ vs. $R_f$:** Higher inert content suppresses compaction through geometric
+  frustration. Larger granule radii slightly reduce compaction (fewer granules per
+  domain, lower cell density).
+
+- **$E_f$ vs. $E_i$:** The modulus mismatch affects both the elastic resistance
+  ($E_{\text{eff}}$) and the interfacial tension ($\gamma_{fi}$). Along the
+  equal-modulus diagonal ($E_f = E_i$), interfacial effects are minimized.
+
+---
+
+## 14. Design Rules from the Energy Landscape
+
+### 14.1 General Principles
+
+The energy landscape framework yields the following design rules for targeting specific
+tissue architectures:
+
+1. **To increase compaction** (e.g., trabecular bone): Decrease $E_f$ (softer functional
+   granules), increase $n_{\text{cells}}$ (more driving force), decrease $\phi_i/\phi_f$
+   (less inert obstruction), or increase cell sensing distance (more bridges).
+
+2. **To decrease compaction** (e.g., cardiac muscle): Increase $E_f$, decrease
+   $n_{\text{cells}}$, increase $\phi_i/\phi_f$, or use granule shapes that increase
+   $\phi_{\text{RCP}}$ (lowering $\xi_c$).
+
+3. **To sharpen the yield barrier** (controlled compaction onset): Increase
+   $E_{\text{eff}}$ (raises $\sigma_y$) or choose compositions where $\phi_f^{\text{local}}$
+   is initially close to $\phi_J$ (small $\xi_J$).
+
+4. **To minimize interfacial effects**: Match $E_f \approx E_i$ (reduces $\gamma_{fi}$)
+   and avoid trapping inert granules within the functional zone.
+
+### 14.2 Organ-Specific Guidelines
+
+| Organ | Required $\xi^*$ | Key design lever | Constraint |
+|-------|------------------|------------------|------------|
+| Trabecular bone | $\sim 0.5$--$0.6$ | Low $E_f$, high $\phi_f$ | Must maintain permeability for nutrient transport |
+| Intestinal mucosa | $\sim 0.3$--$0.4$ | Moderate $E_f$, balanced $\phi_f/\phi_i$ | Intermediate void structure for absorption |
+| Kidney cortex | $\sim 0.2$ | Moderate--high $E_f$ | Tight packing with controlled porosity |
+| Cardiac muscle | $\sim 0.1$ | High $E_f$, high $\phi_i$ | Minimal compaction; aligned, anisotropic structure |
+
+These guidelines constitute a first-generation set of design rules connecting scaffold
+fabrication parameters to target tissue architectures through the mechanistic energy
+landscape framework. Experimental validation against confocal microscopy measurements
+of $\phi_f^{\text{local}}(t)$ in cell-laden granular hydrogels is a critical next step.
+
+---
+
 ## References
+
+- Bi, D., Lopez, J. H., Schwarz, J. M., and Manning, M. L. (2014). Energy barriers and
+  cell migration in densely packed tissues. *Soft Matter*, 10:1885--1890.
+
+- Bi, D., Lopez, J. H., Schwarz, J. M., and Manning, M. L. (2015). A density-independent
+  rigidity transition in biological tissues. *Nature Physics*, 11:1074--1079.
+
+- Biot, M. A. (1941). General theory of three-dimensional consolidation. *Journal of
+  Applied Physics*, 12(2):155--164.
+
+- Brinkman, H. C. (1949). A calculation of the viscous force exerted by a flowing fluid on
+  a dense swarm of particles. *Applied Scientific Research*, A1:27--34.
+
+- Cai, S. et al. (2022). Building block properties govern granular hydrogel mechanics
+  through contact deformations. *Science Advances*, 8(50):eadd8570.
 
 - Chan, C. E. and Odde, D. J. (2008). Traction dynamics of filopodia on compliant
   substrates. *Science*, 322(5908):1687--1691.
+
+- Delaney, G. W. and Cleary, P. W. (2010). The packing properties of superellipsoids.
+  *Europhysics Letters*, 89:34002.
 
 - Derjaguin, B. V., Muller, V. M., and Toporov, Y. P. (1975). Effect of contact
   deformations on the adhesion of particles. *Journal of Colloid and Interface Science*,
   53(2):314--326.
 
+- Di Caprio, N., Hughes, A. J., and Burdick, J. A. (2025). Programmed shape
+  transformations in cell-laden granular composites. *Science Advances*, 11(3):eadq5011.
+
+- Doi, M. and Edwards, S. F. (1986). *The Theory of Polymer Dynamics*. Oxford University
+  Press.
+
 - Donev, A., Cisse, I., Sachs, D., Variano, E. A., Stillinger, F. H., Connelly, R.,
   Torquato, S., and Chaikin, P. M. (2004). Improving the density of jammed disordered
   packings using ellipsoids. *Science*, 303(5660):990--993.
+
+- Durian, D. J. (1995). Foam mechanics at the bubble scale. *Physical Review Letters*,
+  75(26):4780--4783.
+
+- Farr, R. S. and Groot, R. D. (2009). Close packing density of polydisperse hard
+  spheres. *Journal of Chemical Physics*, 131(24):244104.
 
 - Gong, J. P. (2006). Friction and lubrication of hydrogels --- its richness and
   complexity. *Soft Matter*, 2(7):544--552.
@@ -884,18 +1475,64 @@ in adult human trabecular bone) and tortuosity.
   assessment of thickness in three-dimensional images. *Journal of Microscopy*,
   185(1):67--75.
 
+- Hollister, S. J. (2005). Porous scaffold design for tissue engineering. *Nature
+  Materials*, 4(7):518--524.
+
 - Jaklic, A. and Leonardis, A. (2000). Superquadrics and their geometric properties.
   In *Segmentation and Recovery of Superquadrics*, pages 13--39. Springer.
 
 - Johnson, K. L. (1985). *Contact Mechanics*. Cambridge University Press.
 
+- Kramers, H. A. (1940). Brownian motion in a field of force and the diffusion model of
+  chemical reactions. *Physica*, 7(4):284--304.
+
+- Liu, A. J. and Nagel, S. R. (1998). Jamming is not just cool any more. *Nature*,
+  396:21--22.
+
 - O'Hern, C. S., Silbert, L. E., Liu, A. J., and Nagel, S. R. (2003). Jamming at
   zero temperature and zero applied stress: The epitome of disorder. *Physical Review E*,
   68(1):011306.
+
+- Olsson, P. and Teitel, S. (2007). Critical scaling of shear viscosity at the jamming
+  transition. *Physical Review Letters*, 99:178001.
+
+- Olsson, P. and Teitel, S. (2012). Herschel-Bulkley shearing rheology near the
+  athermal jamming transition. *Physical Review Letters*, 109:108001.
 
 - Pitenis, A. A., Uruenya, J. M., Schulze, K. D., Nixon, R. M., Dunn, A. C.,
   Krick, B. A., Sawyer, W. G., and Angelini, T. E. (2014). Polymer fluctuation
   lubrication in hydrogel gemini interfaces. *Soft Matter*, 10(44):8955--8962.
 
+- Princen, H. M. (1979). Highly concentrated emulsions. *Journal of Colloid and
+  Interface Science*, 71:55--66.
+
+- Princen, H. M. (1983). Rheology of foams and highly concentrated emulsions I.
+  Elastic properties and yield stress of a cylindrical model system. *Journal of
+  Colloid and Interface Science*, 91:160--175.
+
+- Princen, H. M. (1986). Osmotic pressure of foams and highly concentrated emulsions I.
+  Theoretical considerations. *Langmuir*, 2:519--524.
+
+- Riley, L., Schirmer, L., and Segura, T. (2019). Granular hydrogels: emergent
+  properties of jammed hydrogel microparticles and their applications in tissue repair
+  and regeneration. *Current Opinion in Biotechnology*, 60:1--8.
+
+- Shi, J., Aihara, K., Li, T., and Chen, L. (2022). Energy landscape decomposition for
+  cell differentiation with proliferation effect. *National Science Review*,
+  9(8):nwac116.
+
+- Tighe, B. P., Woldhuis, E., and van Hecke, M. (2010). Model for the scaling of
+  stresses and fluctuations in flows near jamming. *Physical Review Letters*, 105:088303.
+
 - Torquato, S., Truskett, T. M., and Debenedetti, P. G. (2000). Is random close
   packing of spheres well defined? *Physical Review Letters*, 84(10):2064--2067.
+
+- van Hecke, M. (2010). Jamming of soft particles: geometry, mechanics, scaling and
+  isostaticity. *Journal of Physics: Condensed Matter*, 22(3):033101.
+
+- Wales, D. J. (2003). *Energy Landscapes: Applications to Clusters, Biomolecules and
+  Glasses*. Cambridge University Press.
+
+- Yuan, Y., VanderWerf, K., Shattuck, M. D., and O'Hern, C. S. (2019). Jammed packings
+  of 3D superellipsoids with tunable packing fraction, coordination number, and ordering.
+  *Soft Matter*, 15:9751.

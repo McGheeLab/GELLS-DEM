@@ -1,7 +1,7 @@
 # GELLS-DEM Architecture Document
 
-**Version:** V1.8
-**Last updated:** 2026-03-15
+**Version:** V1.12
+**Last updated:** 2026-03-16
 **Primary source file:** `new_dem_0.py`
 
 ---
@@ -68,21 +68,29 @@ relevant timescales (24--72 hours).
 │  viz/shapes.py         Granule shape gallery (superellipses/oids)    │
 │  viz/doe.py            DOE statistical analysis & visualization      │
 │  viz/dimensionless.py  Dimensionless analysis, data collapse (V1.7)  │
+│  viz/scaffold_evolution.py    2D microstructure evolution (V1.9)      │
+│  viz/scaffold_evolution_3d.py 3D volumetric evolution, PyVista (V1.9) │
+│  viz/energy_landscape.py      Energy landscape visualization (V1.11)  │
 │                                                                      │
 │  Delegates to analysis/ package:                                     │
-│  analysis/mean_field_model.py   Mean-field ODE compaction (V1.7)     │
+│  analysis/mean_field_model.py   Two-zone compaction ODE (V1.9)       │
+│  analysis/parameter_sweep.py    LHS + 1D PDE sweep (V1.10)           │
+│  analysis/energy_landscape.py   Free energy decomposition (V1.11)    │
 │  analysis/coarse_grain.py       Stress tensor, viscosity (V1.7)      │
 │  analysis/tissue_descriptors.py Tissue architecture vector (V1.7)    │
+│  analysis/organ_targets.py      Organ targets + phase mapping (V1.9) │
 │  analysis/arch_distance.py      Distance to organ targets (V1.7)     │
 └──────────────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────────────┐
-│            analysis/ — Mathematical Analysis Framework (V1.7)         │
+│          analysis/ — Mathematical Analysis Framework (V1.7+)          │
 │                                                                      │
-│  mean_field_model.py    ODE: dφ_f/dt = -φ_f * (σ_cell - σ_resist)/η │
+│  mean_field_model.py    Two-zone ODE: dx_f/dt = -x_f*(σ_cell-σ_r)/η │
+│  parameter_sweep.py     11-D LHS + 1D PDE, organ prediction (V1.10) │
+│  energy_landscape.py    6-term free energy decomposition (V1.11)     │
 │  coarse_grain.py        Love-Weber stress, strain rate, η_eff        │
 │  tissue_descriptors.py  BV/TV, Tb.Th, Tb.Sp, SMI, MIL, tortuosity  │
-│  organ_targets.py       7 organ target vectors (bone, lung, liver..) │
+│  organ_targets.py       7 organ targets + phase mapping (V1.9)       │
 │  arch_distance.py       Weighted Mahalanobis distance to organs      │
 │  MATHEMATICAL_MODEL.md  Formal model document for publications       │
 └──────────────────────────────────────────────────────────────────────┘
@@ -97,14 +105,16 @@ relevant timescales (24--72 hours).
 | Group | Parameters | Units | Purpose |
 |-------|-----------|-------|---------|
 | Mode | `mode` | -- | `"2D"`, `"2D-slice"`, or `"3D"` |
+| Boundary | `boundary_mode` | -- | `"walls"` (default) or `"periodic"` (V1.10) |
 | Domain | `Lx`, `Ly`, `Lz` | um | Simulation box size (Lz used in 3D/2D-slice) |
 | Granule sizes | `R_func_mean/std`, `R_inert_mean/std` | um | Gaussian size distributions |
 | Composition | `phi_f_target`, `phi_i_target` | -- | Target area/volume fractions |
+| Composition (alt) | `phi_solid_target`, `func_ratio` | -- | Total solid + functional ratio (V1.9) |
 | Cell geometry | `n_cells_per_granule`, `cell_diameter`, `cell_height_spread`, `cell_coverage` | --, um, um, -- | Cell seeding (20 um spheres, 5 um spread height) |
 | Cell timeline | `t_attach_onset`, `t_attach_half`, `t_spread_duration`, `fa_maturation_rate` | h, h, h, 1/h | Attachment/spreading/FA kinetics |
 | Motor-clutch | `n_motors`, `F_motor_stall`, `n_clutches`, `k_clutch`, `k_on_clutch`, `k_off_clutch` | --, nN, --, nN/um, 1/s, 1/s | Chan & Odde 2008 force model |
 | Cell bridging | `cell_sense_distance`, `F_max_per_cell`, `L_rest` | um, nN, um | Filopodia range, force cap, rest length |
-| Bridge kinetics | `bridge_attempt_rate`, `bridge_formation_time`, `bridge_senescence_time`, `min_fa_for_bridge`, `bridge_break_gap` | 1/h, h, h, --, um | Stochastic bridge initiation, maturity ramp, senescence, rupture (V1.5.2) |
+| Bridge kinetics | `bridge_attempt_rate`, `bridge_formation_time`, `bridge_senescence_time`, `min_fa_for_bridge`, `bridge_break_gap`, `bridge_lock_force_threshold`, `bridge_secondary_rate_mult`, `expected_bridge_force` | 1/h, h, h, --, um, nN, --, nN | Stochastic bridge initiation, maturity ramp, senescence, lock-in, secondary migration (V1.5.2, V1.9) |
 | Contact mechanics | `E_modulus`, `poisson_ratio` | kPa, -- | Hertzian contact (V1.1) |
 | Friction | `tau_0_ii/if/ff`, `friction_v_ref` | Pa, µm/h | Area-dependent hydrogel friction (V1.2) |
 | Adhesion | `W_adh_ii/if/ff` | J/m² | DMT adhesion by pair type (V1.2) |
@@ -225,8 +235,8 @@ Per-step lifecycle: attachment → spreading → FA maturation → overcrowding
 | **Contact (normal)** | All overlapping pairs | Hertz − DMT | `E_modulus`, `poisson_ratio`, `W_adh_*` |
 | **Contact (tangential)** | All overlapping pairs | Area-dependent friction | `tau_0_*`, `friction_v_ref` |
 | **Contact torque** | Non-spherical granules | τ = (contact_pt − centre) × F | Off-centre contacts |
-| **Cell bridging** | Functional pairs with spreading/proliferating cells | Motor-clutch (probabilistic, maturity-ramped) | `bridge_attempt_rate`, `bridge_formation_time`, `min_fa_for_bridge` |
-| **Wall** | Granules penetrating boundary | Hertz (rigid flat) | 4 walls (2D) or 6 walls (3D) |
+| **Cell bridging** | Functional pairs with spreading/proliferating cells | Motor-clutch (probabilistic, maturity-ramped, lock-in) | `bridge_attempt_rate`, `bridge_formation_time`, `min_fa_for_bridge`, `bridge_lock_force_threshold` (V1.9) |
+| **Wall** | Granules penetrating boundary (walls mode) | Hertz (rigid flat) | 4 walls (2D) or 6 walls (3D); disabled in periodic mode (V1.10) |
 | **Active noise** | Functional granules only | Gaussian white noise | `T_active` |
 
 Dispatch: `compute_forces()` → 2D path, `compute_forces_3d()` → 3D path.
@@ -328,29 +338,34 @@ plot_timeseries plot_granules    plot_fields  plot_composite
 
 ## 4. Visualization & Analysis Scripts
 
-### 4.1 Visualization Scripts — `viz/` package (V1.8)
+### 4.1 Visualization Scripts — `viz/` package (V1.12)
 
 | Script | Plots | Input |
 |--------|-------|-------|
 | `viz/compaction.py` | Void fraction, packing fraction, compaction ratio, void cluster size distribution, stacked phase areas | `hist`, `snaps` |
 | `viz/percolation.py` | Kozeny-Carman K(t), porosity + RCP, dimensionless groups dashboard (2×3), Darcy flow rate, void connectivity | `hist` |
 | `viz/movies.py` | Rotating 3D isosurface GIF, time-lapse compaction, z-sweep cross-section, composite 2×2 | `snaps`, `hist`, `p` |
-| `viz/phases.py` | Phase isosurface strip, phase volume fractions, tri-plane evolution (XY/XZ/YZ), interface area vs time | `hist`, `snaps`, `p` |
+| `viz/phases.py` | Phase isosurface strip, phase fractions vs time, tri-plane evolution (XY/XZ/YZ), interface area vs time | `hist`, `snaps`, `p` |
 | `viz/cells.py` | Cell morphology patches, stress map, cell timelapse GIF (V1.5.1) | `snaps`, `hist`, `p` |
 | `viz/stress.py` | 3D surface stress, granule isosurfaces, cell ellipsoids, evolution GIF (V1.5.2) | `snaps`, `hist`, `p` |
 | `viz/shapes.py` | Granule shape gallery (superellipses, superellipsoids) | `snaps`, `p` |
 | `viz/doe.py` | DOE statistical analysis & visualization | DOE `scan_dir` |
 | `viz/dimensionless.py` | β-collapse, Ca-scaling, jamming diagram, factor effects, phase space (V1.7) | DOE `scan_dir` |
+| `viz/scaffold_evolution.py` | 2D microstructure evolution timelapse for organ targets (V1.9) | `sweep_dir` |
+| `viz/scaffold_evolution_3d.py` | 3D volumetric evolution with PyVista per organ (V1.9) | `sweep_dir` |
+| `viz/energy_landscape.py` | Energy landscape per organ, time evolution, decomposition, design space (V1.11) | `sweep_dir` |
 
-### 4.2 Mathematical Analysis Scripts — `analysis/` package (V1.7)
+### 4.2 Mathematical Analysis Scripts — `analysis/` package (V1.12)
 
 | Script | Plots | Input |
 |--------|-------|-------|
-| `analysis/mean_field_model.py` | Model fit overlay, phase evolution, permeability evolution, stress balance | `run_dir` |
+| `analysis/mean_field_model.py` | Two-zone compaction fit, phase evolution, permeability, stress balance (V1.9) | `run_dir` |
+| `analysis/parameter_sweep.py` | 11-D LHS sweep, compaction heatmaps, organ landscapes, radial profiles (V1.10) | standalone |
+| `analysis/energy_landscape.py` | Free energy decomposition, kinetics, design space heatmaps (V1.11) | `sweep_dir` |
 | `analysis/coarse_grain.py` | Stress timeseries, strain rate, viscosity evolution, coordination number | `run_dir` |
 | `analysis/tissue_descriptors.py` | Descriptor summary, thickness distribution, S₂(r), pore size distribution | `run_dir` |
 | `analysis/arch_distance.py` | Distance radar, trajectory, heatmap, sensitivity, optimization landscape | `run_dir` or `scan_dir` |
-| `analysis/organ_targets.py` | Organ profile radar chart, organ comparison table | — |
+| `analysis/organ_targets.py` | Organ profile radar chart, organ comparison table, organ-specific phase mapping (V1.9) | — |
 
 All scripts: CLI (`-i input_dir`), importable (`run_all()`), matplotlib Agg backend.
 
@@ -400,13 +415,15 @@ Missing `"mode"` defaults to `"2D"`. See `Trial15_3D.json` for a flat format exa
 
 | File | Purpose |
 |------|---------|
-| `analysis/mean_field_model.py` | Mean-field ODE compaction model: dφ_f/dt = -φ_f(σ_cell - σ_resist)/η_eff. Motor-clutch cell stress, jamming resistance, bridge kinetics. Fits η_eff, σ_0, α to simulation/experimental data. |
+| `analysis/mean_field_model.py` | Volume-conserving two-zone ODE: dx_f/dt = -x_f(σ_cell - σ_resist)/η_eff. Motor-clutch cell stress, jamming resistance, bridge lock-in/secondary migration. Fits η_eff, σ_0, α to DEM data. (V1.9) |
+| `analysis/parameter_sweep.py` | 11-D Latin hypercube sweep with 1D radial PDE model. Organ distance prediction, design recommendations, jamming constraint. (V1.10) |
+| `analysis/energy_landscape.py` | Free energy landscape: 6 terms (cell, elastic, yield, void, inert, surface). Equilibrium, barrier, overdamped kinetics, dimensionless groups. (V1.11) |
 | `analysis/coarse_grain.py` | Coarse-graining: Love-Weber stress tensor from per-contact data, strain rate from velocity field, effective viscosity η_eff = σ_dev/(2ε̇_dev). Spatial fields via Gaussian weighting. |
-| `analysis/tissue_descriptors.py` | Tissue architecture descriptor vector from 3D phase fields: BV/TV, Tb.Th, Tb.Sp, SMI, Euler characteristic, MIL tensor (anisotropy), tortuosity (Laplace), two-point correlation S₂(r), chord length distribution, pore size distribution. |
-| `analysis/organ_targets.py` | Literature-based target descriptor vectors for 7 organ systems: trabecular bone, lung alveoli, liver, kidney cortex, cardiac muscle, pancreatic islet, intestinal mucosa. |
-| `analysis/arch_distance.py` | Weighted Mahalanobis-like architectural distance: D = sqrt(Σ w_k((d_k - μ_k)/σ_k)²) with log-transform on scale-dependent descriptors. Distance trajectories, DOE optimization, sensitivity analysis. |
-| `viz/dimensionless.py` | Dimensionless analysis across DOE runs. Computes β (motor-clutch engagement), Ca (cellular capillary number), jamming proximity. Data collapse plots, factor effects, phase space. |
-| `CodeLog/Architecture/MATHEMATICAL_MODEL.md` | Formal mathematical model document: microscale DEM equations, coarse-graining, continuum model, mean-field ODE, dimensionless analysis, tissue characterization. |
+| `analysis/tissue_descriptors.py` | Tissue architecture descriptor vector from 3D phase fields: BV/TV, Tb.Th, Tb.Sp, SMI, Euler characteristic, MIL tensor, tortuosity, S₂(r), pore size distribution. |
+| `analysis/organ_targets.py` | Target descriptor vectors for 7 organ systems with organ-specific phase mapping (perfusive_void_fraction). (V1.9) |
+| `analysis/arch_distance.py` | Weighted Mahalanobis-like architectural distance with log-transform on scale-dependent descriptors. Distance trajectories, DOE optimization, sensitivity. |
+| `viz/dimensionless.py` | Dimensionless analysis across DOE runs. Computes β, Ca, jamming proximity. Data collapse, factor effects, phase space. |
+| `CodeLog/Architecture/MATHEMATICAL_MODEL.md` | Formal mathematical model document: microscale DEM, coarse-graining, two-zone ODE, free energy landscape, dimensionless groups, tissue characterization. |
 
 ---
 
@@ -461,19 +478,23 @@ Power-law model predicts SLURM walltime from trial parameters:
 ## 7. Design Constraints and Assumptions
 
 1. **Three modes**: 2D, 2D-slice, and 3D. Default is 2D for backward compatibility.
-2. **Overdamped regime**: No inertial terms. Valid for cell-culture timescales
+2. **Two boundary modes** (V1.10): `"walls"` (rigid Hertzian walls, default) or `"periodic"`
+   (minimum image convention, cKDTree boxsize, position wrapping, no walls).
+3. **Overdamped regime**: No inertial terms. Valid for cell-culture timescales
    (hours) in viscous medium.
-3. **Rigid granules**: Granule shapes do not deform during simulation. Deformation
+4. **Rigid granules**: Granule shapes do not deform during simulation. Deformation
    effects captured through Hertz contact force and volume-conserving effective radii.
-4. **Hertz validity**: Contact model assumes small overlaps (delta/R < ~10%).
-5. **Random by default**: Seed is `None` (random) unless explicitly set. All randomness
+5. **Hertz validity**: Contact model assumes small overlaps (delta/R < ~10%).
+6. **Random by default**: Seed is `None` (random) unless explicitly set. All randomness
    flows through `numpy.random.Generator`.
-6. **Performance target**: 500-1000 granules in 3D with optional Numba JIT.
-7. **Rendering backends**: PyVista primary for 3D (high quality, off-screen capable),
+7. **Performance target**: 500-1000 granules in 3D with optional Numba JIT.
+8. **Rendering backends**: PyVista primary for 3D (high quality, off-screen capable),
    matplotlib fallback when PyVista unavailable.
-8. **Aggregate-authoritative cell state**: Per-granule aggregates (n_attached, etc.) are the
+9. **Aggregate-authoritative cell state**: Per-granule aggregates (n_attached, etc.) are the
    source of truth for force computation. Individual cell states are derived from aggregates.
    This ensures physics identical to V1.4.1.
+10. **Bridge lock-in** (V1.9): High-force bridges (F ≥ threshold) bypass senescence and
+    persist indefinitely. Secondary migration boosts bridge formation along existing bridges.
 
 ---
 

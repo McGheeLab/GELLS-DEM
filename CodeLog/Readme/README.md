@@ -114,7 +114,7 @@ The Young's modulus `E_modulus` controls how much granules overlap under cell fo
 
 ```
 GELLS-DEM/
-├── new_dem_0.py                 # Primary simulation engine (V1.8, no plotting)
+├── new_dem_0.py                 # Primary simulation engine (V1.12, no plotting)
 ├── run_hpc_headless.py          # HPC headless runner (supports 2D/3D)
 ├── run_all_trials.py            # Batch trial runner (local / SLURM array)
 ├── run_analysis_pipeline.py     # Full analysis pipeline orchestrator
@@ -129,18 +129,24 @@ GELLS-DEM/
 │   ├── phases.py                # Individual phase volumes
 │   ├── shapes.py                # Granule shape gallery
 │   ├── doe.py                   # DOE statistical analysis
-│   └── dimensionless.py         # Dimensionless analysis, data collapse
+│   ├── dimensionless.py         # Dimensionless analysis, data collapse
+│   ├── scaffold_evolution.py    # 2D microstructure evolution timelapse (V1.9)
+│   ├── scaffold_evolution_3d.py # 3D volumetric evolution, PyVista (V1.9)
+│   └── energy_landscape.py      # Energy landscape visualization (V1.11)
 ├── analysis/                    # Mathematical analysis package
-│   ├── mean_field_model.py      # Mean-field ODE compaction model
+│   ├── mean_field_model.py      # Two-zone compaction ODE (V1.9)
+│   ├── parameter_sweep.py       # 11-D LHS + 1D PDE sweep (V1.10)
+│   ├── energy_landscape.py      # Free energy landscape decomposition (V1.11)
 │   ├── coarse_grain.py          # Stress tensor, strain rate, viscosity
 │   ├── tissue_descriptors.py    # Tissue architecture descriptors
-│   ├── organ_targets.py         # Organ system target vectors
+│   ├── organ_targets.py         # Organ system target vectors + phase mapping (V1.9)
 │   └── arch_distance.py         # Architectural distance to organs
 ├── Trials/                      # Parameter sweep configs (DOE)
 │   ├── generate_doe.py          # DOE config generator
-│   └── DOE_01.json ... DOE_24.json
+│   └── default_trial.json       # Default V1.9 trial config
 ├── CodeLog/
 │   ├── Architecture/            # Architecture documents
+│   ├── Paper/                   # Publication manuscript (LaTeX)
 │   ├── Readme/README.md         # This file
 │   ├── References/              # Literature references
 │   └── Updates/CHANGELOG.md
@@ -187,15 +193,20 @@ run_all('results/default', skip={'movies','stress'}) # selective
 | `viz/shapes.py` | Granule shape gallery (superellipses, superellipsoids) |
 | `viz/doe.py` | DOE statistical analysis & visualization |
 | `viz/dimensionless.py` | Dimensionless analysis, data collapse by β/Ca |
+| `viz/scaffold_evolution.py` | 2D microstructure evolution timelapse for organ targets (V1.9) |
+| `viz/scaffold_evolution_3d.py` | 3D volumetric evolution with PyVista per organ (V1.9) |
+| `viz/energy_landscape.py` | Energy landscape per organ, time evolution, decomposition, design space (V1.11) |
 
 ### Mathematical Analysis (`analysis/`)
 
 | Module | Purpose |
 |--------|---------|
-| `analysis/mean_field_model.py` | Mean-field ODE compaction model with fitting |
+| `analysis/mean_field_model.py` | Volume-conserving two-zone compaction ODE with fitting (V1.9) |
+| `analysis/parameter_sweep.py` | 11-D Latin hypercube sweep with 1D PDE, organ prediction (V1.10) |
+| `analysis/energy_landscape.py` | Free energy landscape decomposition (6 terms) with kinetics (V1.11) |
 | `analysis/coarse_grain.py` | Stress tensor, strain rate, viscosity from DEM |
 | `analysis/tissue_descriptors.py` | Tissue architecture descriptor vector |
-| `analysis/organ_targets.py` | Organ system target vectors (7 organs) |
+| `analysis/organ_targets.py` | Organ system target vectors (7 organs) with phase mapping (V1.9) |
 | `analysis/arch_distance.py` | Architectural distance to organ targets |
 
 All visualization scripts support PyVista (primary) with matplotlib fallback.

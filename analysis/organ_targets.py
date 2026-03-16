@@ -110,6 +110,10 @@ ORGAN_TARGETS = {
             'Odgaard 1997 (Bone)',
             'Parfitt et al. 1987 (JBMR)',
         ],
+        # Fraction of non-tissue void that is perfusive (liquid-filled channels).
+        # Trabecular bone: marrow cavities are structural voids; only small
+        # canalicular/Haversian flow is perfusive.
+        'perfusive_void_fraction': 0.10,
     },
 
     # ------------------------------------------------------------------
@@ -167,6 +171,9 @@ ORGAN_TARGETS = {
             'Hsia et al. 2010 (Compr Physiol)',
             'Weibel 2009 (Swiss Med Wkly)',
         ],
+        # Lung: alveolar sacs are air-filled (structural void = phi_i).
+        # Only thin-wall capillaries are perfusive (phi_v).
+        'perfusive_void_fraction': 0.05,
     },
 
     # ------------------------------------------------------------------
@@ -223,6 +230,9 @@ ORGAN_TARGETS = {
             'Debbaut et al. 2014 (J Anat)',
             'Teutsch 2005 (Anat Rec)',
         ],
+        # Liver: sinusoidal channels are blood-filled (perfusive = phi_v).
+        # Minimal structural void — nearly all porosity is vascular.
+        'perfusive_void_fraction': 0.90,
     },
 
     # ------------------------------------------------------------------
@@ -279,6 +289,9 @@ ORGAN_TARGETS = {
             'Layton 2014 (Math Biosci)',
             'Kriz & Kaissling 2008 (Seldin & Giebisch)',
         ],
+        # Kidney cortex: peritubular capillaries and tubular lumens contain
+        # filtrate/blood (perfusive). Some interstitial space is structural.
+        'perfusive_void_fraction': 0.70,
     },
 
     # ------------------------------------------------------------------
@@ -335,6 +348,9 @@ ORGAN_TARGETS = {
             'LeGrice et al. 2001 (Am J Physiol Heart Circ Physiol)',
             'Sands et al. 2005 (Microsc Res Tech)',
         ],
+        # Cardiac muscle: dense capillary network dominates the void space.
+        # Endomysial connective tissue is a small structural component.
+        'perfusive_void_fraction': 0.85,
     },
 
     # ------------------------------------------------------------------
@@ -392,6 +408,9 @@ ORGAN_TARGETS = {
             'Cabrera et al. 2006 (PNAS)',
             'Brissova et al. 2005 (J Histochem Cytochem)',
         ],
+        # Pancreatic islet: inter-islet exocrine space is structural void.
+        # Intra-islet vasculature provides some perfusive fraction.
+        'perfusive_void_fraction': 0.30,
     },
 
     # ------------------------------------------------------------------
@@ -448,6 +467,9 @@ ORGAN_TARGETS = {
             'Helander & Fandriks 2014 (Scand J Gastroenterol)',
             'Marsh 1992 (Gut)',
         ],
+        # Intestinal mucosa: crypt/villus lumen is air/chyme (structural void).
+        # Submucosal vasculature provides small perfusive fraction.
+        'perfusive_void_fraction': 0.15,
     },
 }
 
