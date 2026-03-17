@@ -8,6 +8,97 @@ MINOR tracks feature additions and improvements.
 
 ---
 
+## [V2.2] - 2026-03-16
+
+### Added
+- **Multi-Contact DEM (MC-DEM) stiffening** (`new_dem_0.py`): Stress-based multi-contact
+  correction for Hertzian contact forces (Giannis et al. 2021). When a soft granule has
+  multiple simultaneous contacts, each contact sees a stiffer response due to volumetric
+  confinement. Computes per-particle overlap strain ε_V = Σ δ/(2R), then scales Hertz
+  repulsion by κ = 1 + ν/(1−2ν) × ε_V. For hydrogels at ν=0.49, this gives ≈2× stiffening
+  for typical jammed packings (7 contacts at 1% overlap). Adhesion and friction unaffected.
+  New function `mc_dem_correction()` applied as post-correction in both 2D `compute_forces()`
+  and 3D `compute_forces_3d()`. New Params: `mc_dem_enabled=True`, `mc_dem_kappa_max=5.0`.
+- **Comprehensive literature references** (`CodeLog/References/REFERENCES.md`): Added §20
+  (superellipsoid packing & jamming: Donev 2004, Delaney/Cleary 2010, Yuan/O'Hern 2019,
+  Jiao/Torquato 2009/2010), §21 (MC-DEM: Giannis 2021, Brodu 2015, Ghods 2022, Hirsch 2022),
+  §22 (contact detection: Wellmann 2008, Canelas 2025, Lai 2022/2024, Gouveia 2025, Feng 2023),
+  §23 (deformable DEM future: Rojek 2018/2021, Henzel/Karapiperis 2026, Feng 2025).
+- **V3.0 LS-DEM upgrade roadmap** (`CodeLog/ClaudesPlan/V2.2_mc_dem_and_future_ls_dem.md`):
+  Phased plan for deformable particle simulation via variational level-set DEM
+  (Henzel & Karapiperis 2026). Four phases: SDF contact → level-set representation →
+  deformation DOFs → new contact formation.
+
+---
+
+## [V2.1] - 2026-03-16
+
+### Added
+- **Cell surface coverage parameter** (`new_dem_0.py`): New `Params.cell_surface_coverage`
+  (float, 0.5–1.5 typical) specifies cell loading as a fraction of granule surface area.
+  At coverage=1.0 cells form a full monolayer; values >1.0 allow stacking (cells on top
+  of each other). When set (>0), overrides `n_cells_per_granule` and `cell_coverage`.
+  New helper `cells_from_surface_coverage()` computes per-granule cell count from 3D
+  surface area (4piR^2) or 2D projected area (piR^2). Packing and overcrowding logic
+  both respect the new parameter.
+- **Two-stage adaptive DOE** (`Trials/generate_doe.py`, `Trials/generate_doe_stage2.py`):
+  Replaced 5^7=78,125 full factorial with a two-stage adaptive strategy.
+  - **Stage 1** (`generate_doe.py`): 500-run maximin Latin Hypercube Sampling across 7
+    continuous factors: E_modulus (2–50 kPa), phi_solid_target (0.55–0.85), func_ratio
+    (0.2–1.0), cell_surface_coverage (0.5–1.5), cell_sense_distance (20–80 µm),
+    R_func_mean (30–150 µm), R_inert_mean (30–150 µm). ~9k CPU-hours (6% Puma monthly).
+  - **Stage 2** (`generate_doe_stage2.py`): ~300 adaptive refinement runs generated after
+    Stage 1 analysis. Fits quadratic response surfaces, computes variance-based sensitivity
+    indices, and allocates points via four strategies: near-optimal (35%), steep-gradient
+    (25%), high-uncertainty (20%), space-filling (20%). ~5.4k CPU-hours (4% Puma monthly).
+  - Total budget: ~800 runs, ~14.4k CPU-hours (10% monthly allocation) vs 78,125 runs prior.
+- **Tissue volume tracking** (`analysis/parameter_sweep.py`): New spatially-resolved state
+  variable `phi_tissue(xi, t)` tracks cell + ECM volume fraction that grows within the
+  functional zone of the scaffold. Cells adhered to functional granules occupy void space,
+  and bridges between granules scaffold further tissue growth.
+  - **Logistic growth ODE**: `d(phi_tissue)/dt = k_tissue × min(1, n_cells/n_ref) × maturity(t)
+    × max(alpha_0, f_bridge × neighbor_factor) × max(0, alpha_fill × phi_void − phi_tissue)`.
+    Driven by cell count, FA maturity, and bridge formation. No feedback into compaction
+    mechanics (tissue is soft).
+  - **TISSUE_PARAMS**: `k_tissue=0.05 h⁻¹` (base rate), `alpha_tissue_fill=0.6` (max void
+    fill fraction), `alpha_tissue_0=0.1` (minimum growth without bridges),
+    `n_cells_tissue_ref=10.0` (reference cell count).
+  - **Tissue-corrected architecture descriptors**: `BV_TV_eff = phi_f + phi_tissue_global`,
+    `porosity_eff = 1 − BV_TV_eff`, `K_f_tissue` via Kozeny-Carman with tissue-reduced void.
+    Organ distance computation now uses these corrected values.
+  - **Updated `_integrate_trajectory()`**: Returns 6-tuple (added tissue_traj, tissue_spatial)
+    for single-sample kinetics visualization.
+  - **Updated plots**: `plot_best_kinetics()` expanded to 1×3 panels (tissue volume vs time),
+    `plot_radial_profiles()` expanded to 1×3 panels (tissue spatial profile).
+  - **New `plot_tissue_effects()`**: 2×2 figure — (a) BV_TV_eff vs phi_f, (b) K_f_tissue vs
+    K_f, (c) phi_tissue vs n_cells, (d) phi_tissue vs func_ratio.
+  - **Updated recommendation table**: Added phi_tissue_global and BV_TV_eff columns.
+  - **Updated radar chart**: Uses BV_TV_eff, porosity_eff, K_eff_tissue for organ comparison.
+  - **Physical insight**: `n_cells_per_func` now affects architecture (not just compaction
+    force). Dense organs (cardiac, liver) match better with tissue; porous organs (lung, bone)
+    require few cells to avoid over-filling void space.
+- **Lubachevsky-Stillinger jammed packing** (`new_dem_0.py`): Rewrote 3D packing initialization
+  to guarantee fully jammed initial state (Z ≈ 6–8 contacts/granule). RSA places granules at
+  deflated radii (α ≈ 0.6–0.7), then inflate-and-relax algorithm grows them to target size
+  over 400 steps × 15 sub-steps with vectorized Hertz-like repulsion. Quadratic ease-in
+  inflation schedule spends more time near final size where jamming is hardest. Replaces old
+  centripetal-attraction approach that couldn't achieve high packing fractions.
+  - New Params: `packing_inflate_phi_safe=0.20` (initial deflated packing fraction for RSA).
+  - Updated defaults: `packing_settle_steps=400`, `packing_relax_substeps=15`.
+- **Persistent bridge lock-in** (`new_dem_0.py`): Bridges that exceed `bridge_lock_force_threshold`
+  now set a persistent `cell_bridge_locked` boolean flag. Once locked, bridges persist
+  indefinitely regardless of instantaneous force fluctuations. Previously, force drops below
+  threshold on any timestep would reset lock status, causing unrealistic bridge cycling.
+  Lock flag is reset only on gap rupture (bridge physically breaks). Serialized in snapshots.
+
+### Bug Fixes
+- **Periodic boundary bridge visualization** (`viz/cells.py`): Fixed `_nearest_surface_point()`
+  to apply minimum image convention when computing bridge target surface points. Previously,
+  bridges crossing periodic boundaries were drawn spanning the entire domain width. Now correctly
+  renders short bridges that visually terminate at domain edges.
+
+---
+
 ## [V1.12] - 2026-03-16
 
 ### Documentation

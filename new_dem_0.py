@@ -101,6 +101,7 @@ class Params:
     cell_diameter: float = 20.0     # µm, initial spherical cell diameter
     cell_height_spread: float = 5.0 # µm, height of spread ellipsoidal cell
     cell_coverage: float = 0.6      # max fraction of granule projected area covered
+    cell_surface_coverage: float = 0.0  # target surface coverage fraction (0=use n_cells_per_granule; 0.5–1.5 typical; >1 = stacking)
 
     # ── Cell attachment & spreading timeline ──
     t_attach_onset: float = 0.0     # hours, when cells begin attaching
@@ -135,9 +136,11 @@ class Params:
     bridge_secondary_rate_mult: float = 3.0    # rate multiplier for new bridges when existing bridge present
     expected_bridge_force: float = 100.0       # nN, expected force per bridging cell (diagnostic reference)
 
-    # ── Contact mechanics (Hertzian) ──
+    # ── Contact mechanics (Hertzian + MC-DEM) ──
     E_modulus: float = 10.0         # kPa, Young's modulus of hydrogel
     poisson_ratio: float = 0.45     # Poisson's ratio (hydrogels ~0.4-0.5)
+    mc_dem_enabled: bool = True     # enable multi-contact DEM stiffening (Giannis 2021)
+    mc_dem_kappa_max: float = 5.0   # max confinement correction factor (caps stiffening)
 
     # ── Hydrogel friction (area-dependent, Gong 2006 / Pitenis 2014) ──
     tau_0_ii: float = 50.0          # Pa, inert-inert shear stress (bare Gemini gel)
@@ -190,7 +193,9 @@ class Params:
     # ── Packing ──
     packing_gap: float = 0.0        # µm, min gap between granule surfaces at placement
     boundary_exclusion: float = 0.2  # fraction of domain excluded from each edge for metrics
-    packing_settle_steps: int = 200  # compression micro-steps after RSA to achieve contact
+    packing_settle_steps: int = 400  # inflation steps to reach target radii (jammed packing)
+    packing_relax_substeps: int = 15  # overlap relaxation sub-steps per inflation step
+    packing_inflate_phi_safe: float = 0.20  # initial deflated packing fraction for RSA
 
     # ── Rendering ──
     Ngrid: int = 200                # grid for 2D field rendering
@@ -342,6 +347,7 @@ class GranuleSystem:
         self.cell_bridge_target = np.full(total_cells, -1, dtype=int)      # bridge target (-1=none)
         self.cell_contact_area = np.zeros(total_cells, dtype=np.float64)   # footprint area (µm²)
         self.cell_bridge_age = np.zeros(total_cells, dtype=np.float64)     # hours in bridge state
+        self.cell_bridge_locked = np.zeros(total_cells, dtype=np.bool_)    # persistent lock-in flag
 
     def positions(self):
         if self.mode == "3D":
@@ -633,6 +639,61 @@ def hertz_contact_force(E_star_Pa, R_eff_um, delta_um):
         F_nN = (4/3) · E*_Pa · √(R*_µm) · δ_µm^{3/2} · 10⁻³
     """
     return (4.0 / 3.0) * E_star_Pa * np.sqrt(R_eff_um) * delta_um**1.5 * 1e-3
+
+
+def mc_dem_correction(contacts, gs, p, E_star_gg, F):
+    """Apply MC-DEM multi-contact stiffening correction (Giannis et al. 2021).
+
+    When a soft particle has multiple contacts, each contact sees a stiffer
+    response due to volumetric confinement.  The correction factor per particle:
+
+        ε_V,i = Σ_c δ_c / (2 R_i)           volumetric overlap strain
+        κ_i   = 1 + ν/(1-2ν) · ε_V,i        confinement multiplier
+
+    For each contact between i,j the Hertz repulsion is scaled by
+    κ_ij = (κ_i + κ_j)/2.  Only the repulsive (Hertz) component is scaled;
+    adhesion and friction are left unchanged.
+
+    Works for both 2D (F shape N×2) and 3D (F shape N×3).
+    """
+    N = gs.N
+    if len(contacts) == 0:
+        return
+    ndim = F.shape[1]  # 2 or 3
+
+    # Per-particle volumetric overlap strain
+    eps_V = np.zeros(N)
+    for c in contacts:
+        delta = c['overlap']
+        if delta > 0:
+            eps_V[c['i']] += delta / (2.0 * gs.r[c['i']])
+            eps_V[c['j']] += delta / (2.0 * gs.r[c['j']])
+
+    # Confinement correction factor: κ = 1 + ν/(1−2ν) · ε_V
+    nu = p.poisson_ratio
+    c_mc = nu / max(1.0 - 2.0 * nu, 0.01)
+    kappa = np.minimum(1.0 + c_mc * eps_V, p.mc_dem_kappa_max)
+
+    # Apply correction to Hertzian component of each contact
+    for c in contacts:
+        delta = c['overlap']
+        if delta <= 0:
+            continue
+        i, j = c['i'], c['j']
+        kappa_ij = 0.5 * (kappa[i] + kappa[j])
+        if kappa_ij < 1.001:
+            continue
+        Fc_hertz = hertz_contact_force(E_star_gg, c['R_eff'], delta)
+        dF = (kappa_ij - 1.0) * Fc_hertz
+        if ndim == 3:
+            n = np.array([c['nx'], c['ny'], c['nz']])
+        else:
+            n = np.array([c['nx'], c['ny']])
+        F[i] -= dF * n
+        F[j] += dF * n
+        # Update stored contact force for visualization
+        c['F_normal'] += dF
+        c['kappa'] = kappa_ij
 
 
 def get_pair_friction_params(gtype_i, gtype_j, p: Params):
@@ -1145,6 +1206,23 @@ def max_cells_on_granule(R, cell_proj_area, coverage):
     return max(1, int(A_granule * coverage / cell_proj_area))
 
 
+def cells_from_surface_coverage(R, cell_d, cell_h, coverage, mode="3D"):
+    """Compute number of cells for a target surface coverage fraction.
+
+    coverage = 1.0 is a full monolayer of spread cells; >1.0 means stacking.
+    Uses the fully-spread cell footprint as the reference area.
+
+    3D/2D-slice: uses sphere surface area 4πR².
+    2D:          uses projected disk area πR².
+    """
+    A_cell_spread = cell_projected_area(1.0, cell_d, cell_h)
+    if mode in ("3D", "2D-slice"):
+        A_surface = 4.0 * np.pi * R ** 2
+    else:
+        A_surface = np.pi * R ** 2
+    return max(1, int(round(A_surface * coverage / A_cell_spread)))
+
+
 def motor_clutch_force(E_kPa, p: Params, fa_maturity_val):
     """
     Steady-state traction force per cell from the motor-clutch model.
@@ -1237,7 +1315,12 @@ def update_cell_state(gs: GranuleSystem, p: Params, t: float, rng=None):
         # ── Overcrowding check ──
         A_cell = cell_projected_area(
             gs.spread_fraction[i], p.cell_diameter, p.cell_height_spread)
-        cap = max_cells_on_granule(gs.r[i], A_cell, p.cell_coverage)
+        if p.cell_surface_coverage > 0:
+            cap = cells_from_surface_coverage(
+                gs.r[i], p.cell_diameter, p.cell_height_spread,
+                p.cell_surface_coverage, p.mode)
+        else:
+            cap = max_cells_on_granule(gs.r[i], A_cell, p.cell_coverage)
         gs.n_overcrowded[i] = max(0.0, gs.n_attached[i] - cap)
 
     # ── V1.5: Per-cell state tracking ──
@@ -1283,14 +1366,20 @@ def _update_individual_cells(gs: GranuleSystem, p: Params, rng=None):
                 # Check force magnitude from previous timestep (still in cell_fx/fy/fz)
                 F_mag = np.sqrt(gs.cell_fx[ci]**2 + gs.cell_fy[ci]**2
                                 + gs.cell_fz[ci]**2)
-                # High-force bridges lock in: cell prefers to stay bridging
+                # Persistent lock-in: once force exceeds threshold, bridge is
+                # permanently locked and immune to senescence (even if force
+                # drops later due to rearrangement).  Only gap rupture can
+                # break a locked bridge.
                 if F_mag >= p.bridge_lock_force_threshold:
-                    continue  # locked in, skip senescence check
+                    gs.cell_bridge_locked[ci] = True
+                if gs.cell_bridge_locked[ci]:
+                    continue  # locked in permanently, skip senescence check
                 # Sustained mechanical load without lock-in → senescence
                 if gs.cell_bridge_age[ci] >= p.bridge_senescence_time:
                     gs.cell_state[ci] = int(CellState.SENESCENT)
                     gs.cell_bridge_target[ci] = -1
                     gs.cell_bridge_age[ci] = 0.0
+                    gs.cell_bridge_locked[ci] = False
                 continue  # don't overwrite bridge state
 
             # ── Already senescent stays senescent ──
@@ -1433,107 +1522,183 @@ def _settle_packing_2d(gs, p):
 
 
 def _settle_packing_3d(gs, p):
-    """Run short isotropic compression micro-steps for 3D packing.
+    """Inflate granules from deflated RSA state to target radii (Lubachevsky-Stillinger).
 
-    Same algorithm as 2D but with z-coordinate.
-    For periodic boundaries, uses random jitter instead of centripetal
-    attraction and wraps positions.
+    The system starts with all granules at reduced radii (set by generate_packing_3d).
+    Target radii are stored in gs._target_a/b/c/r.  This function:
+      1. Linearly inflates radii from current to target over packing_settle_steps.
+      2. At each inflation step, runs packing_relax_substeps of overlap relaxation
+         using vectorised Hertz-like repulsion.
+      3. For wall BCs, also applies centripetal attraction.
+    Result: a jammed packing at the target solid fraction with Z ≈ 4–6.
     """
     N = gs.N
     periodic = (p.boundary_mode == 'periodic')
-    cx_dom = p.Lx / 2
-    cy_dom = p.Ly / 2
-    cz_dom = p.Lz / 2
+    Lx, Ly, Lz = p.Lx, p.Ly, p.Lz
+    n_inflate = p.packing_settle_steps
+    n_relax = p.packing_relax_substeps
     dt_settle = 0.02
-    repulsion_k = 2.0
+    k_rep = 5.0        # Hertzian repulsion stiffness
+    v_cap_frac = 0.3   # max displacement per sub-step = v_cap_frac * mean_r
 
-    print(f"  Settling 3D packing ({p.packing_settle_steps} steps)...", end="", flush=True)
+    # Retrieve target radii stored by generate_packing_3d
+    target_a = getattr(gs, '_target_a', gs.a.copy())
+    target_b = getattr(gs, '_target_b', gs.b.copy())
+    target_c = getattr(gs, '_target_c', gs.c.copy())
+    target_r = getattr(gs, '_target_r', gs.r.copy())
 
-    rng_settle = np.random.default_rng(12345)
+    # Compute initial deflation factor from current vs target
+    ratio = gs.r[:N] / np.maximum(target_r[:N], 1e-6)
+    alpha_start = float(np.median(ratio))
+    alpha_start = max(alpha_start, 0.1)
 
-    for step_i in range(p.packing_settle_steps):
-        pos = gs.positions()  # (N, 3)
-        fx = np.zeros(N)
-        fy = np.zeros(N)
-        fz = np.zeros(N)
+    mean_r_target = float(np.mean(target_r[:N]))
+    v_cap = v_cap_frac * mean_r_target
 
-        if periodic:
-            jitter = 0.3 * max(0.5 * (1.0 - step_i / p.packing_settle_steps), 0.05)
-            fx += jitter * rng_settle.standard_normal(N)
-            fy += jitter * rng_settle.standard_normal(N)
-            fz += jitter * rng_settle.standard_normal(N)
-        else:
-            # Centripetal attraction
-            attract = max(0.5 * (1.0 - step_i / p.packing_settle_steps), 0.05)
-            for i in range(N):
-                dx = cx_dom - pos[i, 0]
-                dy = cy_dom - pos[i, 1]
-                dz = cz_dom - pos[i, 2]
-                d = np.sqrt(dx*dx + dy*dy + dz*dz) + 1e-12
-                scale = attract * gs.r_bound[i] / d
-                fx[i] += scale * dx
-                fy[i] += scale * dy
-                fz[i] += scale * dz
+    print(f"  Settling 3D packing ({n_inflate} inflate × {n_relax} relax, "
+          f"α={alpha_start:.2f}→1.00)...")
 
-        # Pairwise repulsion
-        if periodic:
-            tree = cKDTree(pos, boxsize=[p.Lx, p.Ly, p.Lz])
-        else:
-            tree = cKDTree(pos)
-        max_rb = float(np.max(gs.r_bound))
-        pairs = tree.query_pairs(2 * max_rb, output_type='ndarray')
-        for idx in range(len(pairs)):
-            i, j = pairs[idx]
-            dx = pos[j, 0] - pos[i, 0]
-            dy = pos[j, 1] - pos[i, 1]
-            dz = pos[j, 2] - pos[i, 2]
+    cx_dom, cy_dom, cz_dom = Lx / 2, Ly / 2, Lz / 2
+
+    for step in range(n_inflate):
+        # Quadratic ease-in: spend more time near α=1 where jamming is hard
+        t = (step + 1) / n_inflate
+        alpha = alpha_start + (1.0 - alpha_start) * (1.0 - (1.0 - t)**2)
+
+        # Inflate radii
+        gs.a[:N] = target_a[:N] * alpha
+        gs.b[:N] = target_b[:N] * alpha
+        gs.c[:N] = target_c[:N] * alpha
+        gs.r[:N] = target_r[:N] * alpha
+        gs.r_bound[:N] = np.maximum(np.maximum(gs.a[:N], gs.b[:N]), gs.c[:N])
+
+        max_rb = float(np.max(gs.r_bound[:N]))
+
+        # Overlap relaxation sub-loop
+        for sub in range(n_relax):
+            pos = gs.positions()
+            fx = np.zeros(N)
+            fy = np.zeros(N)
+            fz = np.zeros(N)
+
+            # Wall BCs: centripetal attraction (decays over inflation)
+            if not periodic:
+                attract = max(0.3 * (1.0 - t), 0.02)
+                dx_c = cx_dom - pos[:, 0]
+                dy_c = cy_dom - pos[:, 1]
+                dz_c = cz_dom - pos[:, 2]
+                d_c = np.sqrt(dx_c**2 + dy_c**2 + dz_c**2) + 1e-12
+                scale = attract * gs.r_bound[:N] / d_c
+                fx += scale * dx_c
+                fy += scale * dy_c
+                fz += scale * dz_c
+
+            # Neighbour search
             if periodic:
-                dx, dy, dz = minimum_image_disp_3d(
-                    dx, dy, dz, p.Lx, p.Ly, p.Lz)
-            d = np.sqrt(dx*dx + dy*dy + dz*dz) + 1e-12
-            overlap = gs.r_bound[i] + gs.r_bound[j] - d
-            if overlap > 0:
-                nx, ny, nz = dx / d, dy / d, dz / d
-                f_rep = repulsion_k * overlap
-                fx[i] -= f_rep * nx; fy[i] -= f_rep * ny; fz[i] -= f_rep * nz
-                fx[j] += f_rep * nx; fy[j] += f_rep * ny; fz[j] += f_rep * nz
+                tree = cKDTree(pos, boxsize=[Lx, Ly, Lz])
+            else:
+                tree = cKDTree(pos)
+            pairs = tree.query_pairs(2 * max_rb, output_type='ndarray')
 
-        # Move
-        gs.x += fx * dt_settle
-        gs.y += fy * dt_settle
-        gs.z += fz * dt_settle
+            max_overlap = 0.0
+            if len(pairs) > 0:
+                pi = pairs[:, 0]
+                pj = pairs[:, 1]
+                dx = pos[pj, 0] - pos[pi, 0]
+                dy = pos[pj, 1] - pos[pi, 1]
+                dz = pos[pj, 2] - pos[pi, 2]
+                if periodic:
+                    dx -= Lx * np.round(dx / Lx)
+                    dy -= Ly * np.round(dy / Ly)
+                    dz -= Lz * np.round(dz / Lz)
+                d = np.sqrt(dx*dx + dy*dy + dz*dz) + 1e-12
+                overlap = gs.r_bound[pi] + gs.r_bound[pj] - d
+                mask = overlap > 0
+                if np.any(mask):
+                    ov = overlap[mask]
+                    max_overlap = float(np.max(ov))
+                    inv_d = 1.0 / d[mask]
+                    nx = dx[mask] * inv_d
+                    ny = dy[mask] * inv_d
+                    nz = dz[mask] * inv_d
+                    f = k_rep * ov ** 1.5
+                    np.add.at(fx, pi[mask], -f * nx)
+                    np.add.at(fy, pi[mask], -f * ny)
+                    np.add.at(fz, pi[mask], -f * nz)
+                    np.add.at(fx, pj[mask],  f * nx)
+                    np.add.at(fy, pj[mask],  f * ny)
+                    np.add.at(fz, pj[mask],  f * nz)
 
-        # Boundary handling
-        if periodic:
-            gs.x[:N] %= p.Lx
-            gs.y[:N] %= p.Ly
-            gs.z[:N] %= p.Lz
-        else:
-            for i in range(N):
-                rb = gs.r_bound[i]
-                gs.x[i] = np.clip(gs.x[i], rb, p.Lx - rb)
-                gs.y[i] = np.clip(gs.y[i], rb, p.Ly - rb)
-                gs.z[i] = np.clip(gs.z[i], rb, p.Lz - rb)
+            # Overdamped move with velocity cap
+            f_mag = np.sqrt(fx*fx + fy*fy + fz*fz) + 1e-12
+            scale = np.minimum(dt_settle, v_cap / f_mag)
+            gs.x[:N] += fx * scale
+            gs.y[:N] += fy * scale
+            gs.z[:N] += fz * scale
 
-    # Count contacts
+            # Boundary handling
+            if periodic:
+                gs.x[:N] %= Lx
+                gs.y[:N] %= Ly
+                gs.z[:N] %= Lz
+            else:
+                rb = gs.r_bound[:N]
+                gs.x[:N] = np.clip(gs.x[:N], rb, Lx - rb)
+                gs.y[:N] = np.clip(gs.y[:N], rb, Ly - rb)
+                gs.z[:N] = np.clip(gs.z[:N], rb, Lz - rb)
+
+            # Early exit if overlaps are small
+            if max_overlap < 0.01 * mean_r_target:
+                break
+
+        # Progress
+        if step % 100 == 0 or step == n_inflate - 1:
+            # Count contacts
+            pos = gs.positions()
+            if periodic:
+                tree = cKDTree(pos, boxsize=[Lx, Ly, Lz])
+            else:
+                tree = cKDTree(pos)
+            cpairs = tree.query_pairs(2 * max_rb + 1.0, output_type='ndarray')
+            n_contacts = 0
+            if len(cpairs) > 0:
+                pi_c, pj_c = cpairs[:, 0], cpairs[:, 1]
+                dx_c = pos[pj_c, 0] - pos[pi_c, 0]
+                dy_c = pos[pj_c, 1] - pos[pi_c, 1]
+                dz_c = pos[pj_c, 2] - pos[pi_c, 2]
+                if periodic:
+                    dx_c -= Lx * np.round(dx_c / Lx)
+                    dy_c -= Ly * np.round(dy_c / Ly)
+                    dz_c -= Lz * np.round(dz_c / Lz)
+                d_c = np.sqrt(dx_c**2 + dy_c**2 + dz_c**2)
+                gaps = d_c - gs.r_bound[pi_c] - gs.r_bound[pj_c]
+                n_contacts = int(np.sum(gaps < 1.0))
+            Z = 2 * n_contacts / max(N, 1)
+            print(f"    step {step}/{n_inflate}: α={alpha:.3f}, "
+                  f"max_overlap={max_overlap:.1f} µm, Z={Z:.1f}")
+
+    # Final contact count
     pos = gs.positions()
     if periodic:
-        tree = cKDTree(pos, boxsize=[p.Lx, p.Ly, p.Lz])
+        tree = cKDTree(pos, boxsize=[Lx, Ly, Lz])
     else:
         tree = cKDTree(pos)
-    pairs = tree.query_pairs(2 * float(np.max(gs.r_bound)) + 1.0, output_type='ndarray')
+    cpairs = tree.query_pairs(2 * float(np.max(gs.r_bound[:N])) + 1.0, output_type='ndarray')
     n_contacts = 0
-    for idx in range(len(pairs)):
-        i, j = pairs[idx]
-        dv = pos[j] - pos[i]
+    if len(cpairs) > 0:
+        pi_c, pj_c = cpairs[:, 0], cpairs[:, 1]
+        dx_c = pos[pj_c, 0] - pos[pi_c, 0]
+        dy_c = pos[pj_c, 1] - pos[pi_c, 1]
+        dz_c = pos[pj_c, 2] - pos[pi_c, 2]
         if periodic:
-            dv[0], dv[1], dv[2] = minimum_image_disp_3d(
-                dv[0], dv[1], dv[2], p.Lx, p.Ly, p.Lz)
-        d = np.sqrt(np.dot(dv, dv))
-        gap = d - gs.r_bound[i] - gs.r_bound[j]
-        if gap < 1.0:
-            n_contacts += 1
-    print(f" done ({n_contacts} contacts, {n_contacts/max(N,1):.1f}/granule avg)")
+            dx_c -= Lx * np.round(dx_c / Lx)
+            dy_c -= Ly * np.round(dy_c / Ly)
+            dz_c -= Lz * np.round(dz_c / Lz)
+        d_c = np.sqrt(dx_c**2 + dy_c**2 + dz_c**2)
+        gaps = d_c - gs.r_bound[pi_c] - gs.r_bound[pj_c]
+        n_contacts = int(np.sum(gaps < 1.0))
+    Z = 2 * n_contacts / max(N, 1)
+    print(f"  done ({n_contacts} contacts, Z={Z:.1f}/granule)")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1668,13 +1833,18 @@ def generate_packing(p: Params, seed=42) -> GranuleSystem:
         if not placed:
             pass  # skip if can't place
 
-    # Compute cells per granule (projected-area limited)
+    # Compute cells per granule
     n_cells = []
     A_cell_sphere = cell_projected_area(0.0, p.cell_diameter, p.cell_height_spread)
     for i in range(len(xs)):
         if types[i] == 0:
-            cap = max_cells_on_granule(rs[i], A_cell_sphere, p.cell_coverage)
-            nc = min(p.n_cells_per_granule, cap)
+            if p.cell_surface_coverage > 0:
+                nc = cells_from_surface_coverage(
+                    rs[i], p.cell_diameter, p.cell_height_spread,
+                    p.cell_surface_coverage, p.mode)
+            else:
+                cap = max_cells_on_granule(rs[i], A_cell_sphere, p.cell_coverage)
+                nc = min(p.n_cells_per_granule, cap)
             n_cells.append(nc)
         else:
             n_cells.append(0)
@@ -1729,6 +1899,19 @@ def generate_packing_3d(p: Params, seed=42) -> GranuleSystem:
     n1_list, n2_list = [], []
     quat_list = []
     gap = p.packing_gap
+
+    # Compute deflation factor for RSA placement (Lubachevsky-Stillinger).
+    # Place granules at reduced bounding radii so RSA can achieve the target
+    # count, then inflate-and-relax to the target packing fraction.
+    phi_target = p.phi_f_target + p.phi_i_target
+    if phi_target > 0.05 and p.packing_settle_steps > 0:
+        alpha_deflate = (p.packing_inflate_phi_safe / max(phi_target, 0.01)) ** (1.0 / 3.0)
+        alpha_deflate = float(np.clip(alpha_deflate, 0.3, 1.0))
+    else:
+        alpha_deflate = 1.0
+    if alpha_deflate < 1.0:
+        print(f"  RSA deflation: α={alpha_deflate:.3f} "
+              f"(φ_safe={p.packing_inflate_phi_safe:.2f}, φ_target={phi_target:.3f})")
 
     # Interleave placement
     order = []
@@ -1801,7 +1984,7 @@ def generate_packing_3d(p: Params, seed=42) -> GranuleSystem:
                     dx, dy, dz = minimum_image_disp_3d(
                         dx, dy, dz, p.Lx, p.Ly, p.Lz)
                 rj_b = max(a_list[j], b_list[j], c_list[j])
-                if dx*dx + dy*dy + dz*dz < (r_bound_val + rj_b + gap)**2:
+                if dx*dx + dy*dy + dz*dz < ((r_bound_val + rj_b) * alpha_deflate + gap)**2:
                     ok = False; break
             if ok:
                 xs.append(cx); ys.append(cy); zs.append(cz)
@@ -1818,8 +2001,13 @@ def generate_packing_3d(p: Params, seed=42) -> GranuleSystem:
     A_cell_sphere = cell_projected_area(0.0, p.cell_diameter, p.cell_height_spread)
     for i in range(len(xs)):
         if types[i] == 0:
-            cap = max_cells_on_granule(rs[i], A_cell_sphere, p.cell_coverage)
-            nc = min(p.n_cells_per_granule, cap)
+            if p.cell_surface_coverage > 0:
+                nc = cells_from_surface_coverage(
+                    rs[i], p.cell_diameter, p.cell_height_spread,
+                    p.cell_surface_coverage, p.mode)
+            else:
+                cap = max_cells_on_granule(rs[i], A_cell_sphere, p.cell_coverage)
+                nc = min(p.n_cells_per_granule, cap)
             n_cells.append(nc)
         else:
             n_cells.append(0)
@@ -1835,9 +2023,27 @@ def generate_packing_3d(p: Params, seed=42) -> GranuleSystem:
         quat=quat_list if p.shape_enabled else None,
         mode="3D")
 
-    # ── Compression settle: push granules into contact ──
+    # Store target radii and deflate for inflate-and-relax settling
+    if alpha_deflate < 1.0 and p.packing_settle_steps > 0:
+        gs._target_a = gs.a.copy()
+        gs._target_b = gs.b.copy()
+        gs._target_c = gs.c.copy()
+        gs._target_r = gs.r.copy()
+        gs.a[:gs.N] *= alpha_deflate
+        gs.b[:gs.N] *= alpha_deflate
+        gs.c[:gs.N] *= alpha_deflate
+        gs.r[:gs.N] *= alpha_deflate
+        gs.r_bound[:gs.N] = np.maximum(np.maximum(gs.a[:gs.N], gs.b[:gs.N]),
+                                        gs.c[:gs.N])
+
+    # ── Inflate-and-relax settle: achieve jammed packing ──
     if p.packing_settle_steps > 0 and gs.N > 1:
         _settle_packing_3d(gs, p)
+
+    # Clean up temporary target attributes
+    for attr in ('_target_a', '_target_b', '_target_c', '_target_r'):
+        if hasattr(gs, attr):
+            delattr(gs, attr)
 
     # Report packing fractions
     if p.shape_enabled:
@@ -2148,6 +2354,7 @@ def _service_committed_bridges(gs, gi, gj, gap, p, F_per_cell, nx, ny, nz, F):
                 gs.cell_state[ci] = int(CellState.SENESCENT)
                 gs.cell_bridge_target[ci] = -1
                 gs.cell_bridge_age[ci] = 0.0
+                gs.cell_bridge_locked[ci] = False
             else:
                 maturity = min(1.0, gs.cell_bridge_age[ci] / max(0.1, p.bridge_formation_time))
                 F_cell = min(F_per_cell * maturity, p.F_max_per_cell)
@@ -2168,6 +2375,7 @@ def _service_committed_bridges(gs, gi, gj, gap, p, F_per_cell, nx, ny, nz, F):
                 gs.cell_state[cj] = int(CellState.SENESCENT)
                 gs.cell_bridge_target[cj] = -1
                 gs.cell_bridge_age[cj] = 0.0
+                gs.cell_bridge_locked[cj] = False
             else:
                 maturity = min(1.0, gs.cell_bridge_age[cj] / max(0.1, p.bridge_formation_time))
                 F_cell = min(F_per_cell * maturity, p.F_max_per_cell)
@@ -2475,6 +2683,10 @@ def compute_forces(gs: GranuleSystem, p: Params, rng):
                         Fw = hertz_contact_force(E_star_gw, R_local, pen)
                         F[i, wall_axis] += wall_sign * Fw
 
+    # MC-DEM multi-contact stiffening correction (Giannis et al. 2021)
+    if p.mc_dem_enabled and len(contacts) > 0:
+        mc_dem_correction(contacts, gs, p, E_star_gg, F)
+
     # ── Active noise on functional granules (vectorized) ──
     if p.T_active > 0:
         func_mask = gs.gtype[:N] == 0
@@ -2667,6 +2879,10 @@ def compute_forces_3d(gs: GranuleSystem, p: Params, rng):
                         pen, R_local = wresult
                         Fw = hertz_contact_force(E_star_gw, R_local, pen)
                         F[i, axis] += sign * Fw
+
+    # MC-DEM multi-contact stiffening correction (Giannis et al. 2021)
+    if p.mc_dem_enabled and len(contacts) > 0:
+        mc_dem_correction(contacts, gs, p, E_star_gg, F)
 
     # Active noise (vectorized)
     if p.T_active > 0:
@@ -3332,6 +3548,7 @@ def save_snapshot_to_disk(snap_idx, gs, p, t, F, output_dir,
     data['cell_fz'] = gs.cell_fz.copy()
     data['cell_bridge_target'] = gs.cell_bridge_target.copy()
     data['cell_bridge_age'] = gs.cell_bridge_age.copy()
+    data['cell_bridge_locked'] = gs.cell_bridge_locked.copy()
     data['cell_contact_area'] = gs.cell_contact_area.copy()
     data['cell_offset'] = gs.cell_offset.copy()
 
@@ -3647,6 +3864,7 @@ def run(p=None, seed=None):
             'cell_fy': gs.cell_fy.copy(),
             'cell_bridge_target': gs.cell_bridge_target.copy(),
             'cell_bridge_age': gs.cell_bridge_age.copy(),
+            'cell_bridge_locked': gs.cell_bridge_locked.copy(),
             'cell_contact_area': gs.cell_contact_area.copy(),
             'cell_offset': gs.cell_offset.copy(),
             # V1.5.2: Per-contact data for stress visualization
@@ -3775,8 +3993,13 @@ if __name__ == '__main__':
         print(f"\n  Domain: {p.Lx:.0f} × {p.Ly:.0f} µm (2D)")
     print(f"  R_func={p.R_func_mean:.0f}±{p.R_func_std:.0f} µm, "
           f"R_inert={p.R_inert_mean:.0f}±{p.R_inert_std:.0f} µm")
-    print(f"  Cells/granule={p.n_cells_per_granule}, "
-          f"d_cell={p.cell_diameter} µm, h_spread={p.cell_height_spread} µm")
+    if p.cell_surface_coverage > 0:
+        print(f"  Cell surface coverage={p.cell_surface_coverage:.2f} "
+              f"({'stacked' if p.cell_surface_coverage > 1 else 'monolayer'}), "
+              f"d_cell={p.cell_diameter} µm, h_spread={p.cell_height_spread} µm")
+    else:
+        print(f"  Cells/granule={p.n_cells_per_granule}, "
+              f"d_cell={p.cell_diameter} µm, h_spread={p.cell_height_spread} µm")
     print(f"  Motor-clutch: {p.n_motors} motors × {p.F_motor_stall*1e3:.0f} pN, "
           f"{p.n_clutches} clutches, k_c={p.k_clutch} nN/µm")
     print(f"  Attach onset={p.t_attach_onset} h, "

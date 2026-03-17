@@ -11,7 +11,7 @@ Run modes (set RUN_MODE below):
 # ── USER CONFIGURATION ──────────────────────────────────────────────
 RUN_MODE = 3                        # 1 = Local, 2 = HPC, 3 = HPC (custom config)
 TRIALS_DIR = "Trials"               # directory containing trial .json files
-OUTPUT_DIR = "results/trials"       # base output directory
+OUTPUT_DIR = "results/LHC"          # base output directory
 SEED = None                         # random seed (None = random each run)
 HPC_CONFIG = "hpc/Alex.json"       # HPC user config (used by modes 2 and 3)
 # ────────────────────────────────────────────────────────────────────

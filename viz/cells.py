@@ -193,10 +193,22 @@ def _nearest_surface_point(snap, gi, ext_x, ext_y, p=None):
 
     For 2D: finds surface point on superellipse closest to external point.
     For 3D: projects circle at equatorial radius toward external point.
+    Uses minimum image convention for periodic boundaries so bridges don't
+    span the entire domain.
     """
     cx, cy = float(snap['x'][gi]), float(snap['y'][gi])
     dx = ext_x - cx
     dy = ext_y - cy
+    # Apply minimum image for periodic boundaries
+    if p is not None and getattr(p, 'boundary_mode', 'walls') == 'periodic':
+        Lx, Ly = float(p.Lx), float(p.Ly)
+        if Lx > 0:
+            dx -= Lx * round(dx / Lx)
+        if Ly > 0:
+            dy -= Ly * round(dy / Ly)
+        # Use nearest image of granule centre for surface point computation
+        cx = ext_x - dx
+        cy = ext_y - dy
     dist = np.sqrt(dx**2 + dy**2)
     if dist < 1e-10:
         return cx + float(snap['a'][gi]), cy

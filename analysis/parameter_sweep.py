@@ -82,6 +82,15 @@ FIXED_PARAMS = {'cell_sense_distance': 50.0}  # µm, filopodia sensing range
 N_X = 20           # radial grid points (center=0, edge=1)
 D_BASE = 0.01      # base diffusion coefficient for stress-driven mixing
 
+# Tissue volume model parameters (V2.1)
+# Cells on functional granules + bridges progressively fill inter-granular void
+TISSUE_PARAMS = {
+    'k_tissue': 0.05,            # h^-1, tissue formation rate
+    'alpha_tissue_fill': 0.6,    # max fraction of void fillable by tissue
+    'alpha_tissue_0': 0.1,       # min growth rate fraction (surface cells, no bridges)
+    'n_cells_tissue_ref': 10.0,  # reference cell count for normalization
+}
+
 # Derived parameter names (not in PARAM_DEFS but added to samples dict)
 DERIVED_NAMES = ['phi_f', 'phi_i']
 
@@ -392,6 +401,10 @@ def run_sweep_vectorised(samples, t_total=72.0, dt=0.5,
     # Expand to spatial grid: (n, N_x)
     x_f = np.broadcast_to(x_f_0_scalar[:, np.newaxis], (n, N_x)).copy()
 
+    # Tissue volume fraction: (n, N_x), starts at zero (V2.1)
+    phi_tissue = np.zeros((n, N_x))
+    n_cells_tissue_norm = np.minimum(1.0, n_cells / TISSUE_PARAMS['n_cells_tissue_ref'])
+
     # Pre-broadcast per-sample arrays for spatial operations: (n, 1)
     phi_f_b   = phi_f[:, np.newaxis]
     phi_i_b   = phi_i[:, np.newaxis]
@@ -400,6 +413,7 @@ def run_sweep_vectorised(samples, t_total=72.0, dt=0.5,
     sigma_0_b = sigma_0[:, np.newaxis]
     x_f_min_b = x_f_min[:, np.newaxis]
     D_eff_b   = D_eff[:, np.newaxis]
+    n_cells_tissue_b = n_cells_tissue_norm[:, np.newaxis]
     # neighbor_factor: (N_x,) → broadcasts with (n, N_x)
 
     for step in range(n_steps):
@@ -469,6 +483,24 @@ def run_sweep_vectorised(samples, t_total=72.0, dt=0.5,
         x_f = np.maximum(x_f, x_f_min_b)
         x_f = np.minimum(x_f, 1.0 - phi_i_b)
 
+        # ---- Tissue volume evolution (V2.1) ----
+        # Available void in functional zone at each grid point
+        phi_void_func = np.maximum(0.0, 1.0 - phi_f_b / np.maximum(x_f, 1e-6))
+        phi_tissue_max = TISSUE_PARAMS['alpha_tissue_fill'] * phi_void_func
+
+        # Spatially-varying bridge effect: max(alpha_0, f_bridge * neighbor_factor)
+        f_bridge_spatial = f_bridge[:, np.newaxis] * neighbor_factor[np.newaxis, :]
+        growth_driver = np.maximum(TISSUE_PARAMS['alpha_tissue_0'], f_bridge_spatial)
+
+        # Logistic growth ODE
+        d_phi_tissue = (TISSUE_PARAMS['k_tissue']
+                        * n_cells_tissue_b
+                        * maturity
+                        * growth_driver
+                        * np.maximum(0.0, phi_tissue_max - phi_tissue))
+        phi_tissue = phi_tissue + dt * d_phi_tissue
+        phi_tissue = np.clip(phi_tissue, 0.0, phi_tissue_max)
+
     # ---- Domain-averaged outputs (backward compatible) ----
     x_f_avg = np.mean(x_f, axis=1)  # (n,)
     x_f_0_avg = x_f_0_scalar
@@ -513,6 +545,26 @@ def run_sweep_vectorised(samples, t_total=72.0, dt=0.5,
     # Spatial void fraction variability
     phi_v_f_local_std = np.std(phi_v_f_spatial, axis=1)
 
+    # ---- Tissue-corrected descriptors (V2.1) ----
+    phi_tissue_avg = np.mean(phi_tissue, axis=1)           # (n,)
+    phi_tissue_global = x_f_avg * phi_tissue_avg           # (n,)
+
+    BV_TV_eff    = phi_f + phi_tissue_global               # granules + tissue
+    porosity_eff = np.maximum(0.0, 1.0 - BV_TV_eff)
+
+    # Tissue-corrected void and permeability in functional zone
+    eps_f_tissue = np.clip(phi_v_f_local - phi_tissue_avg, 0.01, 0.99)
+    K_f_tissue = eps_f_tissue ** 3 * d_f ** 2 / (180.0 * (1.0 - eps_f_tissue) ** 2)
+    K_eff_tissue = x_f_avg * K_f_tissue + (1.0 - x_f_avg) * K_i
+
+    # Tissue-corrected pore radius in functional zone
+    r_pore_f_tissue = d_f * eps_f_tissue / (3.0 * np.maximum(1.0 - eps_f_tissue, 0.01))
+    mean_pore_radius_tissue = x_f_avg * r_pore_f_tissue + (1.0 - x_f_avg) * r_pore_i
+
+    # Spatial tissue stats
+    phi_tissue_std = np.std(phi_tissue, axis=1)
+    phi_tissue_gradient = phi_tissue[:, 0] - phi_tissue[:, -1]  # center − edge
+
     return {
         'x_f_final': x_f_avg,
         'x_f_0': x_f_0_avg,
@@ -537,6 +589,17 @@ def run_sweep_vectorised(samples, t_total=72.0, dt=0.5,
         'x_f_final_std': x_f_final_std,
         'x_f_gradient': x_f_gradient,
         'phi_v_f_local_std': phi_v_f_local_std,
+        # Tissue volume outputs (V2.1)
+        'phi_tissue_avg': phi_tissue_avg,
+        'phi_tissue_global': phi_tissue_global,
+        'BV_TV_eff': BV_TV_eff,
+        'porosity_eff': porosity_eff,
+        'K_f_tissue': K_f_tissue,
+        'K_eff_tissue': K_eff_tissue,
+        'r_pore_f_tissue': r_pore_f_tissue,
+        'mean_pore_radius_tissue': mean_pore_radius_tissue,
+        'phi_tissue_std': phi_tissue_std,
+        'phi_tissue_gradient': phi_tissue_gradient,
     }
 
 
@@ -558,16 +621,16 @@ def compute_organ_distances(samples, outputs):
       - Liver (f_perf=0.90): nearly all void is blood     → phi_v dominant
       - Bone  (f_perf=0.10): marrow cavities (structural) → phi_i dominant
 
-    Universal descriptors:
-      BV/TV    = phi_f
-      Porosity = 1 - phi_f
+    Universal descriptors (V2.1: tissue-corrected):
+      BV/TV    = BV_TV_eff = phi_f + phi_tissue_global  (granules + tissue)
+      Porosity = porosity_eff = 1 - BV_TV_eff
       Tb.Th    = 2*R_func
       Tb.Sp    = 2*R_inert
 
     Organ-specific descriptors:
-      Permeability:
-        - f_perf >= 0.5 → flow between tissue elements → K_f (functional zone)
-        - f_perf <  0.5 → flow through structural voids → K_i (inert zone)
+      Permeability (V2.1: tissue-corrected for functional zone):
+        - f_perf >= 0.5 → flow between tissue elements → K_f_tissue
+        - f_perf <  0.5 → flow through structural voids → K_i (unchanged)
       Mean pore radius: same zone selection as permeability.
 
     Void-split penalty: additional z-score penalising scaffolds whose
@@ -576,17 +639,18 @@ def compute_organ_distances(samples, outputs):
     Returns dict: 'd_<organ>' -> 1-D array.
     """
     n = len(outputs['phi_solid'])
-    phi_f     = samples['phi_f']
     phi_i     = samples['phi_i']
     R_func    = samples['R_func']
     R_inert   = samples['R_inert']
 
-    total_porosity = 1.0 - phi_f
+    # Tissue-corrected descriptors (V2.1)
+    BV_TV_eff      = outputs['BV_TV_eff']
+    total_porosity = outputs['porosity_eff']
 
-    # Per-zone permeability and pore radius from sweep outputs
-    K_f      = outputs['K_f']
+    # Per-zone permeability and pore radius (tissue-corrected for functional zone)
+    K_f      = outputs['K_f_tissue']
     K_i      = outputs['K_i']
-    r_pore_f = outputs['r_pore_f']
+    r_pore_f = outputs['r_pore_f_tissue']
     r_pore_i = outputs['r_pore_i']
 
     results = {}
@@ -622,7 +686,7 @@ def compute_organ_distances(samples, outputs):
         dists = np.empty(n)
         for i in range(n):
             desc = {
-                'bv_tv':            float(phi_f[i]),
+                'bv_tv':            float(BV_TV_eff[i]),
                 'porosity':         float(total_porosity[i]),
                 'permeability_KC':  float(K_compare[i]),
                 'tb_th':            float(2.0 * R_func[i]),
@@ -712,6 +776,11 @@ def recommend_parameters(samples, outputs, organ_dists, top_n=5):
                 'phi_v_i_local': float(outputs['phi_v_i_local'][i]),
                 'compaction_ratio': float(outputs['compaction_ratio'][i]),
                 'K_permeability': float(outputs['K_permeability'][i]),
+                # Tissue-corrected (V2.1)
+                'phi_tissue_global': float(outputs['phi_tissue_global'][i]),
+                'BV_TV_eff': float(outputs['BV_TV_eff'][i]),
+                'porosity_eff': float(outputs['porosity_eff'][i]),
+                'K_eff_tissue': float(outputs['K_eff_tissue'][i]),
             })
         recs[organ] = entries
     return recs
@@ -1004,7 +1073,8 @@ def plot_recommendation_table(recs, outdir):
     all_param_keys = PARAM_NAMES + DERIVED_NAMES
     col_labels = ['Organ', '$D_{arch}$'] + \
                  [PARAM_LABELS.get(k, k) for k in all_param_keys] + \
-                 ['Compact.', r'$\phi_v^{func}$', r'$\phi_v^{inert}$', '$K$ (µm²)']
+                 ['Compact.', r'$\phi_v^{func}$', r'$\phi_v^{inert}$', '$K$ (µm²)',
+                  r'$\phi_{tis}$', 'BV/TV$_{eff}$']
     rows = []
     for organ in organs:
         if organ not in recs or not recs[organ]:
@@ -1028,6 +1098,8 @@ def plot_recommendation_table(recs, outdir):
         else:
             row.append(f"{e['phi_v_i_local']:.3f}")
         row.append(f"{e['K_permeability']:.1e}")
+        row.append(f"{e.get('phi_tissue_global', 0):.3f}")
+        row.append(f"{e.get('BV_TV_eff', e['phi_solid']):.3f}")
         rows.append(row)
 
     fig, ax = plt.subplots(figsize=(22, 0.5 * len(rows) + 2.0))
@@ -1208,8 +1280,9 @@ def plot_radar_comparison(recs, outdir):
             r_pore = x_f * d_f * eps_f / (3 * max(1 - eps_f, 0.01)) + \
                      (1 - x_f) * d_i * eps_i / (3 * max(1 - eps_i, 0.01))
             sd = {
-                'bv_tv': phi_s, 'porosity': phi_v,
-                'permeability_KC': e['K_permeability'], 'tb_th': dg,
+                'bv_tv': e.get('BV_TV_eff', phi_s),
+                'porosity': e.get('porosity_eff', phi_v),
+                'permeability_KC': e.get('K_eff_tissue', e['K_permeability']), 'tb_th': dg,
                 'tb_sp': dg * phi_v / max(phi_s, 0.01),
                 'mean_pore_radius': r_pore,
             }
@@ -1262,8 +1335,8 @@ def plot_best_kinetics(recs, outdir, t_total=72.0, n_motors=50,
     organs = list_organs()
     oc = _organ_colors()
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    fig.suptitle('Compaction Kinetics for Optimal Scaffold per Organ',
+    fig, axes = plt.subplots(1, 3, figsize=(20, 5))
+    fig.suptitle('Compaction & Tissue Kinetics for Optimal Scaffold per Organ',
                  fontsize=13, fontweight='bold')
 
     dt = 0.5
@@ -1277,20 +1350,24 @@ def plot_best_kinetics(recs, outdir, t_total=72.0, n_motors=50,
         if organ not in recs or not recs[organ]:
             continue
         p = recs[organ][0]['params']
-        x_f_traj, phi_v_f_traj, phi_v_i_traj, x_f_spatial = _integrate_trajectory(
+        (x_f_traj, phi_v_f_traj, phi_v_i_traj, x_f_spatial,
+         tissue_traj, tissue_spatial) = _integrate_trajectory(
             p, t_total, dt, n_motors=n_motors,
             F_motor_stall=F_motor_stall, F_max_per_cell=F_max_per_cell)
-        spatial_data[organ] = (p, x_f_spatial)
+        spatial_data[organ] = (p, x_f_spatial, tissue_spatial)
 
         c = oc[organ]
         lab = organ.replace('_', ' ').title()
         axes[0].plot(t_arr, x_f_traj, '-', color=c, lw=1.8, label=lab)
         axes[1].plot(t_arr, phi_v_f_traj, '-', color=c, lw=1.8, label=lab)
+        axes[2].plot(t_arr, tissue_traj, '-', color=c, lw=1.8, label=lab)
 
     axes[0].set_xlabel('Time (h)'); axes[0].set_ylabel('$x_f$ (func zone fraction)')
     axes[0].set_title('(a) Functional Zone Compaction'); axes[0].legend(fontsize=7); axes[0].grid(True, alpha=0.3)
     axes[1].set_xlabel('Time (h)'); axes[1].set_ylabel(r'$\phi_v^{func}$ (local void)')
     axes[1].set_title('(b) Functional Zone Local Void'); axes[1].legend(fontsize=7); axes[1].grid(True, alpha=0.3)
+    axes[2].set_xlabel('Time (h)'); axes[2].set_ylabel(r'$\phi_{tissue}^{global}$')
+    axes[2].set_title('(c) Tissue Volume Fraction'); axes[2].legend(fontsize=7); axes[2].grid(True, alpha=0.3)
 
     plt.tight_layout(rect=[0, 0, 1, 0.93])
     path = os.path.join(outdir, 'best_kinetics.png')
@@ -1304,22 +1381,24 @@ def plot_best_kinetics(recs, outdir, t_total=72.0, n_motors=50,
 
 
 def plot_radial_profiles(spatial_data, outdir, oc):
-    """Plot final radial profiles of x_f(xi) and phi_v(xi) for each organ."""
+    """Plot final radial profiles of x_f(xi), phi_v(xi), and phi_tissue(xi)."""
     xi = np.linspace(0, 1, N_X)
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    fig, axes = plt.subplots(1, 3, figsize=(20, 5))
     fig.suptitle('Radial Profiles at t=72h (center=0, edge=1)',
                  fontsize=13, fontweight='bold')
 
-    for organ, (p, x_f_spatial) in spatial_data.items():
+    for organ, (p, x_f_spatial, tissue_spatial) in spatial_data.items():
         c = oc.get(organ, 'gray')
         lab = organ.replace('_', ' ').title()
-        x_f_final = x_f_spatial[-1]  # final time, (N_x,)
+        x_f_final = x_f_spatial[-1]
         phi_f = p['phi_f']
         phi_v_f = np.maximum(0.0, 1.0 - phi_f / np.maximum(x_f_final, 1e-6))
+        tissue_final = tissue_spatial[-1]
 
         axes[0].plot(xi, x_f_final, '-', color=c, lw=1.8, label=lab)
         axes[1].plot(xi, phi_v_f, '-', color=c, lw=1.8, label=lab)
+        axes[2].plot(xi, tissue_final, '-', color=c, lw=1.8, label=lab)
 
     axes[0].set_xlabel(r'Radial position $\xi$ (center → edge)')
     axes[0].set_ylabel('$x_f$ (func zone fraction)')
@@ -1330,6 +1409,11 @@ def plot_radial_profiles(spatial_data, outdir, oc):
     axes[1].set_ylabel(r'$\phi_v^{func}$ (local void)')
     axes[1].set_title('(b) Functional Zone Local Void')
     axes[1].legend(fontsize=7); axes[1].grid(True, alpha=0.3)
+
+    axes[2].set_xlabel(r'Radial position $\xi$ (center → edge)')
+    axes[2].set_ylabel(r'$\phi_{tissue}$ (local tissue)')
+    axes[2].set_title('(c) Tissue Volume Fraction')
+    axes[2].legend(fontsize=7); axes[2].grid(True, alpha=0.3)
 
     plt.tight_layout(rect=[0, 0, 1, 0.93])
     path = os.path.join(outdir, 'radial_profiles.png')
@@ -1342,9 +1426,11 @@ def _integrate_trajectory(p, t_total, dt, n_motors=50, F_motor_stall=0.5,
                           F_max_per_cell=50.0):
     """Single-sample 1D radial PDE integration returning trajectories.
 
-    Returns (x_f_traj, phi_v_f_traj, phi_v_i_traj, x_f_spatial)
+    Returns (x_f_traj, phi_v_f_traj, phi_v_i_traj, x_f_spatial,
+             tissue_traj, tissue_spatial)
     where first three are domain-averaged arrays of length n_steps+1,
-    and x_f_spatial is (n_steps+1, N_x) for radial profile plotting.
+    x_f_spatial is (n_steps+1, N_x), tissue_traj is (n_steps+1,),
+    and tissue_spatial is (n_steps+1, N_x).
     """
     s = {k: np.array([p[k]]) for k in PARAM_NAMES + DERIVED_NAMES}
     for k, default in FIXED_PARAMS.items():
@@ -1403,12 +1489,16 @@ def _integrate_trajectory(p, t_total, dt, n_motors=50, F_motor_stall=0.5,
 
     # Spatial state: (N_x,)
     x_f = np.full(N_x, x_f_0_val)
+    phi_tissue_sp = np.zeros(N_x)
+    n_cells_tissue_n = min(1.0, n_c / TISSUE_PARAMS['n_cells_tissue_ref'])
 
     # Trajectory storage
     traj_xf = [x_f_0_val]
     traj_vf = [max(0.0, 1.0 - phi_f / max(x_f_0_val, 1e-6))]
     traj_vi = [max(0.0, 1.0 - phi_i / max(1.0 - x_f_0_val, 1e-6))]
     spatial_traj = [x_f.copy()]
+    traj_tissue = [0.0]
+    tissue_spatial_traj = [phi_tissue_sp.copy()]
 
     for step in range(n_steps):
         t = step * dt
@@ -1441,15 +1531,29 @@ def _integrate_trajectory(p, t_total, dt, n_motors=50, F_motor_stall=0.5,
         x_f = np.maximum(x_f, x_f_min)
         x_f = np.minimum(x_f, 1.0 - phi_i)
 
+        # Tissue volume evolution (V2.1)
+        phi_void_f_local = np.maximum(0.0, 1.0 - phi_f / np.maximum(x_f, 1e-6))
+        phi_tissue_max_loc = TISSUE_PARAMS['alpha_tissue_fill'] * phi_void_f_local
+        fb_spatial = fb * neighbor_factor
+        growth_drv = np.maximum(TISSUE_PARAMS['alpha_tissue_0'], fb_spatial)
+        d_tissue = (TISSUE_PARAMS['k_tissue'] * n_cells_tissue_n * mat
+                    * growth_drv * np.maximum(0.0, phi_tissue_max_loc - phi_tissue_sp))
+        phi_tissue_sp = phi_tissue_sp + dt * d_tissue
+        phi_tissue_sp = np.clip(phi_tissue_sp, 0.0, phi_tissue_max_loc)
+
         # Domain-averaged
         x_avg = float(np.mean(x_f))
         traj_xf.append(x_avg)
         traj_vf.append(max(0.0, 1.0 - phi_f / max(x_avg, 1e-6)))
         traj_vi.append(max(0.0, 1.0 - phi_i / max(1.0 - x_avg, 1e-6)))
         spatial_traj.append(x_f.copy())
+        tissue_avg = float(np.mean(phi_tissue_sp))
+        traj_tissue.append(x_avg * tissue_avg)
+        tissue_spatial_traj.append(phi_tissue_sp.copy())
 
     return (np.array(traj_xf), np.array(traj_vf), np.array(traj_vi),
-            np.array(spatial_traj))
+            np.array(spatial_traj), np.array(traj_tissue),
+            np.array(tissue_spatial_traj))
 
 
 # ======================================================================
@@ -1569,6 +1673,77 @@ def plot_jamming_phase_space(samples, outputs, outdir):
 
 
 # ======================================================================
+# Plot 14: Tissue effects (V2.1)
+# ======================================================================
+
+def plot_tissue_effects(samples, outputs, outdir):
+    """Impact of tissue volume on architecture descriptors (V2.1)."""
+    phi_f = samples['phi_f']
+    BV_TV_eff = outputs['BV_TV_eff']
+    phi_tissue = outputs['phi_tissue_global']
+    K_f = outputs['K_f']
+    K_f_tissue = outputs['K_f_tissue']
+    n_cells = samples['n_cells_per_func']
+    func_ratio = samples['func_ratio']
+    comp = outputs['compaction_ratio']
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 12))
+    fig.suptitle('Tissue Volume Effects on Architecture (V2.1)',
+                 fontsize=14, fontweight='bold')
+
+    n_pts = min(20000, len(phi_f))
+    idx = np.random.default_rng(0).choice(len(phi_f), n_pts, replace=False)
+
+    # (a) BV/TV_eff vs phi_f — tissue contribution
+    ax = axes[0, 0]
+    sc = ax.scatter(phi_f[idx], BV_TV_eff[idx], c=phi_tissue[idx], s=3, alpha=0.3,
+                    cmap='YlOrRd', vmin=0)
+    ax.plot([0, 1], [0, 1], 'k--', lw=1, alpha=0.5, label='No tissue ($BV/TV = \\phi_f$)')
+    ax.set_xlabel(r'$\phi_f$ (granule fraction)', fontsize=10)
+    ax.set_ylabel('$BV/TV_{eff}$ (granule + tissue)', fontsize=10)
+    ax.set_title('(a) Tissue Adds to BV/TV', fontsize=11)
+    ax.legend(fontsize=8); ax.grid(True, alpha=0.2)
+    plt.colorbar(sc, ax=ax, label=r'$\phi_{tissue}^{global}$', shrink=0.8)
+
+    # (b) K_f_tissue vs K_f — permeability reduction
+    ax = axes[0, 1]
+    sc2 = ax.scatter(K_f[idx], K_f_tissue[idx], c=phi_tissue[idx], s=3, alpha=0.3,
+                     cmap='YlOrRd', vmin=0)
+    lims = [max(1e-3, K_f[idx].min()), K_f[idx].max()]
+    ax.plot(lims, lims, 'k--', lw=1, alpha=0.5, label='No tissue')
+    ax.set_xlabel('$K_f$ without tissue (µm²)', fontsize=10)
+    ax.set_ylabel('$K_f$ with tissue (µm²)', fontsize=10)
+    ax.set_xscale('log'); ax.set_yscale('log')
+    ax.set_title('(b) Tissue Reduces Permeability', fontsize=11)
+    ax.legend(fontsize=8); ax.grid(True, alpha=0.2)
+    plt.colorbar(sc2, ax=ax, label=r'$\phi_{tissue}^{global}$', shrink=0.8)
+
+    # (c) phi_tissue vs n_cells — cell count drives tissue
+    ax = axes[1, 0]
+    cx, my = _bin_median(n_cells, phi_tissue, 25)
+    ax.plot(cx, my, 'C3o-', ms=5, lw=2)
+    ax.set_xlabel('Cells per functional granule', fontsize=10)
+    ax.set_ylabel(r'$\phi_{tissue}^{global}$ (median)', fontsize=10)
+    ax.set_title('(c) Cell Count Drives Tissue Formation', fontsize=11)
+    ax.grid(True, alpha=0.2)
+
+    # (d) phi_tissue vs func_ratio — more functional granules → more tissue
+    ax = axes[1, 1]
+    cx, my = _bin_median(func_ratio, phi_tissue, 25)
+    ax.plot(cx, my, 'C0o-', ms=5, lw=2)
+    ax.set_xlabel(r'Functional ratio $f_{func}$', fontsize=10)
+    ax.set_ylabel(r'$\phi_{tissue}^{global}$ (median)', fontsize=10)
+    ax.set_title('(d) Functional Fraction Controls Tissue', fontsize=11)
+    ax.grid(True, alpha=0.2)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    path = os.path.join(outdir, 'tissue_effects.png')
+    fig.savefig(path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f"  Saved: {path}")
+
+
+# ======================================================================
 # Unified runner
 # ======================================================================
 
@@ -1624,6 +1799,9 @@ def run_all(outdir='results/parameter_sweep', n_samples=N_SAMPLES_DEFAULT,
         print(f"    → compaction={e['compaction_ratio']:.1%}, "
               f"void_f={e['phi_v_f_local']:.3f}, void_i={e['phi_v_i_local']:.3f}, "
               f"K={e['K_permeability']:.2e} µm²")
+        print(f"    → tissue={e.get('phi_tissue_global', 0):.3f}, "
+              f"BV/TV_eff={e.get('BV_TV_eff', 0):.3f}, "
+              f"K_tissue={e.get('K_eff_tissue', 0):.2e} µm²")
 
     # Plots
     print("\n" + "-" * 70)
@@ -1645,6 +1823,7 @@ def run_all(outdir='results/parameter_sweep', n_samples=N_SAMPLES_DEFAULT,
                        F_max_per_cell=sweep_kwargs.get('F_max_per_cell', 50.0))
     plot_shape_effects(samples, outputs, outdir)
     plot_jamming_phase_space(samples, outputs, outdir)
+    plot_tissue_effects(samples, outputs, outdir)
 
     # ── Scaffold evolution visualizations ──
     print("\n" + "-" * 70)
@@ -1682,8 +1861,8 @@ def run_all(outdir='results/parameter_sweep', n_samples=N_SAMPLES_DEFAULT,
     print(f"         organ_recommendations_table, parameter_importance,")
     print(f"         closest_organ_map, permeability_porosity,")
     print(f"         radar_comparison, best_kinetics, shape_effects,")
-    print(f"         jamming_phase_space, radial_profiles,")
-    print(f"         scaffold_evolution, timelapse")
+    print(f"         jamming_phase_space, tissue_effects,")
+    print(f"         radial_profiles, scaffold_evolution, timelapse")
 
     return samples, outputs, organ_dists, recs
 

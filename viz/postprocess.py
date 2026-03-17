@@ -10,14 +10,14 @@ Usage:
     python viz/postprocess.py -i results/default --skip movies stress
 
     # Auto-process ALL unprocessed .tar.gz files in a directory:
-    python viz/postprocess.py                          # scans Trials/trials/
+    python viz/postprocess.py                          # scans results/trials/
     python viz/postprocess.py --scan-dir path/to/runs  # custom scan directory
     python viz/postprocess.py --skip movies stress      # auto-scan with skips
 
 Or import programmatically:
     from viz.postprocess import run_all, run_all_unprocessed
     run_all('results/default')
-    run_all_unprocessed('Trials/trials/')
+    run_all_unprocessed('results/trials/')
 """
 
 import sys as _sys, os as _os
@@ -514,7 +514,7 @@ def run_all_unprocessed(scan_dir, skip=None):
 # ══════════════════════════════════════════════════════════════════════
 
 _DEFAULT_SCAN_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                                 'Trials', 'trials')
+                                 'results', 'trials')
 
 
 if __name__ == '__main__':
@@ -526,7 +526,7 @@ if __name__ == '__main__':
     parser.add_argument('-o', '--output', default=None,
                         help='Output directory for plots (default: <input>/plots)')
     parser.add_argument('--scan-dir', default=None,
-                        help=f'Directory to scan for .tar.gz files (default: Trials/trials/)')
+                        help=f'Directory to scan for .tar.gz files (default: results/trials/)')
     parser.add_argument('--skip', nargs='*', default=[],
                         help='Visualization modules to skip (e.g., movies stress)')
     parser.add_argument('--list', action='store_true',

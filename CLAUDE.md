@@ -6,13 +6,13 @@
 is a 2D/3D overdamped particle dynamics simulator for modelling cell-driven rearrangement
 of hydrogel granular scaffolds. The primary simulation engine is `new_dem_0.py`.
 
-**Current version: V1.12**
+**Current version: V2.2**
 
 ## Repository Layout
 
 ```
 GELLS-DEM/
-├── new_dem_0.py                 # PRIMARY simulation engine (V1.12, no plotting)
+├── new_dem_0.py                 # PRIMARY simulation engine (V2.1, no plotting)
 ├── run_hpc_headless.py          # HPC headless runner (supports 2D/3D modes)
 ├── run_all_trials.py            # Batch trial runner (local / SLURM)
 ├── run_analysis_pipeline.py     # Full V1.7 analysis pipeline orchestrator
@@ -138,6 +138,27 @@ GELLS-DEM/
   (`bridge_secondary_rate_mult`). Parameters: `bridge_attempt_rate`, `bridge_formation_time`,
   `bridge_senescence_time`, `min_fa_for_bridge`, `bridge_break_gap`,
   `bridge_lock_force_threshold`, `bridge_secondary_rate_mult`, `expected_bridge_force`.
+- **Tissue volume tracking** (V2.1+): Spatially-resolved `phi_tissue(xi, t)` on the N_x=20
+  radial grid tracks cell + ECM volume fraction growing in the functional zone. Logistic
+  growth ODE driven by cell count, FA maturity, and bridge formation. No feedback into
+  compaction mechanics (tissue is soft). Corrected architecture descriptors (`BV_TV_eff`,
+  `porosity_eff`, `K_f_tissue`) used for organ distance computation. Parameters in
+  `TISSUE_PARAMS`: `k_tissue=0.05`, `alpha_tissue_fill=0.6`, `alpha_tissue_0=0.1`,
+  `n_cells_tissue_ref=10.0`.
+- **Cell surface coverage** (V2.1+): `Params.cell_surface_coverage` (default 0.0 = disabled)
+  specifies cell loading as a fraction of granule surface area. At 1.0, cells form a full
+  monolayer; >1.0 allows stacking. When set, overrides `n_cells_per_granule` and
+  `cell_coverage`. Uses `cells_from_surface_coverage()` which computes
+  `n = round(4πR² × coverage / A_cell_spread)` (3D) or `πR²` (2D). For R=40 µm:
+  coverage 0.5→8 cells, 1.0→16, 1.5→24.
+- **Multi-Contact DEM (MC-DEM)** (V2.2+): Stress-based multi-contact correction
+  for Hertzian contact forces (Giannis et al. 2021). Per-particle volumetric overlap
+  strain ε_V = Σ δ/(2R) drives confinement factor κ = 1 + ν/(1−2ν) × ε_V that scales
+  Hertz repulsion. Captures stiffening when soft granules have many simultaneous contacts
+  (jammed packings). For ν=0.49 (nearly incompressible hydrogel): c_mc=24.5, giving ~2×
+  stiffening at typical packing. Capped at `mc_dem_kappa_max=5.0`. Applied as post-correction
+  via `mc_dem_correction()` in both 2D and 3D force computations. Params: `mc_dem_enabled`
+  (bool, default True), `mc_dem_kappa_max` (float, default 5.0).
 
 ## Conventions
 

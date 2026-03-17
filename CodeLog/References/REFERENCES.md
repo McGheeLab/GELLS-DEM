@@ -1271,7 +1271,381 @@ and local curvatures in the contact detection algorithm (§7).
 
 ---
 
-## 18. Summary of Energy Landscape Parameters
+## 18. Jamming & Glass Transition (Mean-Field Theory)
+
+**Introduced in:** V2.1
+
+### 18.1 Primary Reference
+
+> G. Parisi and F. Zamponi, "Mean-field theory of hard sphere glasses and
+> jamming," *Reviews of Modern Physics*, vol. 82, pp. 789–845, 2010.
+> doi:10.1103/RevModPhys.82.789
+
+Comprehensive mean-field (replica) theory connecting the glass transition and
+jamming in hard-sphere systems. Derives the Edwards entropy, equation of state,
+and jamming density from first principles. Provides the theoretical framework
+for understanding how packing fraction, coordination number, and mechanical
+stability are related near the jamming point — directly relevant to our
+granular scaffold compaction physics and the interpretation of DOE results
+across varying φ_solid and granule size.
+
+### 18.2 Key Concepts Used
+
+- **Jamming density** φ_J as a function of spatial dimension and preparation
+  protocol — informs our choice of φ_solid_target bounds [0.55, 0.85].
+- **Isostaticity**: the minimum coordination number z_iso = 2d for frictionless
+  spheres at jamming. Our periodic-BC simulations measure z as a diagnostic.
+- **Scaling near jamming**: excess contacts Δz ~ (φ − φ_J)^{1/2}, pressure
+  P ~ (φ − φ_J)^{Δ−1} with Hertzian exponent Δ = 5/2. Connects to the
+  energy landscape decomposition (§12).
+
+---
+
+## 19. DEM Particle Packing Generation
+
+**Introduced in:** V2.1
+
+### 19.1 Primary Reference — Lubachevsky-Stillinger Algorithm
+
+> B. D. Lubachevsky and F. H. Stillinger, "Geometric properties of random
+> disk packings," *Journal of Statistical Physics*, vol. 60, nos. 5–6,
+> pp. 561–583, 1990. doi:10.1007/BF01025983
+
+> B. D. Lubachevsky, "How to simulate billiards and similar systems,"
+> *Journal of Computational Physics*, vol. 94, no. 2, pp. 255–283, 1991.
+> doi:10.1016/0021-9991(91)90222-7
+
+The Lubachevsky-Stillinger (LS) protocol is the standard method for
+generating jammed packings at prescribed packing fractions. The algorithm:
+
+1. **Place particles at reduced (deflated) radii** so that RSA can position
+   all N particles without overlap (achievable up to φ_RSA ≈ 0.30–0.38 in 3D).
+2. **Inflate radii gradually** from the deflated state toward target size.
+3. **At each inflation step, relax overlaps** via soft repulsive forces
+   (or event-driven elastic collisions in the original formulation).
+4. **Result**: a mechanically stable (jammed) packing at the target φ_solid
+   with coordination number Z ≈ 2d (isostatic) for monodisperse frictionless
+   spheres, or Z ≈ 4–8 for bidisperse/polydisperse systems.
+
+The key insight is that gradual inflation forces particles to explore
+configuration space and find stable contact networks, unlike RSA alone
+which saturates well below random close packing.
+
+### 19.2 Equations Adopted
+
+**Deflation factor** (initial radius fraction for RSA placement):
+
+```
+α_start = (φ_safe / φ_target)^(1/3)        3D volume scaling
+```
+
+where `φ_safe = 0.20` ensures RSA can place all particles (well below
+the RSA saturation limit of ~0.38 in 3D).
+
+**Inflation schedule** (quadratic ease-in, more time near jamming):
+
+```
+t = step / n_steps                          normalised time [0, 1]
+α(t) = α_start + (1 − α_start) × [1 − (1 − t)²]
+```
+
+This spends more steps near α ≈ 1.0 where overlap resolution is hardest.
+
+**Overlap repulsion** (Hertz-like, during relaxation sub-steps):
+
+```
+F_rep = k_rep × δ^{3/2}                    δ = R_i + R_j − d_ij
+```
+
+with `k_rep = 5.0`, applied along the centre-to-centre unit normal.
+Overdamped dynamics with velocity cap `v_max = 0.3 × ⟨R_target⟩` prevents
+numerical instability.
+
+### 19.3 Parameters in Code
+
+| Parameter | Value | Unit | Role |
+|-----------|-------|------|------|
+| `packing_inflate_phi_safe` | 0.20 | — | Initial deflated φ for RSA |
+| `packing_settle_steps` | 400 | — | Number of inflation steps |
+| `packing_relax_substeps` | 15 | — | Overlap relaxation per inflation step |
+| k_rep | 5.0 | nN/µm^1.5 | Hertz-like repulsion stiffness |
+| v_cap | 0.3 × ⟨R⟩ | µm/step | Max displacement per sub-step |
+| dt_settle | 0.02 | — | Relaxation micro-step size |
+
+### 19.4 Secondary Reference — RSA + Compression
+
+> E. M. B. Campello and K. R. Cassares, "Rapid generation of particle packs
+> at high packing ratios for DEM simulations of granular compacts," *Latin
+> American Journal of Solids and Structures*, vol. 13, no. 1, pp. 23–50, 2016.
+> doi:10.1590/1679-78251694
+
+Presents efficient algorithms for generating dense random packings of
+polydisperse spheres suitable for DEM simulation. Compares RSA (random
+sequential addition) with dynamic compression methods and characterises
+packing quality (coordination number, radial distribution function) as a
+function of target packing fraction.
+
+### 19.5 Relevance to GELLS-DEM
+
+- **Lubachevsky-Stillinger inflate-and-relax**: our packing protocol (V2.1)
+  uses deflated RSA placement (α ≈ 0.6–0.7) followed by 400-step inflation
+  with Hertz-like overlap relaxation, achieving Z ≈ 6–8 for bidisperse
+  packings at φ_solid = 0.55–0.85.
+- **Polydisperse & bidisperse packings**: both references analyse how size
+  ratio affects achievable packing fraction and coordination number —
+  directly relevant to our DOE factors R_func_mean and R_inert_mean.
+- **Periodic boundary conditions**: validates that periodic packings converge
+  to bulk statistics faster than wall-bounded packings at the same N,
+  supporting our switch to `boundary_mode="periodic"` in the V2.1 DOE.
+- **Jamming verification**: coordination number Z reported after settling
+  confirms isostatic or hyperstatic state (Z ≥ 2d = 6 in 3D).
+
+---
+
+## 20. Superellipsoid Packing & Jamming
+
+**Introduced in:** V2.1
+
+### 20.1 Foundational Result — Non-Spherical Dense Packing
+
+> A. Donev, I. Cisse, D. Sachs, E. A. Variano, F. H. Stillinger,
+> R. Connelly, S. Torquato, P. M. Chaikin, "Improving the Density of
+> Jammed Disordered Packings Using Ellipsoids," *Science*, 303(5660),
+> 990–993, 2004. doi:10.1126/science.1093010
+
+Demonstrated that any deviation from spherical shape increases random
+packing density: ellipsoids randomly pack to φ = 0.68–0.74 vs ~0.64 for
+spheres, with ~10 contacts/particle vs 6. Foundational for all subsequent
+non-spherical packing work.
+
+### 20.2 Superellipsoid DEM Expansion (Inflate-and-Relax)
+
+> G. W. Delaney and P. W. Cleary, "The packing properties of
+> superellipsoids," *EPL (Europhysics Letters)*, 89(3), 34002, 2010.
+
+Dynamic particle expansion (Lubachevsky-Stillinger for soft DEM) applied
+to superellipsoids. MRJ packings reach φ ≈ 0.72–0.74. Packing density
+increases with blockiness deviation from 2 (sphere). Our `_settle_packing_3d`
+inflate-and-relax algorithm is based on this approach.
+
+### 20.3 Definitive Superellipsoid Jamming Data
+
+> Y. Yuan, K. VanderWerf, M. D. Shattuck, C. S. O'Hern, "Jammed
+> packings of 3D superellipsoids with tunable packing fraction,
+> coordination number, and ordering," *Soft Matter*, 15(47), 9751–9761,
+> 2019. doi:10.1039/C9SM01932D
+
+Tested 200+ superellipsoid shapes via athermal quasi-static compression.
+Key results: superellipsoid packings are **hypostatic** (Z_J < Z_iso);
+φ_J depends on ≥2 independent shape parameters in 3D; packings are
+tuneable in φ, Z, and orientational order via protocol choice.
+
+### 20.4 Optimal Superballs
+
+> Y. Jiao, F. H. Stillinger, S. Torquato, "Optimal Packings of
+> Superballs," *Physical Review E*, 79, 041309, 2009.
+
+> Y. Jiao, F. H. Stillinger, S. Torquato, "Distinctive Features
+> Arising in Maximally Random Jammed Packings of Superballs,"
+> *Physical Review E*, 81, 041304, 2010.
+
+Adaptive Shrinking Cell (ASC) method for superballs. φ increases rapidly
+with shape parameter p: ~0.68 at p=1.5, ~0.82 at p=5 (sphere p=2 gives
+~0.64). ASC formulates packing as constrained optimisation via Sequential
+Linear Programming.
+
+### 20.5 Packing Fraction Reference Table
+
+| Shape | φ_J | Z | Source |
+|-------|-----|---|--------|
+| Sphere | ~0.64 | 6 | Donev 2004 |
+| Ellipsoid (AR ≈ 1.4) | 0.68–0.71 | ~10 | Donev 2004 |
+| General ellipsoid | up to 0.74 | ~12 | Donev 2004 |
+| Superball p = 1.5 | ~0.68 | — | Jiao/Torquato 2009 |
+| Superball p = 5 | ~0.82 | — | Jiao/Torquato 2009 |
+| Superellipsoid (MRJ) | 0.72–0.74 | < 2d_f | Delaney/Cleary 2010 |
+
+---
+
+## 21. Multi-Contact DEM (MC-DEM) for Soft Particles
+
+**Introduced in:** V2.2
+
+### 21.1 Primary Reference
+
+> K. Giannis, C. Schilde, J. H. Finke, A. Kwade, M. A. Celigueta,
+> K. T. Tahir, H. Wiggers, S. Luding, "Stress based multi-contact model
+> for discrete-element simulations," *Granular Matter*, 23, 5, 2021.
+> doi:10.1007/s10035-020-01060-8
+
+Introduces a stress-based multi-contact DEM variant where the trace of
+the per-particle stress tensor, coupled with Poisson's ratio, makes all
+contacts on a particle dependent on all other contacts. Validated for
+**hydrogels**, rubber, and glass beads under confined/unconfined compression.
+
+### 21.2 Physics
+
+In standard Hertz DEM, each contact is computed independently. For soft
+particles (hydrogels, E ~ 1–50 kPa) with many simultaneous contacts,
+this ignores confinement stiffening: a particle squeezed from all sides
+is stiffer at each contact than the same particle with a single contact.
+
+MC-DEM corrects this by computing a per-particle volumetric overlap strain:
+
+```
+ε_V,i = Σ_c δ_c / (2 R_i)              sum over all contacts c on particle i
+κ_i   = 1 + ν/(1 − 2ν) · ε_V,i         confinement correction factor
+κ_ij  = (κ_i + κ_j) / 2                 pair-averaged correction
+F_corrected = κ_ij × F_Hertz            scaled repulsive force
+```
+
+For nearly incompressible materials (ν → 0.5), the correction is strong:
+ν = 0.49 → ν/(1−2ν) = 24.5. A particle with 7 contacts at 1% overlap
+sees κ ≈ 1.9 (nearly 2× stiffening).
+
+### 21.3 Parameters in Code
+
+| Parameter | Default | Unit | Role |
+|-----------|---------|------|------|
+| `mc_dem_enabled` | `True` | — | Enable/disable MC-DEM correction |
+| `mc_dem_kappa_max` | 5.0 | — | Cap on confinement multiplier |
+| `poisson_ratio` | 0.45 | — | Drives correction magnitude via ν/(1−2ν) |
+
+### 21.4 Supporting References
+
+> N. Brodu, J. A. Dijksman, R. P. Behringer, "Spanning the scales of
+> granular materials through microscopic force imaging," *Nature
+> Communications*, 6, 6361, 2015. doi:10.1038/ncomms7361
+
+Experimental 3D force imaging in deformable hydrogel packings. Demonstrated
+multi-contact nonlinear stiffening — the effect MC-DEM captures.
+
+> N. Ghods, P. Poorsolhjouy, M. Gonzalez, S. Radl, "Discrete element
+> modeling of strongly deformed particles in dense shear flows," *Powder
+> Technology*, 401, 117288, 2022. doi:10.1016/j.powtec.2022.117288
+
+Multi-contact force closure for dense soft particle shear. Calibrated
+against a nonlocal formulation in the quasi-static limit.
+
+> M. Hirsch et al., "Building block properties govern granular hydrogel
+> mechanics through contact deformations," *Science Advances*, 8,
+> eadd8570, 2022. doi:10.1126/sciadv.add8570
+
+Experimental validation: microgel stiffness and size control macroscale
+granular hydrogel mechanics via Hertzian contact. Direct validation data
+for GELLS-DEM.
+
+---
+
+## 22. Contact Detection for Non-Spherical DEM
+
+**Introduced in:** V1.3 (common-normal), reviewed V2.2
+
+### 22.1 Common-Normal Method (Used in GELLS-DEM)
+
+> C. Wellmann, C. Lillie, P. Wriggers, "A contact detection algorithm
+> for superellipsoids based on the common-normal concept," *Engineering
+> Computations*, 25(5), 432–461, 2008. doi:10.1108/02644400810881374
+
+Reformulates 3D superellipsoid contact as 2D unconstrained optimisation
+via Newton-Raphson with Levenberg-Marquardt. Contact points defined by
+anti-parallel surface normals. Only valid for smooth convex particles.
+This is the algorithm used in `find_contact_superellipsoids_3d()`.
+
+### 22.2 Energy Conservation Proof
+
+> R. B. Canelas et al., "A common-normal-based framework for efficient
+> ellipse contact detection in discrete element modelling," *Computers
+> and Geotechnics*, 188, 2025. doi:10.1016/S0266352X25004732
+
+Compares four contact methods: intersection, geometric potential, midway,
+and common-normal. Key finding: **only the common-normal method guarantees
+energy conservation**. Others introduce spurious energy gain/loss. Validates
+our choice of contact algorithm.
+
+### 22.3 Signed Distance Field (SDF) Approach
+
+> Z. Lai, S. Zhao, J. Zhao, L. Huang, "Signed distance field framework
+> for unified DEM modeling of granular media with arbitrary particle
+> shapes," *Computational Mechanics*, 70, 763–793, 2022.
+> doi:10.1007/s00466-022-02220-8
+
+Generic SDF-based interface for arbitrary shapes. Recovers classical shapes
+(superellipsoid, polyhedron, spherical harmonics) as special cases.
+Energy-conserving node-to-surface contact detection.
+
+> Z. Lai, Y. T. Feng, J. Zhao, L. Huang, "Unifying the contact in
+> signed distance field-based and conventional discrete element methods,"
+> *Computers and Geotechnics*, 173, 106560, 2024.
+> doi:10.1016/j.compgeo.2024.106560
+
+Bridges SDF-DEM and conventional Hertz contact. Establishes parameter
+mapping between SDF contact potentials and standard DEM parameters.
+
+> O. R. Gouveia, J. M. Guedes, R. B. Ruben, "Contact detection in
+> computational mechanics: a signed distance field approach for convex
+> superelliptical bodies," *Computational Mechanics*, 2025.
+> doi:10.1007/s00466-025-02666-6
+
+Introduces Gap Distance Field (GDF) concept for 2D superellipses.
+Reformulates contact as unconstrained minimisation over GDF. More robust
+for near-degenerate configurations than Newton-Raphson.
+
+### 22.4 Review
+
+> Y. T. Feng, "Thirty years of developments in contact modelling of
+> non-spherical particles in DEM: a selective review," *Acta Mechanica
+> Sinica*, 39, 722343, 2023. doi:10.1007/s10409-022-22343-x
+
+Comprehensive classification of shape representations and contact methods
+for non-spherical DEM, covering all major approaches.
+
+---
+
+## 23. Deformable Particle DEM (Future: V3.0)
+
+### 23.1 DDEM — Global + Local Deformation Modes
+
+> J. Rojek, A. Zubelewicz, N. Madan, S. Nosewicz, "The discrete element
+> method with deformable particles," *Int. J. Numer. Methods Eng.*,
+> 114(8), 828–860, 2018. doi:10.1002/nme.5767
+
+> J. Rojek et al., "3D formulation of the deformable discrete element
+> method," *Int. J. Numer. Methods Eng.*, 122(14), 3335–3367, 2021.
+> doi:10.1002/nme.6666
+
+Deformation decomposed into **global mode** (uniform stress from all contacts)
+and **local mode** (contact-specific). Particles change shape; new contacts
+form as particles flatten. 2D (2018) and 3D (2021) formulations. ~2–5×
+cost of rigid DEM.
+
+### 23.2 Variational LS-DEM (Deformable Level Sets)
+
+> T. Henzel and K. Karapiperis, "A Variational Formulation for Deformable
+> Particle Simulations and its Level Set Discrete Element Method
+> Implementation," arXiv:2602.12895, 2026.
+
+Energetic variational formulation (Lagrange-d'Alembert principle) embedding
+translational, rotational, and deformation degrees of freedom. Deformation
+via evolving level sets. Not restricted to specific geometries. Claims
+**computational cost of the same order of magnitude as rigid DEM** — the
+most promising approach for a future GELLS-DEM upgrade.
+
+### 23.3 Granular Hydrogel Scaffold Design
+
+> S. Feng et al., "Practical Guide to the Design of Granular Hydrogels
+> for Customizing Complex Cellular Microenvironments," *Adv. Healthcare
+> Materials*, 14(27), e01947, 2025. doi:10.1002/adhm.202501947
+
+Review of inter- and intra-microgel design factors for granular hydrogel
+scaffolds. Nondirected packing is the mainstream assembly strategy.
+Provides experimental context for GELLS-DEM parameter choices.
+
+---
+
+## 24. Summary of Energy Landscape Parameters
+
+(Renumbered from §20)
 
 | Parameter | Value | Unit | Source | Section |
 |-----------|-------|------|--------|---------|

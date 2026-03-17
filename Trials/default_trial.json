@@ -1,24 +1,24 @@
 {
   "_format": "flat",
-  "_description": "Default trial with V1.9 bridge lock-in, secondary migration, and force monitoring",
+  "_description": "Default V2.1 trial with tissue volume tracking, bridge lock-in, surface coverage",
   "mode": "3D",
 
-  "Lx": 514.0,
-  "Ly": 514.0,
-  "Lz": 514.0,
+  "Lx": 580.0,
+  "Ly": 580.0,
+  "Lz": 580.0,
 
-  "R_func_mean": 30.0,
+  "R_func_mean": 40.0,
   "R_func_std": 0.0,
   "R_inert_mean": 60.0,
   "R_inert_std": 0.0,
 
-  "phi_solid_target": 0.6,
-  "func_ratio": 0.333,
+  "phi_solid_target": 0.75,
+  "func_ratio": 0.6,
 
-  "n_cells_per_granule": 4,
+  "cell_surface_coverage": 1.0,
   "cell_diameter": 20.0,
   "cell_height_spread": 5.0,
-  "cell_coverage": 0.4,
+  "cell_coverage": 0.6,
 
   "t_attach_onset": 0.0,
   "t_attach_half": 0.0,
@@ -35,7 +35,7 @@
   "F_max_per_cell": 100.0,
 
   "cell_migration_speed": 5.0,
-  "cell_sense_distance": 80.0,
+  "cell_sense_distance": 50.0,
   "L_rest": 5.0,
 
   "bridge_attempt_rate": 0.3,
@@ -47,7 +47,7 @@
   "bridge_secondary_rate_mult": 3.0,
   "expected_bridge_force": 100.0,
 
-  "E_modulus": 2.0,
+  "E_modulus": 12.0,
   "poisson_ratio": 0.49,
 
   "tau_0_ii": 50.0,
@@ -64,7 +64,7 @@
   "T_active": 5.0,
 
   "dt": 0.1,
-  "t_total": 45.0,
+  "t_total": 48.0,
   "save_every_h": 1.0,
   "v_max": 20.0,
 
@@ -91,7 +91,7 @@
 
   "packing_gap": 0.0,
   "boundary_exclusion": 0.2,
-  "packing_settle_steps": 200,
+  "packing_settle_steps": 400,
 
   "Ngrid": 200,
   "Ngrid_3d": 80,
