@@ -1,4 +1,4 @@
-# Running GELLS-DEM on UArizona HPC (Puma)
+# Running GELS on UArizona HPC (Puma)
 
 This guide covers running the simulation on the University of Arizona
 HPC cluster from VSCode on your local machine.
@@ -75,7 +75,7 @@ ssh YOUR_NETID@hpc.arizona.edu
 # At the bastion prompt, type: shell
 
 cd ~
-git clone https://github.com/McGheeLab/GELLS-DEM.git
+git clone https://github.com/McGheeLab/GELS.git
 ```
 
 ### Storage locations
@@ -94,10 +94,10 @@ This must run on a **compute node**, not a login node:
 
 ```bash
 interactive -a YOUR_GROUP -n 4 -t 1:00:00
-bash ~/GELLS-DEM/setup_hpc_env.sh
+bash ~/GELS/setup_hpc_env.sh
 ```
 
-This creates a virtual environment at `~/gells-dem-env` with Python 3.11,
+This creates a virtual environment at `~/gels-env` with Python 3.11,
 numpy, scipy, and matplotlib.
 
 ---
@@ -125,7 +125,7 @@ numpy, scipy, and matplotlib.
    - Select the config file to update (`~/.ssh/config`)
    - Click **Connect** on the new host entry
 
-4. **Open your project folder:** `~/GELLS-DEM`
+4. **Open your project folder:** `~/GELS`
 
 > **Notes:**
 > - The compute node hostname changes each session -- you will re-enter it each time.
@@ -141,7 +141,7 @@ numpy, scipy, and matplotlib.
 
 ```bash
 module load python/3.11/3.11.4
-source ~/gells-dem-env/bin/activate
+source ~/gels-env/bin/activate
 
 # Default parameters
 python3 run_hpc_headless.py
@@ -173,7 +173,7 @@ Submit and monitor:
 ```bash
 sbatch run_hpc.slurm
 squeue --user YOUR_NETID       # check status (PD=pending, R=running)
-cat gells-dem_JOBID.out        # view output log
+cat gels_JOBID.out        # view output log
 ```
 
 ### Batch job defaults
@@ -195,7 +195,7 @@ file explorer.
 Alternatively, use `scp` from your local machine:
 
 ```bash
-scp -r YOUR_NETID@filexfer.hpc.arizona.edu:~/GELLS-DEM/results ./results
+scp -r YOUR_NETID@filexfer.hpc.arizona.edu:~/GELS/results ./results
 ```
 
 ---
@@ -214,7 +214,7 @@ interactive -a YOUR_GROUP -n 4 -t 8:00:00
 
 # Activate environment
 module load python/3.11/3.11.4
-source ~/gells-dem-env/bin/activate
+source ~/gels-env/bin/activate
 
 # Run
 python3 run_hpc_headless.py --output-dir results

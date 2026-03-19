@@ -7,5 +7,7 @@
     "cpus": 4,
     "walltime": "04:00:00",
     "repo_path": "~/GELLS-DEM",
-    "venv_path": "~/gells-dem-env"
+    "venv_path": "~/gels-env",
+    "results_path": "/groups/mcgheealex/results",
+    "max_concurrent": 10
 }

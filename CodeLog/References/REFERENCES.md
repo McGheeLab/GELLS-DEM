@@ -1,6 +1,6 @@
-# GELLS-DEM Literature References
+# GELS Literature References
 
-All literature sources used in the GELLS-DEM simulation engine, organised by
+All literature sources used in the GELS simulation engine, organised by
 physical model. Each entry includes the full citation, the equations or
 assumptions we adopt, parameter values we extract, and the rationale for
 choosing that particular model.
@@ -1154,7 +1154,7 @@ zone to the inert zone.
 Introduces the "bubble model" for foam dynamics where each bubble interacts
 through spring-like repulsion and viscous drag. Demonstrates that macroscopic
 Herschel-Bulkley rheology emerges from microscopic bubble-scale interactions
-— the same paradigm we adopt in GELLS-DEM where macroscopic compaction
+— the same paradigm we adopt in GELS where macroscopic compaction
 behavior emerges from microscopic granule-granule Hertzian contacts and
 cell-driven forces.
 
@@ -1170,7 +1170,7 @@ cell-driven forces.
 > University Press, 1986. ISBN: 978-0198520337
 
 Standard reference for the dynamics of polymer systems. The overdamped
-Langevin equation (§6) used throughout GELLS-DEM derives from the same
+Langevin equation (§6) used throughout GELS derives from the same
 theoretical framework applied to colloidal and polymeric systems. We adopt
 the viscous-dominated, inertia-free dynamical equations that Doi and Edwards
 develop for concentrated polymer solutions, adapted to our granular system
@@ -1206,7 +1206,7 @@ Demonstrates that cell-driven compaction in granular composites produces
 programmable macroscopic shape changes. The functional (cell-laden) zones
 compact while inert zones resist, generating internal stresses that drive
 shape transformation. This is the primary experimental motivation for the
-GELLS-DEM simulation and the energy landscape framework: the competition
+GELS simulation and the energy landscape framework: the competition
 between cell traction (driving compaction) and mechanical resistance (elastic,
 yield, geometric frustration) determines the final tissue architecture.
 
@@ -1385,7 +1385,7 @@ sequential addition) with dynamic compression methods and characterises
 packing quality (coordination number, radial distribution function) as a
 function of target packing fraction.
 
-### 19.5 Relevance to GELLS-DEM
+### 19.5 Relevance to GELS
 
 - **Lubachevsky-Stillinger inflate-and-relax**: our packing protocol (V2.1)
   uses deflated RSA placement (α ≈ 0.6–0.7) followed by 400-step inflation
@@ -1533,7 +1533,7 @@ against a nonlocal formulation in the quasi-static limit.
 
 Experimental validation: microgel stiffness and size control macroscale
 granular hydrogel mechanics via Hertzian contact. Direct validation data
-for GELLS-DEM.
+for GELS.
 
 ---
 
@@ -1541,7 +1541,7 @@ for GELLS-DEM.
 
 **Introduced in:** V1.3 (common-normal), reviewed V2.2
 
-### 22.1 Common-Normal Method (Used in GELLS-DEM)
+### 22.1 Common-Normal Method (Used in GELS)
 
 > C. Wellmann, C. Lillie, P. Wriggers, "A contact detection algorithm
 > for superellipsoids based on the common-normal concept," *Engineering
@@ -1629,7 +1629,7 @@ Energetic variational formulation (Lagrange-d'Alembert principle) embedding
 translational, rotational, and deformation degrees of freedom. Deformation
 via evolving level sets. Not restricted to specific geometries. Claims
 **computational cost of the same order of magnitude as rigid DEM** — the
-most promising approach for a future GELLS-DEM upgrade.
+most promising approach for a future GELS upgrade.
 
 ### 23.3 Granular Hydrogel Scaffold Design
 
@@ -1639,7 +1639,7 @@ most promising approach for a future GELLS-DEM upgrade.
 
 Review of inter- and intra-microgel design factors for granular hydrogel
 scaffolds. Nondirected packing is the mainstream assembly strategy.
-Provides experimental context for GELLS-DEM parameter choices.
+Provides experimental context for GELS parameter choices.
 
 ---
 

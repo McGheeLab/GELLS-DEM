@@ -52,12 +52,13 @@ def check_jobs(netid: str):
         return False
 
 
-def list_remote_results(netid: str, repo_path: str):
+def list_remote_results(netid: str, repo_path: str, results_path: str = None):
     """List result directories on the cluster."""
+    remote_base = results_path if results_path else f"{repo_path}/results"
     try:
         r = subprocess.run(
             ["ssh", f"{netid}@filexfer.hpc.arizona.edu",
-             f"ls -la {repo_path}/results/ 2>/dev/null"],
+             f"ls -la {remote_base}/ 2>/dev/null"],
             capture_output=True, text=True, timeout=30)
         if r.stdout.strip():
             print("  Remote results:")
@@ -71,14 +72,17 @@ def list_remote_results(netid: str, repo_path: str):
 
 
 def sync_results(netid: str, repo_path: str, local_dir: str,
-                 keep_remote: bool = False):
+                 keep_remote: bool = False, results_path: str = None):
     """Rsync results from cluster to local machine.
 
     By default, successfully transferred files are deleted from the cluster
     via rsync --remove-source-files.  Pass keep_remote=True to keep them.
+
+    V2.6: results_path allows reading from /groups instead of /home.
     """
     filexfer = f"{netid}@filexfer.hpc.arizona.edu"
-    remote = f"{filexfer}:{repo_path}/results/"
+    remote_base = results_path if results_path else f"{repo_path}/results"
+    remote = f"{filexfer}:{remote_base}/"
     os.makedirs(local_dir, exist_ok=True)
 
     print(f"  Syncing: {remote}")
@@ -88,25 +92,25 @@ def sync_results(netid: str, repo_path: str, local_dir: str,
     else:
         print()
 
-    rsync_cmd = ["rsync", "-avz", "--progress", remote, f"{local_dir}/"]
+    rsync_cmd = ["rsync", "-avz", "--progress", "--partial", remote, f"{local_dir}/"]
     if not keep_remote:
         rsync_cmd.insert(2, "--remove-source-files")
 
     try:
-        result = subprocess.run(rsync_cmd, timeout=600)
+        result = subprocess.run(rsync_cmd, timeout=7200)
         if result.returncode == 0:
             print(f"\n  Sync complete! Results in {os.path.abspath(local_dir)}/")
             if not keep_remote:
                 # Prune empty directories left behind by --remove-source-files
                 subprocess.run(
                     ["ssh", filexfer,
-                     f"find {repo_path}/results -type d -empty -delete 2>/dev/null"],
+                     f"find {remote_base} -type d -empty -delete 2>/dev/null"],
                     capture_output=True, timeout=30)
                 print(f"  Cleaned up remote results.")
         else:
             print(f"\n  rsync exited with code {result.returncode}")
     except subprocess.TimeoutExpired:
-        print("  rsync timed out (10 min limit). Try again or increase timeout.")
+        print("  rsync timed out (2 hour limit). Re-run to resume — --partial preserves progress.")
     except FileNotFoundError:
         print("  rsync not found. Install it or sync manually:")
         print(f"    rsync -avz {remote} {local_dir}/")
@@ -126,9 +130,12 @@ def main():
 
     netid = hpc["netid"]
     repo_path = hpc["repo_path"]
+    results_path = hpc.get("results_path")  # V2.6: /groups path
 
     print("=" * 60)
-    print(f"  GELLS-DEM: Sync Results from {netid}@puma")
+    print(f"  GELS: Sync Results from {netid}@puma")
+    if results_path:
+        print(f"  Results path: {results_path}")
     print("=" * 60 + "\n")
 
     # Check for running jobs
@@ -137,13 +144,14 @@ def main():
         print("  Warning: jobs still running — results may be incomplete.\n")
 
     # List what's on the cluster
-    list_remote_results(netid, repo_path)
+    list_remote_results(netid, repo_path, results_path=results_path)
 
     if args.list_only:
         return
 
     # Sync
-    sync_results(netid, repo_path, args.local_dir, keep_remote=args.keep_remote)
+    sync_results(netid, repo_path, args.local_dir,
+                 keep_remote=args.keep_remote, results_path=results_path)
 
 
 if __name__ == "__main__":

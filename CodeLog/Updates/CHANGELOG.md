@@ -1,10 +1,387 @@
-# GELLS-DEM Changelog
+# GELS Changelog
 
-All notable changes to the GELLS-DEM simulation engine are documented in this file.
+All notable changes to the GELS simulation engine are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Version numbering: `MAJOR.MINOR` where MAJOR tracks breaking API changes and
 MINOR tracks feature additions and improvements.
+
+---
+
+## [V2.6] - 2026-03-18
+
+### Added (2D vs 3D DOE Comparison)
+- **`viz/doe_2d_vs_3d.py`**: New comparison analysis script for matched 2D/3D DOE runs
+  (same LHS design matrix, seed=2025). 7 analysis modules: paired scatter plots with OLS
+  regression, dimensionless collapse (φ/φ_RCP, Z/Z_iso, K/d²), factor importance heatmaps
+  (Pearson r, 2D vs 3D vs Δ), time evolution overlay (2D blue vs 3D red, mean ± σ),
+  scaling regression table (3D = α + β·2D with R² bar chart), summary radar chart, and
+  3D/2D ratio vs factor values (parameter-dependent scaling detection).
+- **Key finding**: Permeability (K) is the only metric with strong 2D→3D collapse
+  (R²=0.94, slope=0.83). Connectivity, bridges, and contacts show dimension-dependent
+  scaling that cannot be reduced to a simple power law.
+
+### Added (HPC Storage Protection & Resume)
+- **Results to /groups**: New `results_path` field in `hpc/Alex.json` directs simulation
+  output to `/groups/mcgheealex/results` (500 GB) instead of `/home` (50 GB). SLURM
+  templates use absolute paths. All sync functions (`_do_sync`, `_wait_and_sync`,
+  `_wait_and_sync_multi`, `sync_results.py`) updated to read from `results_path`.
+- **Disk space guard**: `check_disk_space()` function checks available space before each
+  snapshot save. < 5 GB → skip fields (save particle data only). < 1 GB → skip snapshot
+  entirely. SLURM pre-flight bash check aborts job if < 2 GB free.
+- **Fields off by default**: `save_fields` default changed from `True` to `False`. Phase
+  field grids (phi_f/phi_i/phi_v) are no longer saved during simulation — they're
+  reconstructable from particle positions at plot time. Roughly halves storage per run.
+- **Staggered starts**: `max_concurrent` in Alex.json (default 10, was 200). Plus 0-30s
+  random sleep per task to reduce I/O storms.
+- **Resume from snapshot**: `resume_from` parameter in Params. `find_last_snapshot()` and
+  `restore_gs_from_snapshot()` reconstruct full GranuleSystem from saved .npz. `run()`
+  supports resume branch: skips packing, loads state, continues from last saved timestep.
+  `--resume-from` CLI arg in `run_hpc_headless.py`.
+- **Batch resume (RUN_MODE=4)**: `run_all_trials.py` mode 4 scans local results for
+  incomplete trials, uploads last snapshot to HPC via `upload_for_resume()`, generates
+  resume SLURM scripts, and submits.
+
+### Added (DEM vs Contact Network Comparison)
+- **`viz/doe_dem_vs_network.py`**: Validates stochastic contact-network model as a surrogate
+  for expensive 3D DEM by running both on identical initial packings from the 20-point DOE.
+  Custom ensemble: bypasses built-in `ensemble()` to use `from_packing()` with repeated
+  `solve()` on the exact DEM snapshot packing. 5 analysis modules: paired scatter (DEM vs
+  Network final values ± σ), time evolution overlay (DEM trajectories vs ensemble mean),
+  predictability table (R², slope, DEM/Net ratio as CSV + bar chart), network-only metrics
+  (percolation onset, cluster sizes, spanning probability), and summary dashboard (cost
+  comparison + R² heatmap). Comparable metrics: contacts, bridges, coordination Z,
+  permeability, porosity, bridge force, locked bridges. Network-only: percolation, cluster
+  size, bridge fraction.
+
+### Bug Fixes
+- **Bridge exclusion cap in stochastic model**: `compute_bridge_rates()` in
+  `contact_network_model.py` now enforces a per-edge bridge limit derived from
+  `bridge_exclusion_angle` and hemisphere geometry (3D: 2/θ², 2D: π/(2θ)). Previously
+  the bridge count per edge was only limited by cell availability, producing ~200× too many
+  bridges in 3D (14,969 vs DEM's ~2,700).
+- **Periodic BC position wrapping in ContactNetwork**: `_rebuild_edges()` in
+  `contact_network.py` now wraps positions into [0, L) before building the periodic cKDTree.
+  Previously, particles that drifted outside the domain caused `ValueError: Some input data
+  are greater than the size of the periodic box`. Also added initial wrapping in
+  `from_snapshot()`.
+- **LS-DEM epsilon serialization**: `save_snapshot_to_disk()` now saves `epsilon` and
+  `d_epsilon` arrays to the .npz file. Previously only the in-memory snapshot dict
+  included them, so resumed deformable runs would lose deformation state.
+
+---
+
+## [V2.5] - 2026-03-17
+
+### Added (Mesoscale Models)
+- **`analysis/spatial_pde.py`**: Spatially-resolved 1D radial PDE model for scaffold
+  compaction. Extends the mean-field ODE with N_x=20 grid points ξ ∈ [0,1] (center→edge).
+  Captures compaction waves, local jamming fronts, heterogeneous porosity/permeability
+  profiles. State: x_f(ξ,t) + φ_tissue(ξ,t). Physics: cell traction stress vs contact
+  resistance + stress-driven diffusion, with zero-flux BCs. Includes fitting to DEM data
+  (η_eff, σ_0, α), DEM-snapshot initialization via radial binning, and tissue descriptor
+  computation. Extracted and refactored from `parameter_sweep.py` into standalone class.
+- **`analysis/contact_network.py`**: Graph-based contact network model. Nodes = granules,
+  edges = contacts/near-neighbors. Tracks bridge state machine (NONE → FORMING → ACTIVE →
+  LOCKED/SENESCENT), Hertz + DMT contact forces, overdamped position updates. Spheres only
+  (no superellipsoid solver — the key speedup). Captures: coordination Z(t), bridge
+  percolation thresholds, cluster size distributions, force chain statistics. Supports
+  Monte Carlo ensemble via `run_ensemble()`. Can initialize from DEM snapshot, random
+  packing, or Params alone.
+- **`analysis/contact_network_model.py`**: Stochastic contact-network model with Gillespie
+  SSA for exact bridge kinetics. Key differences from `contact_network.py`:
+  (1) Gillespie algorithm (Bortz-Kalos-Lebowitz 1975) replaces per-timestep probability
+  evaluation — every bridge formation/senescence event advances physical time exactly.
+  (2) Union-find percolation tracking (Newman-Ziff 2001) with O(N) cluster statistics
+  and spanning detection.
+  (3) Monte Carlo ensemble with statistical summary: mean, IQR, min/max for all observables
+  including bridge count, Z_bridge, spanning probability, permeability.
+  (4) Self-contained sphere packing via Lubachevsky-Stillinger inflate-and-relax.
+  Physics: JKR adhesive contact, motor-clutch cell traction, path-dependent bridge
+  probability (contact/void/inert-blocked), bridge lock-in, secondary migration boost.
+  Runs ~2.5s per 72h realization (2D, ~43 granules). Interface: `from_params(p)` →
+  `solve(model)` or `ensemble(model, n_runs=1000)`.
+- **`viz/mesoscale.py`**: Visualization for both mesoscale models. PDE plots: kymograph of
+  x_f(ξ,t), radial profiles at selected times, domain-averaged timeseries + stress balance.
+  Network plots: granule+bridge snapshot, Z(t)/bridge/percolation/cluster evolution.
+  Combined 4-panel summary showing spatial PDE + network topology together.
+
+### Design (Mesoscale Architecture)
+- Three complementary models fill the gap between full DEM and mean-field ODE:
+  - **SpatialPDE** answers *where* compaction happens (spatial gradients, porosity maps)
+  - **ContactNetwork** (deterministic) answers *how* the packing reorganizes (force chains)
+  - **ContactNetworkModel** (stochastic) answers *what variability* to expect across
+    realizations (percolation thresholds, spanning probability, ensemble statistics)
+- All run in seconds (vs hours for DEM), all produce tissue descriptors for organ
+  distance computation via existing `arch_distance.py`.
+- Cross-feeding interface: PDE local φ_f(ξ) → expected Z(ξ) for network edges;
+  Network percolation state → PDE effective viscosity η_eff(ξ).
+
+---
+
+## [V2.4] - 2026-03-17
+
+### Added (viz2/ — V2 Visualization System)
+- **New `viz2/` package**: Complete rebuild of 2D visualization as a unified, modular system.
+  10 files, 6 analysis modules, all driven from scaffold map foundation.
+- **`viz2/common.py`**: Centralised color schemes, drawing helpers (`draw_granule_patches`,
+  `draw_cells_on_ax`, `cell_world_positions`), phase field re-rendering, and figure utilities.
+  Eliminates ~150 lines of duplicated code per module vs the old `viz/` approach.
+- **`viz2/scaffold_map.py`** (Module 1): Vector-drawn scaffold map (red=functional,
+  green=inert, black=void) with cell overlays. Bridge cells drawn in crimson but counted
+  as functional space in all data analysis. Single-frame API for movie compositing.
+- **`viz2/voronoi.py`**: Voronoi tessellation engine with two modes — center-based (standard
+  Voronoi from granule centers) and boundary-based "shrink-wrap" (seeds on superellipse
+  surfaces, sub-cells merged per granule via ConvexHull). Pure-numpy Sutherland-Hodgman
+  domain clipping (no shapely dependency). Shape factor computation (circularity, elongation,
+  aspect ratio via PCA). Local phase fraction computation via point-in-polygon on phase
+  field grid.
+- **`viz2/voronoi_shapes.py`** (Module 2): Voronoi overlay on scaffold map, shape factor
+  spatial maps (circularity/elongation/area), distribution histograms, and mean±std
+  timeseries showing compaction trends in local geometry.
+- **`viz2/phase_fractions.py`** (Module 3): Global phase fractions (stacked area +
+  conservation check), local phase fraction heatmaps within Voronoi cells, inner-vs-outer
+  timeseries showing compaction gradient, and local-vs-global heterogeneity scatter plots.
+- **`viz2/energy_stress.py`** (Module 5): Stress/strain spatial maps via Gaussian
+  coarse-graining (reuses `analysis.coarse_grain`). 6 energy mode spatial maps: cell
+  traction, Hertz/JKR contact, granular friction, osmotic pressure, inert frustration,
+  interfacial tension. Each computed on Ngrid×Ngrid grid with proper physics. Energy
+  mode timeseries showing total per mode vs time.
+- **`viz2/void_percolation.py`** (Module 6): Void cluster labeling (`scipy.ndimage.label`),
+  spanning-cluster percolation detection, cluster size distribution P(s) with power-law
+  fits, percolation evolution timeseries (status, largest fraction, count, mean size),
+  Kozeny-Carman permeability tracking.
+- **`viz2/movies.py`** (Module 4): GIF animations of scaffold map, Voronoi tessellation,
+  local phase fractions, stress maps, and 6-panel energy modes. Frame-by-frame rendering
+  via `imageio.mimsave()` with configurable FPS and max frames.
+- **`viz2/postprocess.py`**: Unified orchestrator with `--skip` / `--only` filtering.
+  Supports both disk-loaded data (`-i results/default`) and live simulation data.
+  CLI: `python viz2/postprocess.py -i results/default [--skip movies] [--only scaffold]`.
+
+### Added (viz2/ — 3D Analysis Extension)
+- **3D infrastructure in `viz2/common.py`**: `is_3d()` mode detection, `slice_field_z_midplane()`
+  for extracting 2D slices from (Ng,Ng,Ng) phase fields, `slice_snap_z_midplane()` for projecting
+  3D granules to 2D cross-sections (superellipsoid slice radii `a*(1-(dz/c)^n2)^(1/n2)`, yaw
+  from quaternion), `cell_world_positions_3d()` using `superellipsoid_point` + `quat_rotate`,
+  extended `ensure_phase_fields()` with `render_fields_3d` support.
+- **All 6 existing modules extended for 3D**: Each module detects `is_3d` and uses z-midplane
+  slicing for 2D display while preserving full 3D analysis where appropriate (e.g.
+  `void_percolation` checks percolation along all 3 axes, `energy_stress` slices coarse-grained
+  3D fields at midplane).
+- **New `viz2/scaffold_map_3d.py`** (Module 7): PyVista off-screen 3D rendering with
+  superellipsoid meshes (parametric grid + pole caps), cell spheres colored by state, bridge
+  tubes, z-midplane clip plane. Multi-panel composites assembled in matplotlib. Guarded by
+  `HAS_PYVISTA`; silently skips when unavailable or data is 2D.
+- **Voronoi all-granule tessellation** (`viz2/voronoi.py`): Both functional AND inert granules
+  seed Voronoi. Functional cells clipped to granule boundary via Sutherland-Hodgman convex
+  polygon intersection (`clip_polygon_to_convex`). Inert cells keep full Voronoi region.
+- **Periodic boundary rendering** (`viz2/common.py`): Ghost images for granules/cells near
+  domain edges via `_periodic_offsets`, minimum-image convention for bridge vectors via
+  `_min_image`.
+- **Verified on DOE_3D_0001** (433 granules, 4644 cells, 200^3 fields) and regression-tested
+  on DOE_2D_0001 with 0 failures.
+
+### Documentation
+- **Mean field modeling teaching guide** (`CodeLog/MeanFieldModeling/MEAN_FIELD_GUIDE.md`):
+  Comprehensive rewrite of the beginner's guide to mean field modeling. Now 11 sections
+  covering: (1-5) progressive toy examples (coffee cooling, logistic growth, thermostat,
+  Kozeny-Carman), (6) full GELS model derivation with worked code, (7) hands-on
+  tutorial for fitting real DEM data with step-by-step walkthrough, (8) DOE sweep comparison
+  across 19 trials, (9) scalar ODE to spatial PDE extension, (10) energy landscape
+  thermodynamic view, (11) summary with 3-level model hierarchy table. Includes appendices
+  with file reference, figure generation instructions, and quick-start cheat sheet.
+- **Example figure generator** (`CodeLog/MeanFieldModeling/generate_examples.py`): Expanded
+  from 10 to 14 examples. New real-data examples: (11) single DEM fit with 4-panel
+  diagnostic, (12) DOE parameter comparison across all trials (compaction vs stiffness,
+  composition, permeability, bridging), (13) multi-run trajectory overlay colored by
+  stiffness, (14) energy landscape decomposition. All 14 figures generate successfully
+  from `results/LHC/` DOE data.
+
+### Added (Visualization)
+- **Vector scaffold map visualization** (`viz/postprocess.py`): New `plot_scaffold_map()`
+  function draws granules as exact matplotlib patches (circles/superellipses) colored by
+  type — red=functional, green=inert, black=void — with cells overlaid using cell-state
+  colors. Replaces the grid-based `plot_composite()` as the primary [4/17] pipeline output
+  (`scaffold_map.png`). Eliminates all aliasing artifacts since rendering is vector-based
+  rather than grid-discretized. Handles periodic boundary ghost images. Legacy composite
+  still saved when phi fields are available.
+
+### Bug Fixes
+- **Rendering aliasing on large domains** (`new_dem_0.py`): Phase field rendering used a
+  fixed `Ngrid=200` regardless of domain size, causing severe aliasing when domain ≫ 800 µm
+  (e.g. Lx=2319 µm gave 11.6 µm/pixel vs 3 µm interface width — sub-pixel tanh transitions
+  rendered as binary noise). Fix: `render_fields()` auto-scales Ng to ensure grid spacing
+  ≤ 2× interface_width. `render_fields_3d()` auto-scales up to 200³ cap, and widens
+  interface_width to grid spacing when voxels remain coarse. Affects all phi-field-derived
+  metrics (connectivity, porosity, tissue fraction).
+- **Effective radii ignored periodic boundaries** (`new_dem_0.py`): `compute_effective_radii()`
+  and `compute_effective_radii_3d()` used non-periodic cKDTree and raw position differences,
+  missing all cross-boundary overlaps. Fix: accepts optional `p` parameter; when
+  `boundary_mode='periodic'`, uses `boxsize` and `minimum_image_disp`.
+- **Metric pixel area used fixed Ngrid** (`new_dem_0.py`): `compute_metrics()` computed
+  `dxg = p.Lx / p.Ngrid` but the actual rendering grid may be larger (auto-scaled). Fix:
+  derives `dxg` from `phi_f.shape[0]`.
+- **Wall contact clip normals inverted** (`new_dem_0.py`): JKR wall clip normals used the
+  force direction `sign` (pointing into domain) instead of negated sign (pointing toward
+  wall). This clipped the domain-facing side of wall-adjacent particles instead of the
+  wall-facing side. Fix: `float(sign)` → `-float(sign)` in all 4 wall clip paths.
+
+### Changed
+- **2D packing: Lubachevsky-Stillinger inflate-and-relax** (`new_dem_0.py`): Replaced the old
+  centripetal-attraction settle with the same deflate→inflate algorithm used by 3D. RSA now
+  places granules at reduced radii (α = (φ_safe/φ_target)^(1/2)), then `_settle_packing_2d()`
+  inflates to target with vectorised Hertz repulsion + velocity cap + post-inflation overlap
+  relaxation. Achieves jammed 2D packing at Z ≈ 3–4, up from Z ≈ 0–1 with the old method.
+  Uses existing params (`packing_settle_steps`, `packing_relax_substeps`,
+  `packing_inflate_phi_safe`). No new parameters.
+
+### Added
+- **Experimental comparison analysis** (`analysis/experimental_comparison.py`): New module for
+  comparing Day 1 experimental packing data (hand-segmented area fractions from confocal cross-
+  sections) with simulation predictions and mean-field models. Parses Excel data (36 samples:
+  9 size combinations × 4 functional ratios), computes derived quantities (enrichment, packing
+  efficiency), and generates 9 diagnostic plots: phase fractions vs ratio, packing efficiency,
+  phase enrichment, size ratio effects, phase continuity, continuity vs fraction (percolation
+  analysis), experiment vs simulation prediction, ternary composition diagram, and size heatmap.
+  Supports optional DEM packing runs for parity plots. CLI: `python analysis/experimental_comparison.py`.
+
+## [V2.4] - 2026-03-16
+
+### Changed
+- **Delayed cell senescence with stacking tolerance** (`new_dem_0.py`): Overcrowded cells no
+  longer go senescent immediately. Cells can stack up to `cell_stacking_max` layers (default 3.0)
+  on a granule surface — they prefer crawling on granule surfaces but will crawl on each other
+  when surface area runs out. Cells in the overcrowded-but-tolerated zone accumulate
+  `cell_overcrowd_age`; senescence triggers only after `overcrowd_senescence_time` hours
+  (default 12.0) of sustained overcrowding. If overcrowding resolves (e.g. cells migrate or
+  bridge away), the timer resets. Cells beyond the max stacking capacity still go senescent
+  immediately. New params: `cell_stacking_max`, `overcrowd_senescence_time`. New per-cell
+  array: `cell_overcrowd_age` (serialized to snapshots).
+
+---
+
+## [V2.3] - 2026-03-16
+
+### Changed
+- **Path-dependent bridge probability** (`new_dem_0.py`): Bridge formation now depends on what
+  lies between the cell and its target, modelled from a fibroblast's perspective. Three regimes:
+  (1) **Contact** (gap ≤ 0): cells crawl between touching surfaces, boosted by
+  `bridge_contact_factor` (default 5.0). (2) **Void gap**: filopodia must probe empty space,
+  probability decays as `exp(-gap / bridge_decay_length)` (default λ=10 µm). (3) **Inert-blocked**:
+  inert granule in line-of-sight further penalised by `bridge_inert_factor` (default 0.1).
+  Replaces old linear proximity model (`1 - gap/sense_dist`). Ray-cast via vectorised
+  bounding-sphere intersection classifies each functional–functional pair. Bridges can now
+  form at contact (previously blocked by `gap > L_rest`). Service of committed bridges no
+  longer gated by L_rest. New params: `bridge_contact_factor`, `bridge_decay_length`,
+  `bridge_inert_factor`.
+
+### Fixed
+- **Granule pass-through bug** (`new_dem_0.py`): Added post-step overlap resolution
+  (`_resolve_overlaps()`) to prevent granules from interpenetrating during simulation.
+  Root cause: large timestep (dt=0.5h, max 10 µm/step) combined with sharp contact
+  threshold (zero force at overlap ≤ 0) allowed approaching granules to jump past contact
+  detection, especially when bridge forces matured at t≈3-7h. Fix: after each position
+  integration, all pairs are checked via cKDTree bounding-sphere query. Pairs with overlap
+  exceeding `max_overlap_frac × min(r_i, r_j)` (default 15%) are projected apart by half
+  the excess. Handles 2D/3D and periodic/wall BCs. New parameter: `Params.max_overlap_frac`.
+
+### Added
+- **LS-DEM deformable particles** (`lsdem.py`, `new_dem_0.py`): Variational level-set DEM
+  implementation following Henzel & Karapiperis 2026 (arXiv:2602.12895). Each particle gets
+  per-particle scalar deformation DOFs ε_α(t) that modulate fixed spatial mode shapes Φ_α(x).
+  Particle geometry tracked via pre-computed signed distance fields (SDF) on body-frame grids.
+  Contact detection uses surface-node-to-SDF queries (replaces Newton-Raphson for deformable
+  particles), yielding multi-point contact patches. Overdamped deformation dynamics:
+  γ_def dε/dt + K ε = F_ε, integrated with unconditionally stable implicit Euler.
+  New module `lsdem.py` contains all LS-DEM functions; main engine hooks in via conditional
+  branches when `deformable_enabled=True`. Default is `False` (zero performance impact on
+  existing V2.2 rigid simulations).
+  - **SDF infrastructure**: `superellipse_approx_sdf()` / `superellipsoid_approx_sdf()` using
+    gradient-normalized implicit function. Pre-computed on body-frame grids via `init_sdf_grids()`.
+    Bilinear/trilinear interpolation (`query_sdf_2d/3d`) and gradient queries for contact normals.
+  - **Surface node discretization**: Uniform parametric sampling (2D) or Fibonacci sphere
+    projection (3D). Per-node area weights for force integration. Hemisphere culling eliminates
+    ~50% of SDF queries.
+  - **Deformation modes**: Mode 0 = axial compression (volume-preserving), Mode 1 = prolate-oblate
+    shape change. Mode 2 (3D only) = volumetric (very stiff for ν≈0.49). Elastic stiffness
+    K_αβ derived from linear elasticity with shear modulus G and bulk modulus K.
+  - **Semi-Lagrangian SDF update**: Deformed geometry evaluated on-demand via inverse displacement
+    mapping: φ(x,t) = φ₀(x − Σ ε_α Φ_α(x)). No grid recomputation needed.
+  - **Deformation metrics**: `def_strain_mean/max/std`, per-mode statistics tracked in metrics.
+  - New Params: `deformable_enabled`, `n_def_modes`, `sdf_resolution`, `n_surface_nodes`,
+    `n_surface_nodes_3d`, `sdf_padding`, `def_drag_scale`, `def_eps_max`.
+  - MC-DEM automatically disabled when `deformable_enabled=True` (LS-DEM captures multi-contact
+    stiffening geometrically).
+  - **Deformed rendering** (`new_dem_0.py`): `render_fields()` and `render_fields_3d()` now
+    stamp deformed particle shapes when `deformable_enabled=True`, using semi-Lagrangian
+    pull-back through the mode-shape displacement field. Grid points are mapped to each
+    particle's body frame, the inverse deformation u(x) = Σ ε_α Φ_α(x) is subtracted, and
+    the analytical implicit function is evaluated at the pulled-back coordinate. New functions
+    `_stamp_deformed_2d()` and `_stamp_deformed_3d()`. Shows physically flattened contacts
+    and shape changes in rendered phase fields.
+  - **Deformation visualization** (`viz/postprocess.py`): Two new plot functions.
+    `plot_deformation()` draws particles colored by total deformation strain |ε| using the
+    inferno colourmap with a shared colourbar across timepoints. `plot_deformation_timeseries()`
+    shows mean/max strain over time and per-mode amplitude breakdown with ±1σ bands. Both
+    produce output only when deformation data is present (gracefully skip for rigid runs).
+    Postprocess orchestrator updated from 15 to 17 steps. New skip key: `'deformation'`.
+  - **JKR adhesive contact model** (`new_dem_0.py`): Replaced Hertz + DMT adhesion with
+    Johnson-Kendall-Roberts (JKR) model throughout all force computation paths (2D rigid,
+    3D rigid, 2D walls, 3D walls). JKR is correct for soft hydrogels where the Tabor
+    parameter μ_T >> 1. New functions: `jkr_force_from_overlap()` (Newton-Raphson solve for
+    contact radius from overlap), `jkr_contact_radius()` (analytical), `jkr_pulloff_force()`.
+    JKR reduces exactly to Hertz when W_adhesion = 0 (verified numerically). Force:
+    F = (4/3)E*a³/R* − √(8πWE*a³). All existing adhesion parameters (W_adh_ff, W_adh_if,
+    W_adh_ii) now drive JKR instead of DMT. No new parameters required.
+  - **Contact-face half-plane clipping** (`new_dem_0.py`): Per-particle contact clip planes
+    stored during force computation (`gs.contact_clips`). Each contact generates a half-plane
+    (2D) or half-space (3D) constraint: `clip_d = √(R² − a²)` where `a` is the JKR contact
+    radius. During rendering, clip planes are applied as `sdf = max(sdf, plane_sdf)` to create
+    flat faces at contact regions, eliminating unrealistic overlapping circles. New helper
+    functions `_apply_clips_2d()` and `_apply_clips_3d()`. All stamp functions updated:
+    `_stamp_circle_2d()`, `_stamp_superellipse_2d()`, `_stamp_deformed_2d()`,
+    `_stamp_granule_3d()`, `_stamp_deformed_3d()`. Rendering functions `render_fields()` and
+    `render_fields_3d()` pass per-particle clips to stamp calls.
+  - **LS-DEM adhesion** (`new_dem_0.py`): JKR adhesion for LS-DEM deformable contacts applied
+    as translational-only correction at the pair level in `compute_forces()` / `compute_forces_3d()`.
+    After LS-DEM computes pure repulsive penalty forces (which drive deformation DOFs), the
+    adhesion correction F_adh = F_JKR − F_Hertz is applied to translational forces only, keeping
+    it out of deformation generalized forces F_ε. This prevents adhesion from driving unphysical
+    deformation while correctly pulling particles together. Surface nodes in `lsdem.py` remain
+    purely repulsive.
+  - **Multi-stage bridge formation** (`new_dem_0.py`, `viz/cells.py`): New `MIGRATING` state
+    (CellState value 5) implements directed cell crawling before bridge formation. Lifecycle:
+    PROLIFERATING → MIGRATING (directed crawl on granule surface) → BRIDGING (force ramp) →
+    mature bridge. **Cell spatial awareness**: hemisphere check ensures only cells on the
+    target-facing side of a granule can attempt bridges. Probability decays from cell centroid
+    position (not granule center) using cell-specific gap computation. **Directed migration**:
+    MIGRATING cells move along the host granule surface toward the contact point at
+    `cell_migration_speed × bridge_directed_speed_mult` (default 2×). Cells within
+    `bridge_commit_angle` (default 0.5 rad ≈ 29°) of the contact azimuth fast-path directly
+    to BRIDGING. Abandonment: if target leaves sensing range, cell reverts to PROLIFERATING.
+    2D: arc stepping via `cell_theta_local`. 3D: slerp on parametric unit sphere via
+    `cell_eta_local`/`cell_omega_local`. New helper functions: `_cell_world_pos_2d/3d()`,
+    `_compute_gap()`, `_angular_distance_to_target_2d/3d()`. New Params:
+    `bridge_commit_angle=0.5`, `bridge_directed_speed_mult=2.0`. New metric:
+    `n_migrating_cells`. Visualization: royal blue (#4169E1) for MIGRATING cells.
+  - **Bridge exclusion zone** (`new_dem_0.py`): Cells avoid forming bridges near existing
+    BRIDGING or MIGRATING cells on the same granule→target pair. Before attempting a bridge,
+    each candidate cell's angular position is compared to all existing bridge cells on the
+    same granule targeting the same neighbor. If any are within `bridge_exclusion_angle`
+    (default 0.8 rad ≈ 46°), the cell skips and prefers to crawl around the granule to find
+    an unoccupied region. Works in both 2D (theta arc distance) and 3D (great-circle distance
+    on parametric sphere). New Param: `bridge_exclusion_angle=0.8`.
+  - **Post-bridge stress fiber alignment** (`new_dem_0.py`): After entering BRIDGING state,
+    fibroblasts progressively align their stress fibers and elongate along the bridge axis,
+    increasing force output over time. New per-cell `cell_alignment` field (0–1) initialized
+    at `bridge_alignment_min` (default 0.3) on BRIDGING entry, growing exponentially toward
+    1.0 at rate `bridge_alignment_rate` (default 0.3 /h). Bridge force modulated as
+    `F = F_mc × maturity × alignment`, giving a two-stage buildup: initial adhesion ramp
+    (maturity, 0→1 over 2h) followed by continued force amplification as alignment improves
+    (0.3→1.0 over ~6–8h more). Total time to full force ≈ 8–10h, matching real fibroblast
+    remodeling timescales. Alignment resets on bridge rupture or senescence. New Params:
+    `bridge_alignment_rate=0.3`, `bridge_alignment_min=0.3`. New per-cell array:
+    `cell_alignment` (serialized to snapshots).
 
 ---
 
@@ -90,12 +467,60 @@ MINOR tracks feature additions and improvements.
   indefinitely regardless of instantaneous force fluctuations. Previously, force drops below
   threshold on any timestep would reset lock status, causing unrealistic bridge cycling.
   Lock flag is reset only on gap rupture (bridge physically breaks). Serialized in snapshots.
+- **DOE periodic BC optimization** (`Trials/generate_doe.py`): Rewrote DOE generator for
+  periodic boundary conditions. Key changes:
+  - Switched BASE config to `boundary_mode: "periodic"`, `boundary_exclusion: 0.0`.
+  - Reduced N_TARGET from 500 to 250 (periodic BCs eliminate boundary exclusion waste).
+  - Added N_MAX=600 cap to prevent compute blowup from extreme size ratios.
+  - Tightened R bounds from [30,150] to [40,120] µm to avoid heavy-tail compute distribution.
+  - New `compute_domain_size()` enforces three constraints: N_target (particle count),
+    minimum image (L > 2×cutoff for cKDTree periodic correctness), and RVE (L > 4×d_max
+    for bulk packing statistics). Takes max of all three.
+  - Reduced `Ngrid_3d` from 80 to 60 (3.4× faster field rendering).
+  - DOE metadata now includes `_doe_n_target` and `_doe_constraint` per run.
+  - Estimated ~5k CPU-hours for 500 runs (down from ~9k).
+- **References** (`CodeLog/References/REFERENCES.md`): Added §18 Parisi & Zamponi (2010)
+  "Mean-field theory of hard sphere glasses and jamming" and §19 Campello & Cassares (2016)
+  "Rapid generation of particle packs at high packing ratios for DEM simulations."
+- **Two-compartment volume conservation analysis** (`analysis/volume_conservation.py`):
+  New module implementing Voronoi shrink-wrap compartment analysis for verifying global
+  volume conservation. Assigns each voxel to the functional or inert compartment via
+  nearest-granule cKDTree tessellation (periodic-BC aware). Uses exact granule geometry
+  volumes (not rendered phase fields) for conservation accounting — `phi_solid_true` is
+  provably constant to machine precision. Key functions: `voronoi_compartments()`,
+  `compartment_metrics()`, `conservation_from_run()`. Generates 4-panel conservation
+  figure (global conservation, compartment volumes, local void redistribution, cross-check)
+  and compartment boundary slice overlay. Integrated as step 15/15 in `viz/postprocess.py`.
+- **True granule-based volume metrics** (`new_dem_0.py`): Added `phi_f_true`, `phi_i_true`,
+  `phi_solid_true` to `compute_metrics()` output. Computed from exact granule geometry
+  (sphere: 4/3 pi R^3, superellipsoid: `superellipsoid_volume(a,b,c,n1,n2)`) — invariant
+  during simulation since radii/shapes do not change. Provides a rendering-independent
+  ground truth for volume conservation verification.
+- **Inline Voronoi two-compartment metrics** (`new_dem_0.py`): Added per-timestep compartment
+  tracking (x_f, x_i, phi_v_in_func, phi_v_in_inert, phi_solid_func, phi_solid_inert,
+  phi_v_crosscheck) to `compute_metrics()` using the same Voronoi nearest-granule approach
+  on the phase field grid.
+- **Additive phase field blending** (`new_dem_0.py`): Changed 2D and 3D field stamping from
+  `np.maximum()` (max-blending) to `+=` (additive blending). Max-blending loses volume when
+  same-type granules overlap; additive blending preserves total deposited volume.
+- **Iterative volume normalization** (`new_dem_0.py`): `render_fields_3d()` and `render_fields()`
+  now apply iterative scale-and-cap normalization (up to 20 iterations) to match rendered
+  phase field totals to true granule volumes. Residual error is <1% for typical packings
+  (fundamental limit from per-voxel cap at 1.0 in dense overlap regions).
 
 ### Bug Fixes
 - **Periodic boundary bridge visualization** (`viz/cells.py`): Fixed `_nearest_surface_point()`
   to apply minimum image convention when computing bridge target surface points. Previously,
   bridges crossing periodic boundaries were drawn spanning the entire domain width. Now correctly
   renders short bridges that visually terminate at domain edges.
+- **Critical: phi_solid_target not applied at runtime** (`new_dem_0.py`): Fixed a bug where
+  `phi_solid_target` and `func_ratio` overrides loaded from trial JSON configs were not
+  propagated to `phi_f_target`/`phi_i_target`. The `Params.__post_init__` derivation runs at
+  construction time, but trial configs apply overrides via `setattr()` after construction,
+  leaving phi targets at defaults (0.25/0.20 = 0.45 total) instead of the intended values
+  (0.55–0.85). Fix: added re-derivation at the start of `run()` so phi targets always
+  reflect the current `phi_solid_target × func_ratio`. This affected all DOE runs using the
+  `phi_solid_target` specification path.
 
 ---
 
@@ -398,7 +823,7 @@ MINOR tracks feature additions and improvements.
   trabecular bone, lung alveoli, liver, kidney cortex, cardiac muscle, pancreatic islet,
   intestinal mucosa. Each with mean, standard deviation (natural variability), description,
   and key references. Radar/spider chart for organ profile comparison.
-- **`arch_distance.py`**: Weighted Mahalanobis-like architectural distance between GELLS
+- **`arch_distance.py`**: Weighted Mahalanobis-like architectural distance between GELS
   scaffolds and organ targets. Log-transform for scale-dependent descriptors (BV/TV, Tb.Th,
   etc.) so ratios drive comparison. `distance_trajectory()` tracks which organ the scaffold
   converges toward over time. `optimal_parameters()` finds DOE conditions minimizing distance

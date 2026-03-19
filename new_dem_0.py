@@ -135,12 +135,32 @@ class Params:
     bridge_lock_force_threshold: float = 20.0  # nN, force above which bridging cells lock in (won't go senescent)
     bridge_secondary_rate_mult: float = 3.0    # rate multiplier for new bridges when existing bridge present
     expected_bridge_force: float = 100.0       # nN, expected force per bridging cell (diagnostic reference)
+    bridge_contact_factor: float = 5.0         # path factor: boost at direct granule contact
+    bridge_decay_length: float = 10.0          # µm, characteristic filopodia reach (void decay length)
+    bridge_inert_factor: float = 0.1           # path factor: penalty when inert blocks line-of-sight
+    bridge_commit_angle: float = 0.5           # rad (~29°), angular threshold for MIGRATING→BRIDGING
+    bridge_directed_speed_mult: float = 2.0    # directed crawl speed = cell_migration_speed × this
+    bridge_exclusion_angle: float = 0.8        # rad (~46°), min angular separation between bridges on same granule→target
+    bridge_alignment_rate: float = 0.3         # 1/h, rate of stress fiber alignment along bridge axis
+    bridge_alignment_min: float = 0.3          # initial alignment factor when bridge first forms
+    cell_stacking_max: float = 3.0             # max cell layers before overcrowding (1.0 = monolayer)
+    overcrowd_senescence_time: float = 12.0    # h, sustained overcrowding before senescence
 
     # ── Contact mechanics (Hertzian + MC-DEM) ──
     E_modulus: float = 10.0         # kPa, Young's modulus of hydrogel
     poisson_ratio: float = 0.45     # Poisson's ratio (hydrogels ~0.4-0.5)
     mc_dem_enabled: bool = True     # enable multi-contact DEM stiffening (Giannis 2021)
     mc_dem_kappa_max: float = 5.0   # max confinement correction factor (caps stiffening)
+
+    # ── LS-DEM deformable granules (V2.3, Henzel & Karapiperis 2026) ──
+    deformable_enabled: bool = False       # master switch (False = V2.2 rigid)
+    n_def_modes: int = 2                   # deformation modes per particle (2D: 2, 3D: 3)
+    sdf_resolution: int = 32              # SDF grid points per axis (body frame)
+    n_surface_nodes: int = 128            # surface discretization nodes (2D)
+    n_surface_nodes_3d: int = 512         # surface discretization nodes (3D)
+    sdf_padding: float = 1.3             # SDF grid extent = padding * max_semi_axis
+    def_drag_scale: float = 0.1          # deformation drag γ_def scaling
+    def_eps_max: float = 0.3             # max deformation amplitude |ε_α| cap
 
     # ── Hydrogel friction (area-dependent, Gong 2006 / Pitenis 2014) ──
     tau_0_ii: float = 50.0          # Pa, inert-inert shear stress (bare Gemini gel)
@@ -165,6 +185,7 @@ class Params:
     t_total: float = 72.0           # hours
     save_every_h: float = 2.0       # save interval (hours)
     v_max: float = 20.0             # µm/hr, velocity cap
+    max_overlap_frac: float = 0.15   # max allowed overlap as fraction of min(ri,rj)
 
     # ── Granule shape (V1.3 — 2D superellipses) ──
     shape_enabled: bool = False                # False = circles/spheres (V1.2 compat)
@@ -205,11 +226,12 @@ class Params:
     # ── Performance ──
     use_numba: bool = True          # use Numba JIT if available
 
-    # ── Data serialization (V1.5) ──
+    # ── Data serialization (V1.5, updated V2.6) ──
     save_data: bool = True              # save simulation data to disk
-    save_fields: bool = True            # save phase field grids (needed for visualization)
+    save_fields: bool = False           # skip field grids during sim; reconstruct at plot time
     output_dir: str = "results/default" # output directory for serialized data
     compress_archive: bool = True       # create .tar.gz at end of simulation
+    resume_from: str = ""               # path to run directory to resume from (empty = fresh)
 
     @property
     def L_max(self):
@@ -238,6 +260,7 @@ class CellState(IntEnum):
     PROLIFERATING = 2   # fully spread, FA mature
     BRIDGING = 3        # generating traction force across a gap
     SENESCENT = 4       # overcrowded / inactive
+    MIGRATING = 5       # directed crawl toward bridge target (V2.3)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -326,6 +349,23 @@ class GranuleSystem:
         self.y_unwrap = self.y.copy()
         self.z_unwrap = self.z.copy()
 
+        # ── LS-DEM deformation state (V2.3, allocated by lsdem.init_lsdem) ──
+        self.epsilon = None              # (N, n_def_modes) deformation amplitudes
+        self.d_epsilon = None            # (N, n_def_modes) time derivatives
+        self.sdf_grids = None            # list of N ndarrays (body-frame SDF)
+        self.sdf_extents = None          # (N, ndim, 2) grid bounding boxes
+        self.surface_nodes_body = None   # (N, n_nodes, ndim) reference positions
+        self.surface_normals_body = None # (N, n_nodes, ndim) outward normals
+        self.surface_node_areas = None   # (N, n_nodes) area weights
+        self.mode_shapes_at_nodes = None # (N, n_nodes, n_modes, ndim)
+        self.K_def = None                # (N, n_modes, n_modes) stiffness matrices
+        self.F_eps_accum = None          # (N, n_modes) accumulated deformation forces
+
+        # ── JKR contact clip planes for rendering (V2.3) ──
+        # Each element is a list of (nx, ny [,nz], clip_distance) tuples.
+        # Populated during compute_forces(), consumed by render_fields().
+        self.contact_clips = [[] for _ in range(self.N)]
+
         # ── Per-cell tracking (V1.5) ──
         total_cells = int(np.sum(n_cells))
         self.total_cells = total_cells
@@ -348,6 +388,8 @@ class GranuleSystem:
         self.cell_contact_area = np.zeros(total_cells, dtype=np.float64)   # footprint area (µm²)
         self.cell_bridge_age = np.zeros(total_cells, dtype=np.float64)     # hours in bridge state
         self.cell_bridge_locked = np.zeros(total_cells, dtype=np.bool_)    # persistent lock-in flag
+        self.cell_overcrowd_age = np.zeros(total_cells, dtype=np.float64)  # hours in overcrowded state
+        self.cell_alignment = np.zeros(total_cells, dtype=np.float64)      # stress fiber alignment (0–1)
 
     def positions(self):
         if self.mode == "3D":
@@ -639,6 +681,112 @@ def hertz_contact_force(E_star_Pa, R_eff_um, delta_um):
         F_nN = (4/3) · E*_Pa · √(R*_µm) · δ_µm^{3/2} · 10⁻³
     """
     return (4.0 / 3.0) * E_star_Pa * np.sqrt(R_eff_um) * delta_um**1.5 * 1e-3
+
+
+# ── JKR (Johnson-Kendall-Roberts) adhesive contact model ──────────
+# Correct model for soft hydrogels with high Tabor parameter μ_T >> 1.
+# Reduces exactly to Hertz when W_adhesion = 0.
+
+@njit(cache=True)
+def jkr_force_from_overlap(delta_um, R_eff_um, E_star_Pa, W_Jm2):
+    """
+    JKR contact force and contact radius from overlap δ.
+
+    Given overlap δ [µm], solve for contact radius a via Newton-Raphson on:
+        δ = a²/R* − √(2πW a / E*)
+    Then compute JKR force:
+        F = (4/3)E* a³/R* − √(8πW E* a³)
+
+    Units: δ [µm], R_eff [µm], E_star [Pa], W [J/m²]
+    Returns: (F [nN], a [µm])
+
+    When W=0, reduces to Hertz: F = (4/3)E*√R* δ^{3/2}, a = √(R*δ).
+    """
+    E_s = E_star_Pa * 1e-3   # nN/µm²
+    W_s = W_Jm2              # nN/µm  (1 J/m² = 1 nN/µm)
+
+    # Pure Hertz fast-path when no adhesion
+    if W_s < 1e-15:
+        if delta_um <= 0.0:
+            return 0.0, 0.0
+        a = np.sqrt(R_eff_um * delta_um)
+        F = (4.0 / 3.0) * E_s * a**3 / R_eff_um
+        return F, a
+
+    # No contact and no adhesion pull
+    if delta_um <= 0.0:
+        # Check adhesive pull at zero overlap
+        a = (6.0 * np.pi * W_s * R_eff_um**2 / E_s) ** (1.0 / 3.0)
+        F = (4.0 / 3.0) * E_s * a**3 / R_eff_um - np.sqrt(
+            8.0 * np.pi * W_s * E_s * a**3)
+        if F >= 0.0:
+            return 0.0, 0.0  # repulsive at zero gap — no contact
+        # Adhesive pull — but only within a small range
+        if delta_um < -0.1 * R_eff_um:
+            return 0.0, 0.0
+
+    # Initial guess for contact radius
+    if delta_um > 0.0:
+        a = np.sqrt(R_eff_um * delta_um)
+    else:
+        a = (6.0 * np.pi * W_s * R_eff_um**2 / E_s) ** (1.0 / 3.0)
+
+    # Newton-Raphson: solve δ = a²/R* − √(2πW a / E*) for a
+    for _ in range(30):
+        if a < 1e-12:
+            a = 1e-6
+        sqrt_term = np.sqrt(2.0 * np.pi * W_s * a / E_s) if a > 0 else 0.0
+        f = a**2 / R_eff_um - sqrt_term - delta_um
+        if a > 1e-12:
+            dfda = 2.0 * a / R_eff_um - np.sqrt(
+                np.pi * W_s / (2.0 * E_s * a))
+        else:
+            dfda = 2.0 * a / R_eff_um
+        if abs(dfda) < 1e-30:
+            break
+        a_new = a - f / dfda
+        if a_new < 0.0:
+            a_new = a * 0.5
+        if abs(a_new - a) < 1e-8:
+            a = a_new
+            break
+        a = a_new
+
+    if a < 1e-10:
+        return 0.0, 0.0
+
+    # JKR force from contact radius
+    F = (4.0 / 3.0) * E_s * a**3 / R_eff_um - np.sqrt(
+        8.0 * np.pi * W_s * E_s * a**3)
+    return F, a
+
+
+@njit(cache=True)
+def jkr_contact_radius(F_ext_nN, R_eff_um, E_star_Pa, W_Jm2):
+    """
+    JKR contact radius from applied external force.
+
+    a³ = (R*/E*) [F + 3πWR* + √(6πWR*F + (3πWR*)²)]
+
+    Units: F_ext [nN], R_eff [µm], E_star [Pa], W [J/m²]
+    Returns: a [µm]
+    """
+    E_s = E_star_Pa * 1e-3
+    W_s = W_Jm2
+    term1 = 3.0 * np.pi * W_s * R_eff_um
+    inner = 6.0 * np.pi * W_s * R_eff_um * F_ext_nN + term1**2
+    if inner < 0.0:
+        inner = 0.0
+    a_cubed = (R_eff_um / E_s) * (F_ext_nN + term1 + np.sqrt(inner))
+    if a_cubed < 0.0:
+        return 0.0
+    return a_cubed ** (1.0 / 3.0)
+
+
+@njit(cache=True)
+def jkr_pulloff_force(R_eff_um, W_Jm2):
+    """Pull-off force: F_po = (3/2)πWR* [nN]."""
+    return 1.5 * np.pi * W_Jm2 * R_eff_um
 
 
 def mc_dem_correction(contacts, gs, p, E_star_gg, F):
@@ -1084,7 +1232,7 @@ def overlap_lens_volume(R1, R2, d):
     return np.pi * numer / (12.0 * d)
 
 
-def compute_effective_radii_3d(gs):
+def compute_effective_radii_3d(gs, p=None):
     """
     Volume-conserving effective radii for 3D spheres.
 
@@ -1101,13 +1249,20 @@ def compute_effective_radii_3d(gs):
     """
     pos = gs.positions()
     max_r = np.max(gs.r)
-    tree = cKDTree(pos)
+    periodic = (p is not None and getattr(p, 'boundary_mode', 'walls') == 'periodic')
+    if periodic:
+        tree = cKDTree(pos, boxsize=[p.Lx, p.Ly, p.Lz])
+    else:
+        tree = cKDTree(pos)
     pairs = tree.query_pairs(2 * max_r, output_type='ndarray')
 
     overlap_vol = np.zeros(gs.N)
     for idx in range(len(pairs)):
         i, j = pairs[idx]
         dv = pos[j] - pos[i]
+        if periodic:
+            dv[0], dv[1], dv[2] = minimum_image_disp_3d(
+                dv[0], dv[1], dv[2], p.Lx, p.Ly, p.Lz)
         d = np.sqrt(np.dot(dv, dv))
         if d < gs.r[i] + gs.r[j]:
             V_lens = overlap_lens_volume(gs.r[i], gs.r[j], d)
@@ -1119,7 +1274,7 @@ def compute_effective_radii_3d(gs):
     return r_eff, overlap_vol
 
 
-def compute_effective_radii(gs):
+def compute_effective_radii(gs, p=None):
     """
     Volume-conserving effective radii (2D).
 
@@ -1136,7 +1291,11 @@ def compute_effective_radii(gs):
     """
     pos = gs.positions()
     max_r = np.max(gs.r)
-    tree = cKDTree(pos)
+    periodic = (p is not None and getattr(p, 'boundary_mode', 'walls') == 'periodic')
+    if periodic:
+        tree = cKDTree(pos, boxsize=[p.Lx, p.Ly])
+    else:
+        tree = cKDTree(pos)
     pairs = tree.query_pairs(2 * max_r, output_type='ndarray')
 
     overlap_area = np.zeros(gs.N)
@@ -1144,6 +1303,8 @@ def compute_effective_radii(gs):
         i, j = pairs[idx]
         dx = pos[j, 0] - pos[i, 0]
         dy = pos[j, 1] - pos[i, 1]
+        if periodic:
+            dx, dy = minimum_image_disp(dx, dy, p.Lx, p.Ly)
         d = np.sqrt(dx*dx + dy*dy)
         if d < gs.r[i] + gs.r[j]:
             A_lens = overlap_lens_area(gs.r[i], gs.r[j], d)
@@ -1363,6 +1524,10 @@ def _update_individual_cells(gs: GranuleSystem, p: Params, rng=None):
             # ── Preserve committed bridges ──
             if gs.cell_state[ci] == int(CellState.BRIDGING):
                 gs.cell_bridge_age[ci] += p.dt
+                # Stress fiber alignment: cells elongate along bridge axis over time
+                gs.cell_alignment[ci] += p.bridge_alignment_rate * p.dt * (
+                    1.0 - gs.cell_alignment[ci])
+                gs.cell_alignment[ci] = min(gs.cell_alignment[ci], 1.0)
                 # Check force magnitude from previous timestep (still in cell_fx/fy/fz)
                 F_mag = np.sqrt(gs.cell_fx[ci]**2 + gs.cell_fy[ci]**2
                                 + gs.cell_fz[ci]**2)
@@ -1380,23 +1545,114 @@ def _update_individual_cells(gs: GranuleSystem, p: Params, rng=None):
                     gs.cell_bridge_target[ci] = -1
                     gs.cell_bridge_age[ci] = 0.0
                     gs.cell_bridge_locked[ci] = False
+                    gs.cell_alignment[ci] = 0.0
                 continue  # don't overwrite bridge state
+
+            # ── Directed migration for MIGRATING cells (V2.3) ──
+            if gs.cell_state[ci] == int(CellState.MIGRATING):
+                tgt = int(gs.cell_bridge_target[ci])
+                if tgt < 0 or tgt >= gs.N:
+                    # Invalid target — revert
+                    gs.cell_state[ci] = int(CellState.PROLIFERATING)
+                    gs.cell_bridge_target[ci] = -1
+                    continue
+
+                # Abandonment: target out of sensing range?
+                gap = _compute_gap(gs, i, tgt, p)
+                if gap > p.cell_sense_distance:
+                    gs.cell_state[ci] = int(CellState.PROLIFERATING)
+                    gs.cell_bridge_target[ci] = -1
+                    gs.cell_bridge_age[ci] = 0.0
+                    continue
+
+                # Angular distance to contact azimuth
+                if gs.mode == "3D":
+                    ang_d, tgt_eta, tgt_omega = _angular_distance_to_target_3d(
+                        gs, ci, tgt, p)
+                else:
+                    ang_d, tgt_theta, signed_diff = _angular_distance_to_target_2d(
+                        gs, ci, tgt, p)
+
+                # Arrival: close enough to contact point → BRIDGING
+                if ang_d < p.bridge_commit_angle:
+                    gs.cell_state[ci] = int(CellState.BRIDGING)
+                    gs.cell_bridge_age[ci] = 0.0  # reset for force ramp
+                    gs.cell_alignment[ci] = p.bridge_alignment_min
+                    continue
+
+                # Directed migration step
+                directed_speed = p.cell_migration_speed * p.bridge_directed_speed_mult
+                r_eff = max(gs.r[i], 1.0)
+                step = directed_speed * p.dt / r_eff  # radians per timestep
+
+                if gs.mode == "3D":
+                    # Great-circle slerp toward target
+                    cell_eta = gs.cell_eta_local[ci]
+                    cell_omega = gs.cell_omega_local[ci]
+                    p_curr = np.array([np.cos(cell_eta) * np.cos(cell_omega),
+                                       np.cos(cell_eta) * np.sin(cell_omega),
+                                       np.sin(cell_eta)])
+                    p_tgt = np.array([np.cos(tgt_eta) * np.cos(tgt_omega),
+                                      np.cos(tgt_eta) * np.sin(tgt_omega),
+                                      np.sin(tgt_eta)])
+                    if ang_d > 1e-8:
+                        frac = min(step, ang_d) / ang_d
+                        sin_a = np.sin(ang_d)
+                        if sin_a > 1e-12:
+                            p_new = (np.sin((1 - frac) * ang_d) * p_curr
+                                     + np.sin(frac * ang_d) * p_tgt) / sin_a
+                        else:
+                            p_new = p_curr
+                        new_omega = np.arctan2(p_new[1], p_new[0]) % (2 * np.pi)
+                        r_xy = np.sqrt(p_new[0]**2 + p_new[1]**2)
+                        new_eta = np.arctan2(p_new[2], r_xy)
+                        gs.cell_eta_local[ci] = np.clip(
+                            new_eta, -0.85 * np.pi / 2, 0.85 * np.pi / 2)
+                        gs.cell_omega_local[ci] = new_omega
+                else:
+                    # 2D: arc step toward target theta
+                    actual_step = min(step, abs(signed_diff))
+                    gs.cell_theta_local[ci] += np.sign(signed_diff) * actual_step
+                    gs.cell_theta_local[ci] %= (2 * np.pi)
+
+                gs.cell_bridge_age[ci] += p.dt  # track migration time
+                continue  # don't overwrite migrating state
 
             # ── Already senescent stays senescent ──
             if gs.cell_state[ci] == int(CellState.SENESCENT):
                 continue
 
-            # ── Normal state assignment ──
-            if k >= n_att:
+            # ── Normal state assignment (with stacking tolerance) ──
+            # Monolayer capacity from overcrowding check
+            if p.cell_surface_coverage > 0:
+                cap = cells_from_surface_coverage(
+                    gs.r[i], p.cell_diameter, p.cell_height_spread,
+                    p.cell_surface_coverage, p.mode)
+            else:
+                A_cell_cap = cell_projected_area(sf, p.cell_diameter, p.cell_height_spread)
+                cap = max_cells_on_granule(gs.r[i], A_cell_cap, p.cell_coverage)
+            effective_cap = int(round(cap * p.cell_stacking_max))
+
+            if k >= effective_cap:
+                # Beyond max stacking — immediate senescence
                 gs.cell_state[ci] = int(CellState.SENESCENT)
-            elif k >= (n_att - n_over) and n_over > 0:
-                gs.cell_state[ci] = int(CellState.SENESCENT)
+                gs.cell_overcrowd_age[ci] = 0.0
+            elif k >= cap and n_over > 0:
+                # Overcrowded but within stacking tolerance — delayed senescence
+                gs.cell_overcrowd_age[ci] += p.dt
+                if gs.cell_overcrowd_age[ci] >= p.overcrowd_senescence_time:
+                    gs.cell_state[ci] = int(CellState.SENESCENT)
+                    gs.cell_overcrowd_age[ci] = 0.0
+                # else: stay in current mobile state (crawling on other cells)
             elif sf >= 0.95 and fa >= 0.5:
                 gs.cell_state[ci] = int(CellState.PROLIFERATING)
+                gs.cell_overcrowd_age[ci] = 0.0
             elif sf > 0.0:
                 gs.cell_state[ci] = int(CellState.SPREADING)
+                gs.cell_overcrowd_age[ci] = 0.0
             else:
                 gs.cell_state[ci] = int(CellState.ATTACHED)
+                gs.cell_overcrowd_age[ci] = 0.0
 
         # ── Cell migration: random walk on granule surface ──
         if rng is not None and p.cell_migration_speed > 0:
@@ -1423,102 +1679,223 @@ def _update_individual_cells(gs: GranuleSystem, p: Params, rng=None):
 # ══════════════════════════════════════════════════════════════════════
 
 def _settle_packing_2d(gs, p):
-    """Run short isotropic compression micro-steps to bring granules into contact.
+    """Inflate granules from deflated RSA state to target radii (Lubachevsky-Stillinger).
 
-    Uses a centroid-attraction + Hertz repulsion scheme:
-    each granule is gently pushed toward the domain centre while
-    overlapping neighbours are repelled. This produces a jammed
-    packing where most granules are touching at least one neighbour.
+    The system starts with all granules at reduced radii (set by generate_packing).
+    Target radii are stored in gs._target_a/b/r.  This function:
+      1. Linearly inflates radii from current to target over packing_settle_steps.
+      2. At each inflation step, runs packing_relax_substeps of overlap relaxation
+         using vectorised Hertz-like repulsion.
+      3. For wall BCs, also applies centripetal attraction.
+    Result: a jammed packing at the target solid fraction with Z ≈ 3–4.
 
-    For periodic boundaries, centripetal attraction is replaced with
-    random perturbation (no preferred centre), and positions are wrapped.
+    Falls back to simple centripetal settle if no deflation was applied.
     """
     N = gs.N
     periodic = (p.boundary_mode == 'periodic')
-    cx_dom, cy_dom = p.Lx / 2, p.Ly / 2
-    dt_settle = 0.02  # micro-step size (µm per step)
-    repulsion_k = 2.0  # overlap repulsion strength
+    Lx, Ly = p.Lx, p.Ly
+    n_inflate = p.packing_settle_steps
+    n_relax = p.packing_relax_substeps
+    dt_settle = 0.02
+    k_rep = 5.0        # Hertzian repulsion stiffness
+    v_cap_frac = 0.3   # max displacement per sub-step = v_cap_frac * mean_r
 
-    print(f"  Settling packing ({p.packing_settle_steps} steps)...", end="", flush=True)
+    # Retrieve target radii stored by generate_packing
+    target_a = getattr(gs, '_target_a', gs.a.copy())
+    target_b = getattr(gs, '_target_b', gs.b.copy())
+    target_r = getattr(gs, '_target_r', gs.r.copy())
 
-    rng_settle = np.random.default_rng(12345)
+    # Compute initial deflation factor from current vs target
+    ratio = gs.r[:N] / np.maximum(target_r[:N], 1e-6)
+    alpha_start = float(np.median(ratio))
+    alpha_start = max(alpha_start, 0.1)
 
-    for step_i in range(p.packing_settle_steps):
-        pos = gs.positions()  # (N, 2)
+    mean_r_target = float(np.mean(target_r[:N]))
+    v_cap = v_cap_frac * mean_r_target
+
+    print(f"  Settling 2D packing ({n_inflate} inflate × {n_relax} relax, "
+          f"α={alpha_start:.2f}→1.00)...")
+
+    cx_dom, cy_dom = Lx / 2, Ly / 2
+
+    for step in range(n_inflate):
+        # Quadratic ease-in: spend more time near α=1 where jamming is hard
+        t = (step + 1) / n_inflate
+        alpha = alpha_start + (1.0 - alpha_start) * (1.0 - (1.0 - t)**2)
+
+        # Inflate radii
+        gs.a[:N] = target_a[:N] * alpha
+        gs.b[:N] = target_b[:N] * alpha
+        gs.r[:N] = target_r[:N] * alpha
+        gs.r_bound[:N] = np.maximum(gs.a[:N], gs.b[:N])
+
+        max_rb = float(np.max(gs.r_bound[:N]))
+
+        # Overlap relaxation sub-loop
+        for sub in range(n_relax):
+            pos = gs.positions()  # (N, 2)
+            fx = np.zeros(N)
+            fy = np.zeros(N)
+
+            # Wall BCs: centripetal attraction (decays over inflation)
+            if not periodic:
+                attract = max(0.3 * (1.0 - t), 0.02)
+                dx_c = cx_dom - pos[:, 0]
+                dy_c = cy_dom - pos[:, 1]
+                d_c = np.sqrt(dx_c**2 + dy_c**2) + 1e-12
+                scale = attract * gs.r_bound[:N] / d_c
+                fx += scale * dx_c
+                fy += scale * dy_c
+
+            # Neighbour search
+            if periodic:
+                tree = cKDTree(pos, boxsize=[Lx, Ly])
+            else:
+                tree = cKDTree(pos)
+            pairs = tree.query_pairs(2 * max_rb, output_type='ndarray')
+
+            max_overlap = 0.0
+            if len(pairs) > 0:
+                pi = pairs[:, 0]
+                pj = pairs[:, 1]
+                dx = pos[pj, 0] - pos[pi, 0]
+                dy = pos[pj, 1] - pos[pi, 1]
+                if periodic:
+                    dx -= Lx * np.round(dx / Lx)
+                    dy -= Ly * np.round(dy / Ly)
+                d = np.sqrt(dx*dx + dy*dy) + 1e-12
+                overlap = gs.r_bound[pi] + gs.r_bound[pj] - d
+                mask = overlap > 0
+                if np.any(mask):
+                    ov = overlap[mask]
+                    max_overlap = float(np.max(ov))
+                    inv_d = 1.0 / d[mask]
+                    nx = dx[mask] * inv_d
+                    ny = dy[mask] * inv_d
+                    f = k_rep * ov ** 1.5
+                    np.add.at(fx, pi[mask], -f * nx)
+                    np.add.at(fy, pi[mask], -f * ny)
+                    np.add.at(fx, pj[mask],  f * nx)
+                    np.add.at(fy, pj[mask],  f * ny)
+
+            # Overdamped move with velocity cap
+            f_mag = np.sqrt(fx*fx + fy*fy) + 1e-12
+            scale = np.minimum(dt_settle, v_cap / f_mag)
+            gs.x[:N] += fx * scale
+            gs.y[:N] += fy * scale
+
+            # Boundary handling
+            if periodic:
+                gs.x[:N] %= Lx
+                gs.y[:N] %= Ly
+            else:
+                rb = gs.r_bound[:N]
+                gs.x[:N] = np.clip(gs.x[:N], rb, Lx - rb)
+                gs.y[:N] = np.clip(gs.y[:N], rb, Ly - rb)
+
+            # Early exit if overlaps are small
+            if max_overlap < 0.01 * mean_r_target:
+                break
+
+        # Progress
+        if step % 100 == 0 or step == n_inflate - 1:
+            pos = gs.positions()
+            if periodic:
+                tree = cKDTree(pos, boxsize=[Lx, Ly])
+            else:
+                tree = cKDTree(pos)
+            cpairs = tree.query_pairs(2 * max_rb + 1.0, output_type='ndarray')
+            n_contacts = 0
+            if len(cpairs) > 0:
+                pi_c, pj_c = cpairs[:, 0], cpairs[:, 1]
+                dx_c = pos[pj_c, 0] - pos[pi_c, 0]
+                dy_c = pos[pj_c, 1] - pos[pi_c, 1]
+                if periodic:
+                    dx_c -= Lx * np.round(dx_c / Lx)
+                    dy_c -= Ly * np.round(dy_c / Ly)
+                d_c = np.sqrt(dx_c**2 + dy_c**2)
+                gaps = d_c - gs.r_bound[pi_c] - gs.r_bound[pj_c]
+                n_contacts = int(np.sum(gaps < 1.0))
+            Z = 2 * n_contacts / max(N, 1)
+            print(f"    step {step}/{n_inflate}: α={alpha:.3f}, "
+                  f"max_overlap={max_overlap:.1f} µm, Z={Z:.1f}")
+
+    # ── Post-inflation relaxation: resolve remaining deep overlaps ──
+    overlap_tol = 0.05 * mean_r_target
+    max_post_relax = 1000
+    max_rb = float(np.max(gs.r_bound[:N]))
+    for extra in range(max_post_relax):
+        pos = gs.positions()
         fx = np.zeros(N)
         fy = np.zeros(N)
 
         if periodic:
-            # Small random jitter instead of centripetal attraction
-            jitter = 0.3 * max(0.5 * (1.0 - step_i / p.packing_settle_steps), 0.05)
-            fx += jitter * rng_settle.standard_normal(N)
-            fy += jitter * rng_settle.standard_normal(N)
-        else:
-            # Gentle centripetal attraction (decays with step count)
-            attract = max(0.5 * (1.0 - step_i / p.packing_settle_steps), 0.05)
-            for i in range(N):
-                dx = cx_dom - pos[i, 0]
-                dy = cy_dom - pos[i, 1]
-                d = np.sqrt(dx*dx + dy*dy) + 1e-12
-                fx[i] += attract * dx / d * gs.r_bound[i]
-                fy[i] += attract * dy / d * gs.r_bound[i]
-
-        # Pairwise repulsion for overlapping bounding spheres
-        if periodic:
-            tree = cKDTree(pos, boxsize=[p.Lx, p.Ly])
+            tree = cKDTree(pos, boxsize=[Lx, Ly])
         else:
             tree = cKDTree(pos)
-        max_rb = float(np.max(gs.r_bound))
         pairs = tree.query_pairs(2 * max_rb, output_type='ndarray')
-        for idx in range(len(pairs)):
-            i, j = pairs[idx]
-            dx = pos[j, 0] - pos[i, 0]
-            dy = pos[j, 1] - pos[i, 1]
+
+        max_overlap = 0.0
+        if len(pairs) > 0:
+            pi = pairs[:, 0]
+            pj = pairs[:, 1]
+            dx = pos[pj, 0] - pos[pi, 0]
+            dy = pos[pj, 1] - pos[pi, 1]
             if periodic:
-                dx, dy = minimum_image_disp(dx, dy, p.Lx, p.Ly)
+                dx -= Lx * np.round(dx / Lx)
+                dy -= Ly * np.round(dy / Ly)
             d = np.sqrt(dx*dx + dy*dy) + 1e-12
-            overlap = gs.r_bound[i] + gs.r_bound[j] - d
-            if overlap > 0:
-                # Push apart proportional to overlap
-                nx, ny = dx / d, dy / d
-                f_rep = repulsion_k * overlap
-                fx[i] -= f_rep * nx
-                fy[i] -= f_rep * ny
-                fx[j] += f_rep * nx
-                fy[j] += f_rep * ny
+            overlap = gs.r_bound[pi] + gs.r_bound[pj] - d
+            mask = overlap > 0
+            if np.any(mask):
+                ov = overlap[mask]
+                max_overlap = float(np.max(ov))
+                inv_d = 1.0 / d[mask]
+                nx = dx[mask] * inv_d
+                ny = dy[mask] * inv_d
+                f = k_rep * ov ** 1.5
+                np.add.at(fx, pi[mask], -f * nx)
+                np.add.at(fy, pi[mask], -f * ny)
+                np.add.at(fx, pj[mask],  f * nx)
+                np.add.at(fy, pj[mask],  f * ny)
 
-        # Move
-        gs.x += fx * dt_settle
-        gs.y += fy * dt_settle
+        if max_overlap < overlap_tol:
+            break
 
-        # Boundary handling
+        f_mag = np.sqrt(fx*fx + fy*fy) + 1e-12
+        scale = np.minimum(dt_settle, v_cap / f_mag)
+        gs.x[:N] += fx * scale
+        gs.y[:N] += fy * scale
+
         if periodic:
-            gs.x[:N] %= p.Lx
-            gs.y[:N] %= p.Ly
+            gs.x[:N] %= Lx
+            gs.y[:N] %= Ly
         else:
-            for i in range(N):
-                rb = gs.r_bound[i]
-                gs.x[i] = np.clip(gs.x[i], rb, p.Lx - rb)
-                gs.y[i] = np.clip(gs.y[i], rb, p.Ly - rb)
+            rb = gs.r_bound[:N]
+            gs.x[:N] = np.clip(gs.x[:N], rb, Lx - rb)
+            gs.y[:N] = np.clip(gs.y[:N], rb, Ly - rb)
 
-    # Count contacts after settling
+    # Final contact count
     pos = gs.positions()
     if periodic:
-        tree = cKDTree(pos, boxsize=[p.Lx, p.Ly])
+        tree = cKDTree(pos, boxsize=[Lx, Ly])
     else:
         tree = cKDTree(pos)
-    pairs = tree.query_pairs(2 * float(np.max(gs.r_bound)) + 1.0, output_type='ndarray')
+    cpairs = tree.query_pairs(2 * max_rb + 1.0, output_type='ndarray')
     n_contacts = 0
-    for idx in range(len(pairs)):
-        i, j = pairs[idx]
-        dv = pos[j] - pos[i]
+    if len(cpairs) > 0:
+        pi_c, pj_c = cpairs[:, 0], cpairs[:, 1]
+        dx_c = pos[pj_c, 0] - pos[pi_c, 0]
+        dy_c = pos[pj_c, 1] - pos[pi_c, 1]
         if periodic:
-            dv[0], dv[1] = minimum_image_disp(dv[0], dv[1], p.Lx, p.Ly)
-        d = np.sqrt(np.dot(dv, dv))
-        gap = d - gs.r_bound[i] - gs.r_bound[j]
-        if gap < 1.0:  # within 1 µm = effectively touching
-            n_contacts += 1
-    print(f" done ({n_contacts} contacts, {n_contacts/max(N,1):.1f}/granule avg)")
+            dx_c -= Lx * np.round(dx_c / Lx)
+            dy_c -= Ly * np.round(dy_c / Ly)
+        d_c = np.sqrt(dx_c**2 + dy_c**2)
+        gaps = d_c - gs.r_bound[pi_c] - gs.r_bound[pj_c]
+        n_contacts = int(np.sum(gaps < 1.0))
+    Z = 2 * n_contacts / max(N, 1)
+    print(f"  Settle done: {n_contacts} contacts, Z={Z:.1f} "
+          f"({extra+1 if max_overlap >= overlap_tol else extra} post-relax steps)")
 
 
 def _settle_packing_3d(gs, p):
@@ -1593,7 +1970,7 @@ def _settle_packing_3d(gs, p):
                 fy += scale * dy_c
                 fz += scale * dz_c
 
-            # Neighbour search
+            # Neighbour search (use r_bound for cutoff — conservative)
             if periodic:
                 tree = cKDTree(pos, boxsize=[Lx, Ly, Lz])
             else:
@@ -1676,6 +2053,79 @@ def _settle_packing_3d(gs, p):
             Z = 2 * n_contacts / max(N, 1)
             print(f"    step {step}/{n_inflate}: α={alpha:.3f}, "
                   f"max_overlap={max_overlap:.1f} µm, Z={Z:.1f}")
+
+    # ── Post-inflation relaxation: resolve remaining deep overlaps ──
+    # After inflation reaches α=1.0, keep relaxing until max overlap is
+    # below tolerance (5% of mean radius).  This prevents granules from
+    # being trapped inside each other at high packing fractions.
+    overlap_tol = 0.05 * mean_r_target
+    max_post_relax = 1000  # safety cap on extra iterations
+    max_rb = float(np.max(gs.r_bound[:N]))
+    for extra in range(max_post_relax):
+        pos = gs.positions()
+        fx = np.zeros(N)
+        fy = np.zeros(N)
+        fz = np.zeros(N)
+
+        if periodic:
+            tree = cKDTree(pos, boxsize=[Lx, Ly, Lz])
+        else:
+            tree = cKDTree(pos)
+        pairs = tree.query_pairs(2 * max_rb, output_type='ndarray')
+
+        max_overlap = 0.0
+        if len(pairs) > 0:
+            pi = pairs[:, 0]
+            pj = pairs[:, 1]
+            dx = pos[pj, 0] - pos[pi, 0]
+            dy = pos[pj, 1] - pos[pi, 1]
+            dz = pos[pj, 2] - pos[pi, 2]
+            if periodic:
+                dx -= Lx * np.round(dx / Lx)
+                dy -= Ly * np.round(dy / Ly)
+                dz -= Lz * np.round(dz / Lz)
+            d = np.sqrt(dx*dx + dy*dy + dz*dz) + 1e-12
+            overlap = gs.r_bound[pi] + gs.r_bound[pj] - d
+            mask = overlap > 0
+            if np.any(mask):
+                ov = overlap[mask]
+                max_overlap = float(np.max(ov))
+                inv_d = 1.0 / d[mask]
+                nx = dx[mask] * inv_d
+                ny = dy[mask] * inv_d
+                nz = dz[mask] * inv_d
+                f = k_rep * ov ** 1.5
+                np.add.at(fx, pi[mask], -f * nx)
+                np.add.at(fy, pi[mask], -f * ny)
+                np.add.at(fz, pi[mask], -f * nz)
+                np.add.at(fx, pj[mask],  f * nx)
+                np.add.at(fy, pj[mask],  f * ny)
+                np.add.at(fz, pj[mask],  f * nz)
+
+        if max_overlap < overlap_tol:
+            if extra > 0:
+                print(f"    post-relax: {extra} extra steps, "
+                      f"max_overlap={max_overlap:.1f} µm (tol={overlap_tol:.1f})")
+            break
+
+        f_mag = np.sqrt(fx*fx + fy*fy + fz*fz) + 1e-12
+        scale = np.minimum(dt_settle, v_cap / f_mag)
+        gs.x[:N] += fx * scale
+        gs.y[:N] += fy * scale
+        gs.z[:N] += fz * scale
+
+        if periodic:
+            gs.x[:N] %= Lx
+            gs.y[:N] %= Ly
+            gs.z[:N] %= Lz
+        else:
+            rb = gs.r_bound[:N]
+            gs.x[:N] = np.clip(gs.x[:N], rb, Lx - rb)
+            gs.y[:N] = np.clip(gs.y[:N], rb, Ly - rb)
+            gs.z[:N] = np.clip(gs.z[:N], rb, Lz - rb)
+    else:
+        print(f"    WARNING: post-relax hit {max_post_relax} steps, "
+              f"max_overlap={max_overlap:.1f} µm (tol={overlap_tol:.1f})")
 
     # Final contact count
     pos = gs.positions()
@@ -1762,6 +2212,19 @@ def generate_packing(p: Params, seed=42) -> GranuleSystem:
     a_list, b_list, n_shape_list, theta_list = [], [], [], []
     gap = p.packing_gap  # minimum gap between granule surfaces (µm)
 
+    # Compute deflation factor for RSA placement (Lubachevsky-Stillinger).
+    # Place granules at reduced bounding radii so RSA can achieve the target
+    # count, then inflate-and-relax to the target packing fraction.
+    phi_target = p.phi_f_target + p.phi_i_target
+    if phi_target > 0.05 and p.packing_settle_steps > 0:
+        alpha_deflate = (p.packing_inflate_phi_safe / max(phi_target, 0.01)) ** (1.0 / 2.0)
+        alpha_deflate = float(np.clip(alpha_deflate, 0.3, 1.0))
+    else:
+        alpha_deflate = 1.0
+    if alpha_deflate < 1.0:
+        print(f"  RSA deflation: α={alpha_deflate:.3f} "
+              f"(φ_safe={p.packing_inflate_phi_safe:.2f}, φ_target={phi_target:.3f})")
+
     # Interleave placement for good mixing
     order = []
     fi, ii = 0, 0
@@ -1822,7 +2285,7 @@ def generate_packing(p: Params, seed=42) -> GranuleSystem:
                 if periodic:
                     dx, dy = minimum_image_disp(dx, dy, p.Lx, p.Ly)
                 rj_bound = max(a_list[j], b_list[j]) if p.shape_enabled else rs[j]
-                if dx*dx + dy*dy < (r_bound_val + rj_bound + gap)**2:
+                if dx*dx + dy*dy < ((r_bound_val + rj_bound) * alpha_deflate + gap)**2:
                     ok = False; break
             if ok:
                 xs.append(cx); ys.append(cy)
@@ -1856,7 +2319,17 @@ def generate_packing(p: Params, seed=42) -> GranuleSystem:
     else:
         gs = GranuleSystem(xs, ys, rs, types, n_cells)
 
-    # ── Compression settle: push granules into contact ──
+    # Store target radii and deflate for inflate-and-relax settling
+    if alpha_deflate < 1.0 and p.packing_settle_steps > 0:
+        gs._target_a = gs.a.copy()
+        gs._target_b = gs.b.copy()
+        gs._target_r = gs.r.copy()
+        gs.a[:gs.N] *= alpha_deflate
+        gs.b[:gs.N] *= alpha_deflate
+        gs.r[:gs.N] *= alpha_deflate
+        gs.r_bound[:gs.N] = np.maximum(gs.a[:gs.N], gs.b[:gs.N])
+
+    # ── Inflate-and-relax settle: achieve jammed packing ──
     if p.packing_settle_steps > 0 and gs.N > 1:
         _settle_packing_2d(gs, p)
 
@@ -2054,9 +2527,19 @@ def generate_packing_3d(p: Params, seed=42) -> GranuleSystem:
     else:
         act_f = sum((4.0/3.0)*np.pi*gs.r[gs.func_mask]**3) / domain_vol
         act_i = sum((4.0/3.0)*np.pi*gs.r[gs.inert_mask]**3) / domain_vol
+    phi_total = act_f + act_i
     print(f"  Placed: {np.sum(gs.func_mask)} func (φ_f={act_f:.3f}) + "
           f"{np.sum(gs.inert_mask)} inert (φ_i={act_i:.3f})")
-    print(f"  Void fraction: {1-act_f-act_i:.3f}")
+    print(f"  Void fraction: {1-phi_total:.3f}")
+
+    # Warn if packing fraction exceeds estimated RCP
+    ar_mean = float(np.mean(np.maximum(gs.a[:gs.N], gs.b[:gs.N]) /
+                            np.minimum(gs.a[:gs.N], gs.b[:gs.N])))
+    phi_rcp = rcp_fraction_superellipsoid(ar_mean)
+    if phi_total > phi_rcp:
+        print(f"  WARNING: phi_solid={phi_total:.3f} exceeds estimated RCP={phi_rcp:.3f}.")
+        print(f"    Granules will have unavoidable overlaps. Consider reducing phi_solid_target.")
+
     print(f"  Total cells: {int(sum(gs.n_cells))}")
     _initialize_cells(gs, rng)
     return gs
@@ -2336,6 +2819,100 @@ def generate_packing_2d_slice(p: Params, seed=42) -> GranuleSystem:
 # Per-cell bridge force recording (V1.5)
 # ══════════════════════════════════════════════════════════════════════
 
+def _cell_world_pos_2d(gs, ci):
+    """Return world (x, y) for cell ci on its host granule (2D)."""
+    gi = int(gs.cell_granule_id[ci])
+    theta_cell = gs.cell_theta_local[ci]
+    bx, by = superellipse_point(theta_cell, gs.a[gi], gs.b[gi], gs.n_shape[gi])
+    ct = np.cos(gs.theta[gi])
+    st = np.sin(gs.theta[gi])
+    return gs.x[gi] + ct * bx - st * by, gs.y[gi] + st * bx + ct * by
+
+
+def _cell_world_pos_3d(gs, ci):
+    """Return world (x, y, z) for cell ci on its host granule (3D)."""
+    gi = int(gs.cell_granule_id[ci])
+    eta = gs.cell_eta_local[ci]
+    omega = gs.cell_omega_local[ci]
+    bp = superellipsoid_point(eta, omega, gs.a[gi], gs.b[gi], gs.c[gi],
+                              gs.n_shape[gi], gs.n2[gi])
+    bp_w = quat_rotate(gs.quat[gi], bp)
+    return gs.x[gi] + bp_w[0], gs.y[gi] + bp_w[1], gs.z[gi] + bp_w[2]
+
+
+def _compute_gap(gs, gi, tgt, p):
+    """Surface-to-surface gap between granules gi and tgt (handles periodic BCs)."""
+    dx = gs.x[tgt] - gs.x[gi]
+    dy = gs.y[tgt] - gs.y[gi]
+    if p.boundary_mode == 'periodic':
+        dx, dy = minimum_image_disp(dx, dy, p.Lx, p.Ly)
+    if hasattr(gs, 'is_3d') and gs.is_3d:
+        dz = gs.z[tgt] - gs.z[gi]
+        if p.boundary_mode == 'periodic':
+            dz = dz - p.Lz * np.round(dz / p.Lz)
+        d = np.sqrt(dx**2 + dy**2 + dz**2)
+    else:
+        d = np.sqrt(dx**2 + dy**2)
+    return max(d - gs.r_bound[gi] - gs.r_bound[tgt], 0.0)
+
+
+def _angular_distance_to_target_2d(gs, ci, tgt, p):
+    """Angular distance from cell's surface position to contact azimuth (2D).
+
+    Returns (angular_distance, target_theta_body) where target_theta_body is
+    the body-frame angle on the host granule pointing toward granule tgt.
+    """
+    gi = int(gs.cell_granule_id[ci])
+    dx = gs.x[tgt] - gs.x[gi]
+    dy = gs.y[tgt] - gs.y[gi]
+    if p.boundary_mode == 'periodic':
+        dx, dy = minimum_image_disp(dx, dy, p.Lx, p.Ly)
+    # Target direction in body frame of host granule
+    target_theta_world = np.arctan2(dy, dx)
+    target_theta_body = (target_theta_world - gs.theta[gi]) % (2.0 * np.pi)
+    cell_theta = gs.cell_theta_local[ci] % (2.0 * np.pi)
+    # Shortest arc
+    diff = target_theta_body - cell_theta
+    diff = (diff + np.pi) % (2.0 * np.pi) - np.pi  # wrap to [-pi, pi]
+    return abs(diff), target_theta_body, diff
+
+
+def _angular_distance_to_target_3d(gs, ci, tgt, p):
+    """Angular distance from cell's surface position to contact azimuth (3D).
+
+    Returns (angular_distance, target_eta, target_omega).
+    Uses great-circle distance on the parametric unit sphere.
+    """
+    gi = int(gs.cell_granule_id[ci])
+    dx = gs.x[tgt] - gs.x[gi]
+    dy = gs.y[tgt] - gs.y[gi]
+    dz = gs.z[tgt] - gs.z[gi]
+    if p.boundary_mode == 'periodic':
+        dx = dx - p.Lx * np.round(dx / p.Lx)
+        dy = dy - p.Ly * np.round(dy / p.Ly)
+        dz = dz - p.Lz * np.round(dz / p.Lz)
+    # Target direction in body frame
+    d_world = np.array([dx, dy, dz])
+    d_body = quat_rotate_inv(gs.quat[gi], d_world)
+    # Convert to parametric angles
+    r_xy = np.sqrt(d_body[0]**2 + d_body[1]**2)
+    target_eta = np.arctan2(d_body[2], r_xy)
+    target_omega = np.arctan2(d_body[1], d_body[0]) % (2.0 * np.pi)
+    # Great-circle distance from cell position
+    cell_eta = gs.cell_eta_local[ci]
+    cell_omega = gs.cell_omega_local[ci]
+    # Unit vectors on sphere
+    p_curr = np.array([np.cos(cell_eta) * np.cos(cell_omega),
+                       np.cos(cell_eta) * np.sin(cell_omega),
+                       np.sin(cell_eta)])
+    p_tgt = np.array([np.cos(target_eta) * np.cos(target_omega),
+                      np.cos(target_eta) * np.sin(target_omega),
+                      np.sin(target_eta)])
+    dot = np.clip(np.dot(p_curr, p_tgt), -1.0, 1.0)
+    ang_dist = np.arccos(dot)
+    return ang_dist, target_eta, target_omega
+
+
 def _service_committed_bridges(gs, gi, gj, gap, p, F_per_cell, nx, ny, nz, F):
     """Re-apply forces for cells already committed to a bridge between gi↔gj.
 
@@ -2355,9 +2932,11 @@ def _service_committed_bridges(gs, gi, gj, gap, p, F_per_cell, nx, ny, nz, F):
                 gs.cell_bridge_target[ci] = -1
                 gs.cell_bridge_age[ci] = 0.0
                 gs.cell_bridge_locked[ci] = False
+                gs.cell_alignment[ci] = 0.0
             else:
                 maturity = min(1.0, gs.cell_bridge_age[ci] / max(0.1, p.bridge_formation_time))
-                F_cell = min(F_per_cell * maturity, p.F_max_per_cell)
+                alignment = max(gs.cell_alignment[ci], p.bridge_alignment_min)
+                F_cell = min(F_per_cell * maturity * alignment, p.F_max_per_cell)
                 gs.cell_fx[ci] += F_cell * nx
                 gs.cell_fy[ci] += F_cell * ny
                 gs.cell_fz[ci] += F_cell * nz
@@ -2376,9 +2955,11 @@ def _service_committed_bridges(gs, gi, gj, gap, p, F_per_cell, nx, ny, nz, F):
                 gs.cell_bridge_target[cj] = -1
                 gs.cell_bridge_age[cj] = 0.0
                 gs.cell_bridge_locked[cj] = False
+                gs.cell_alignment[cj] = 0.0
             else:
                 maturity = min(1.0, gs.cell_bridge_age[cj] / max(0.1, p.bridge_formation_time))
-                F_cell = min(F_per_cell * maturity, p.F_max_per_cell)
+                alignment = max(gs.cell_alignment[cj], p.bridge_alignment_min)
+                F_cell = min(F_per_cell * maturity * alignment, p.F_max_per_cell)
                 gs.cell_fx[cj] -= F_cell * nx
                 gs.cell_fy[cj] -= F_cell * ny
                 gs.cell_fz[cj] -= F_cell * nz
@@ -2393,13 +2974,90 @@ def _service_committed_bridges(gs, gi, gj, gap, p, F_per_cell, nx, ny, nz, F):
     return n_ci, n_cj
 
 
+def _classify_bridge_path(gs, p, gi, gj, pos_i, pos_j, gap):
+    """Classify the path between functional granules for bridge probability.
+
+    Returns a multiplicative path_factor:
+      - Contact (gap ≤ 0): bridge_contact_factor (high)
+      - Void (gap > 0, no obstruction): exp(-gap / bridge_decay_length)
+      - Inert-blocked (gap > 0): bridge_inert_factor × exp(-gap / ...)
+    """
+    # Contact: cells crawl directly between touching surfaces
+    if gap <= 0:
+        return p.bridge_contact_factor
+
+    # Exponential void decay (filopodia reach)
+    void_decay = np.exp(-gap / max(p.bridge_decay_length, 0.1))
+
+    # Ray-cast: check if any granule's bounding sphere intersects the
+    # line segment between gi and gj centres.
+    N = gs.N
+    d_vec = pos_j - pos_i
+    d_mag = np.linalg.norm(d_vec)
+    if d_mag < 1e-12:
+        return p.bridge_contact_factor * void_decay
+
+    d_hat = d_vec / d_mag
+    ri = gs.r_bound[gi]
+    rj = gs.r_bound[gj]
+
+    # Vectorised positions of all granules (minimum-image relative to pos_i)
+    if gs.is_3d:
+        all_pos = np.column_stack([gs.x[:N], gs.y[:N], gs.z[:N]])
+    else:
+        all_pos = np.column_stack([gs.x[:N], gs.y[:N]])
+    dk = all_pos - pos_i  # vectors from gi to each gk
+    if p.boundary_mode == 'periodic':
+        Ls = np.array([p.Lx, p.Ly, p.Lz][:dk.shape[1]])
+        dk -= Ls * np.round(dk / Ls)
+
+    # Project onto line gi→gj
+    t = dk @ d_hat                         # scalar projection for each gk
+
+    # gk must project between the surfaces of gi and gj
+    valid = (t > ri * 0.5) & (t < d_mag - rj * 0.5)
+    valid[gi] = False
+    valid[gj] = False
+
+    if not np.any(valid):
+        return void_decay  # void path — no obstruction
+
+    # Perpendicular distance from each valid gk to the line
+    proj = np.outer(t[valid], d_hat)       # (K, dim)
+    perp = dk[valid] - proj                # (K, dim)
+    d_perp = np.sqrt(np.sum(perp * perp, axis=1))
+
+    # Check bounding-sphere intersection
+    r_valid = gs.r_bound[:N][valid]
+    intersects = d_perp < r_valid
+
+    if not np.any(intersects):
+        return void_decay  # void path
+
+    # At least one granule blocks the line-of-sight
+    gtype_valid = gs.gtype[:N][valid]
+    if np.any(intersects & (gtype_valid == 1)):
+        return p.bridge_inert_factor * void_decay  # inert blocks
+
+    # Functional granule in path — cells would bridge to it instead,
+    # so direct bridge is unlikely (treat same as void)
+    return void_decay
+
+
 def _attempt_new_bridges(gs, gi, gj, gap, p, rng, F_per_cell, nx, ny, nz, F,
-                         n_existing_bridges=0):
+                         n_existing_bridges=0, path_factor=1.0,
+                         pos_i=None, pos_j=None):
     """Probabilistically initiate new bridges between granules gi and gj.
 
     Only cells that are SPREADING or PROLIFERATING with sufficient FA maturity
     can attempt bridging.  Each eligible cell has a Poisson-distributed
     probability of finding and committing to a bridge target per timestep.
+
+    Cell spatial awareness (V2.3): each cell's position on the granule surface
+    determines whether it can see the target. Cells on the far side of their
+    host granule (hemisphere facing away from the target) cannot bridge.
+    The bridge probability decays from the cell's centroid, not the granule
+    centre, so cells closer to the target have higher probability.
 
     When existing bridges are present (n_existing_bridges > 0), non-bridging
     cells can migrate along the established bridge and form additional
@@ -2407,57 +3065,237 @@ def _attempt_new_bridges(gs, gi, gj, gap, p, rng, F_per_cell, nx, ny, nz, F,
     """
     bridgeable_states = (int(CellState.SPREADING), int(CellState.PROLIFERATING))
     min_fa = p.min_fa_for_bridge
+    is_3d = (nz != 0.0) or (gs.is_3d if hasattr(gs, 'is_3d') else False)
 
-    # Proximity modulates probability: closer gaps → easier to find target
-    proximity = 1.0 - gap / p.cell_sense_distance
+    # Base rate (before cell-specific decay)
     rate = p.bridge_attempt_rate
-    # Secondary migration: existing bridges act as highways for new cells
     if n_existing_bridges > 0:
         rate *= p.bridge_secondary_rate_mult
-    p_bridge = (1.0 - np.exp(-rate * p.dt)) * proximity
+    p_bridge_base = 1.0 - np.exp(-rate * p.dt)
 
-    # Eligible cells on granule i (sufficient FA maturity, not already bridging)
+    # Path classification (contact/void/inert) from granule-level ray-cast
+    # is used as a multiplicative modifier on top of cell-specific decay.
+    # Extract the obstruction type from path_factor:
+    # - path_factor already includes exp(-gap/λ) for void/inert paths
+    # - We need to separate the obstruction modifier from the distance decay
+    #   so we can replace distance decay with cell-specific distance.
+    decay_len = max(p.bridge_decay_length, 0.1)
+    if gap <= 0:
+        # Contact: use path_factor directly (bridge_contact_factor), no distance decay
+        obstruction_mod = path_factor
+        use_cell_decay = False
+    else:
+        # Factor out the granule-level exponential decay to get pure obstruction modifier
+        granule_decay = np.exp(-gap / decay_len)
+        if granule_decay > 1e-15:
+            obstruction_mod = path_factor / granule_decay
+        else:
+            obstruction_mod = path_factor
+        use_cell_decay = True
+
+    # Target granule centre (for cell-to-target distance)
+    if pos_j is not None:
+        tgt = pos_j
+    elif is_3d:
+        tgt = np.array([gs.x[gj], gs.y[gj], gs.z[gj]])
+    else:
+        tgt = np.array([gs.x[gj], gs.y[gj]])
+    r_target = gs.r_bound[gj]
+
+    # ── Collect angular positions of existing BRIDGING/MIGRATING cells for
+    #    exclusion zone check (cells avoid bridging near existing bridges) ──
+    _bridge_states = (int(CellState.BRIDGING), int(CellState.MIGRATING))
+    existing_thetas_i = []  # angular positions of bridges on gi→gj
+    existing_thetas_j = []  # angular positions of bridges on gj→gi
+    for ck in range(gs.cell_offset[gi], gs.cell_offset[gi + 1]):
+        if gs.cell_state[ck] in _bridge_states and gs.cell_bridge_target[ck] == gj:
+            existing_thetas_i.append(gs.cell_theta_local[ck] if not is_3d else
+                                     (gs.cell_eta_local[ck], gs.cell_omega_local[ck]))
+    for ck in range(gs.cell_offset[gj], gs.cell_offset[gj + 1]):
+        if gs.cell_state[ck] in _bridge_states and gs.cell_bridge_target[ck] == gi:
+            existing_thetas_j.append(gs.cell_theta_local[ck] if not is_3d else
+                                     (gs.cell_eta_local[ck], gs.cell_omega_local[ck]))
+
+    # ── Eligible cells on granule i ──
     for ci in range(gs.cell_offset[gi], gs.cell_offset[gi + 1]):
         if gs.cell_state[ci] not in bridgeable_states:
             continue
         if gs.fa_maturity[gi] < min_fa:
             continue
+
+        # Cell world position
+        if is_3d:
+            cx, cy, cz = _cell_world_pos_3d(gs, ci)
+            cell_pos = np.array([cx, cy, cz])
+        else:
+            cx, cy = _cell_world_pos_2d(gs, ci)
+            cell_pos = np.array([cx, cy])
+
+        # Hemisphere check: cell offset from granule centre dotted with
+        # direction to target. Skip if cell faces away.
+        d_to_tgt = np.array([nx, ny, nz][:len(cell_pos)])
+        cell_offset = cell_pos - (pos_i if pos_i is not None else
+                                  np.array([gs.x[gi], gs.y[gi]])
+                                  if not is_3d else
+                                  np.array([gs.x[gi], gs.y[gi], gs.z[gi]]))
+        if np.dot(cell_offset, d_to_tgt) < 0:
+            continue  # cell is on far side of granule
+
+        # Bridge exclusion zone: skip if too close to existing bridge/migrating cell
+        if p.bridge_exclusion_angle > 0 and existing_thetas_i:
+            too_close = False
+            if is_3d:
+                eta_c, om_c = gs.cell_eta_local[ci], gs.cell_omega_local[ci]
+                p_c = np.array([np.cos(eta_c) * np.cos(om_c),
+                                np.cos(eta_c) * np.sin(om_c), np.sin(eta_c)])
+                for (eta_k, om_k) in existing_thetas_i:
+                    p_k = np.array([np.cos(eta_k) * np.cos(om_k),
+                                    np.cos(eta_k) * np.sin(om_k), np.sin(eta_k)])
+                    ang_sep = np.arccos(np.clip(np.dot(p_c, p_k), -1.0, 1.0))
+                    if ang_sep < p.bridge_exclusion_angle:
+                        too_close = True
+                        break
+            else:
+                theta_c = gs.cell_theta_local[ci]
+                for theta_k in existing_thetas_i:
+                    diff = abs(theta_c - theta_k)
+                    ang_sep = min(diff, 2 * np.pi - diff)
+                    if ang_sep < p.bridge_exclusion_angle:
+                        too_close = True
+                        break
+            if too_close:
+                continue  # cell would rather crawl around than stack on existing bridge
+
+        # Cell-to-target gap (cell surface → target surface)
+        cell_to_tgt_dist = np.linalg.norm(cell_pos - tgt)
+        cell_gap = max(cell_to_tgt_dist - r_target, 0.0)
+
+        # Cell-specific probability
+        if use_cell_decay:
+            cell_decay = np.exp(-cell_gap / decay_len)
+            p_bridge = p_bridge_base * obstruction_mod * cell_decay
+        else:
+            p_bridge = p_bridge_base * obstruction_mod
+
         if rng.random() < p_bridge:
-            gs.cell_state[ci] = int(CellState.BRIDGING)
             gs.cell_bridge_target[ci] = gj
             gs.cell_bridge_age[ci] = 0.0
-            # Initial force is very weak (bridge just forming)
-            maturity = min(1.0, p.dt / max(0.1, p.bridge_formation_time))
-            F_cell = min(F_per_cell * maturity, p.F_max_per_cell)
-            gs.cell_fx[ci] += F_cell * nx
-            gs.cell_fy[ci] += F_cell * ny
-            gs.cell_fz[ci] += F_cell * nz
-            if F.ndim == 2 and F.shape[1] >= 2:
-                F[gi, 0] += F_cell * nx
-                F[gi, 1] += F_cell * ny
-            if F.ndim == 2 and F.shape[1] == 3:
-                F[gi, 2] += F_cell * nz
+            # Check if cell is already at the contact azimuth (fast-path)
+            if is_3d:
+                ang_d, _, _ = _angular_distance_to_target_3d(gs, ci, gj, p)
+            else:
+                ang_d, _, _ = _angular_distance_to_target_2d(gs, ci, gj, p)
+            if ang_d < p.bridge_commit_angle:
+                # Already at contact point → skip migration, bridge directly
+                gs.cell_state[ci] = int(CellState.BRIDGING)
+                gs.cell_alignment[ci] = p.bridge_alignment_min
+                maturity = min(1.0, p.dt / max(0.1, p.bridge_formation_time))
+                F_cell = min(F_per_cell * maturity * p.bridge_alignment_min,
+                             p.F_max_per_cell)
+                gs.cell_fx[ci] += F_cell * nx
+                gs.cell_fy[ci] += F_cell * ny
+                gs.cell_fz[ci] += F_cell * nz
+                if F.ndim == 2 and F.shape[1] >= 2:
+                    F[gi, 0] += F_cell * nx
+                    F[gi, 1] += F_cell * ny
+                if F.ndim == 2 and F.shape[1] == 3:
+                    F[gi, 2] += F_cell * nz
+            else:
+                # Cell needs to crawl to contact point first
+                gs.cell_state[ci] = int(CellState.MIGRATING)
+                gs.cell_alignment[ci] = 0.0
 
-    # Eligible cells on granule j
+    # ── Eligible cells on granule j (target is gi) ──
+    if pos_i is not None:
+        tgt_j = pos_i
+    elif is_3d:
+        tgt_j = np.array([gs.x[gi], gs.y[gi], gs.z[gi]])
+    else:
+        tgt_j = np.array([gs.x[gi], gs.y[gi]])
+    r_target_j = gs.r_bound[gi]
+
     for cj in range(gs.cell_offset[gj], gs.cell_offset[gj + 1]):
         if gs.cell_state[cj] not in bridgeable_states:
             continue
         if gs.fa_maturity[gj] < min_fa:
             continue
+
+        # Cell world position
+        if is_3d:
+            cx, cy, cz = _cell_world_pos_3d(gs, cj)
+            cell_pos = np.array([cx, cy, cz])
+        else:
+            cx, cy = _cell_world_pos_2d(gs, cj)
+            cell_pos = np.array([cx, cy])
+
+        # Hemisphere check: cell should face toward gi (opposite direction)
+        d_to_gi = -np.array([nx, ny, nz][:len(cell_pos)])
+        cell_offset = cell_pos - (pos_j if pos_j is not None else
+                                  np.array([gs.x[gj], gs.y[gj]])
+                                  if not is_3d else
+                                  np.array([gs.x[gj], gs.y[gj], gs.z[gj]]))
+        if np.dot(cell_offset, d_to_gi) < 0:
+            continue  # cell is on far side of granule
+
+        # Bridge exclusion zone: skip if too close to existing bridge/migrating cell
+        if p.bridge_exclusion_angle > 0 and existing_thetas_j:
+            too_close = False
+            if is_3d:
+                eta_c, om_c = gs.cell_eta_local[cj], gs.cell_omega_local[cj]
+                p_c = np.array([np.cos(eta_c) * np.cos(om_c),
+                                np.cos(eta_c) * np.sin(om_c), np.sin(eta_c)])
+                for (eta_k, om_k) in existing_thetas_j:
+                    p_k = np.array([np.cos(eta_k) * np.cos(om_k),
+                                    np.cos(eta_k) * np.sin(om_k), np.sin(eta_k)])
+                    ang_sep = np.arccos(np.clip(np.dot(p_c, p_k), -1.0, 1.0))
+                    if ang_sep < p.bridge_exclusion_angle:
+                        too_close = True
+                        break
+            else:
+                theta_c = gs.cell_theta_local[cj]
+                for theta_k in existing_thetas_j:
+                    diff = abs(theta_c - theta_k)
+                    ang_sep = min(diff, 2 * np.pi - diff)
+                    if ang_sep < p.bridge_exclusion_angle:
+                        too_close = True
+                        break
+            if too_close:
+                continue  # cell would rather crawl around than stack on existing bridge
+
+        # Cell-to-target gap
+        cell_to_tgt_dist = np.linalg.norm(cell_pos - tgt_j)
+        cell_gap = max(cell_to_tgt_dist - r_target_j, 0.0)
+
+        if use_cell_decay:
+            cell_decay = np.exp(-cell_gap / decay_len)
+            p_bridge = p_bridge_base * obstruction_mod * cell_decay
+        else:
+            p_bridge = p_bridge_base * obstruction_mod
+
         if rng.random() < p_bridge:
-            gs.cell_state[cj] = int(CellState.BRIDGING)
             gs.cell_bridge_target[cj] = gi
             gs.cell_bridge_age[cj] = 0.0
-            maturity = min(1.0, p.dt / max(0.1, p.bridge_formation_time))
-            F_cell = min(F_per_cell * maturity, p.F_max_per_cell)
-            gs.cell_fx[cj] -= F_cell * nx
-            gs.cell_fy[cj] -= F_cell * ny
-            gs.cell_fz[cj] -= F_cell * nz
-            if F.ndim == 2 and F.shape[1] >= 2:
-                F[gj, 0] -= F_cell * nx
-                F[gj, 1] -= F_cell * ny
-            if F.ndim == 2 and F.shape[1] == 3:
-                F[gj, 2] -= F_cell * nz
+            if is_3d:
+                ang_d, _, _ = _angular_distance_to_target_3d(gs, cj, gi, p)
+            else:
+                ang_d, _, _ = _angular_distance_to_target_2d(gs, cj, gi, p)
+            if ang_d < p.bridge_commit_angle:
+                gs.cell_state[cj] = int(CellState.BRIDGING)
+                gs.cell_alignment[cj] = p.bridge_alignment_min
+                maturity = min(1.0, p.dt / max(0.1, p.bridge_formation_time))
+                F_cell = min(F_per_cell * maturity * p.bridge_alignment_min,
+                             p.F_max_per_cell)
+                gs.cell_fx[cj] -= F_cell * nx
+                gs.cell_fy[cj] -= F_cell * ny
+                gs.cell_fz[cj] -= F_cell * nz
+                if F.ndim == 2 and F.shape[1] >= 2:
+                    F[gj, 0] -= F_cell * nx
+                    F[gj, 1] -= F_cell * ny
+                if F.ndim == 2 and F.shape[1] == 3:
+                    F[gj, 2] -= F_cell * nz
+            else:
+                gs.cell_state[cj] = int(CellState.MIGRATING)
+                gs.cell_alignment[cj] = 0.0
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -2529,7 +3367,83 @@ def compute_forces(gs: GranuleSystem, p: Params, rng):
             continue
         nx, ny = dx/d, dy/d
 
-        # ── Contact detection ──
+        # ── LS-DEM deformable contact detection (V2.3) ──
+        if p.deformable_enabled:
+            from lsdem import find_contacts_lsdem_2d
+            xj_v = pos[i,0] + dx
+            yj_v = pos[i,1] + dy
+            lsdem_result = find_contacts_lsdem_2d(
+                gs, i, j, pos[i,0], pos[i,1], xj_v, yj_v, p)
+            if lsdem_result is not None:
+                F[i] += lsdem_result['F_i']
+                F[j] += lsdem_result['F_j']
+                torques[i] += lsdem_result['tau_i']
+                torques[j] += lsdem_result['tau_j']
+                if gs.F_eps_accum is not None:
+                    gs.F_eps_accum[i] += lsdem_result['F_eps_i']
+                    gs.F_eps_accum[j] += lsdem_result['F_eps_j']
+                overlap = lsdem_result['overlap_max']
+                R_eff_approx = gs.r[i] * gs.r[j] / (gs.r[i] + gs.r[j])
+
+                # JKR adhesion correction — translational only (V2.3)
+                # LS-DEM nodes compute pure repulsion; adhesion added here
+                # so it does NOT drive deformation DOFs
+                _, W_adh_pair = friction_lut.get(
+                    (int(gs.gtype[i]), int(gs.gtype[j])), (0.0, 0.0))
+                if W_adh_pair > 0 and overlap > 0:
+                    F_jkr, a_est = jkr_force_from_overlap(
+                        overlap, R_eff_approx, E_star_gg, W_adh_pair)
+                    F_hertz = hertz_contact_force(E_star_gg, R_eff_approx, overlap)
+                    # Adhesion correction is JKR − Hertz (negative = attractive)
+                    F_adh_corr = F_jkr - F_hertz
+                    F[i] += F_adh_corr * np.array([nx, ny])
+                    F[j] -= F_adh_corr * np.array([nx, ny])
+                else:
+                    a_est = np.sqrt(max(R_eff_approx * overlap, 0.0))
+
+                # Estimate contact radius from overlap for clip rendering
+                if a_est > 1e-6:
+                    clip_d_i = np.sqrt(max(gs.r[i]**2 - a_est**2, 0.01))
+                    clip_d_j = np.sqrt(max(gs.r[j]**2 - a_est**2, 0.01))
+                    gs.contact_clips[i].append((nx, ny, clip_d_i))
+                    gs.contact_clips[j].append((-nx, -ny, clip_d_j))
+                contacts.append({
+                    'i': i, 'j': j,
+                    'cx': (pos[i,0] + xj_v) / 2, 'cy': (pos[i,1] + yj_v) / 2, 'cz': 0.0,
+                    'nx': nx, 'ny': ny, 'nz': 0.0,
+                    'overlap': overlap, 'R_eff': R_eff_approx,
+                    'F_normal': np.sqrt(lsdem_result['F_i'][0]**2 + lsdem_result['F_i'][1]**2),
+                    'A_contact': np.pi * a_est**2,
+                    'gtype_i': int(gs.gtype[i]), 'gtype_j': int(gs.gtype[j]),
+                })
+                in_contact = True
+            else:
+                in_contact = False
+                overlap = 0.0
+
+            # Cell bridging still uses gap-based logic
+            if gs.gtype[i] == 0 and gs.gtype[j] == 0:
+                if in_contact:
+                    gap = -overlap
+                else:
+                    gap = d - gs.r_bound[i] - gs.r_bound[j]
+                    if gap < 0:
+                        gap = 0.0
+                avg_maturity = 0.5 * (gs.fa_maturity[i] + gs.fa_maturity[j])
+                F_per_cell = motor_clutch_force(p.E_modulus, p, avg_maturity)
+                n_ci, n_cj = _service_committed_bridges(
+                    gs, i, j, gap, p, F_per_cell, nx, ny, 0.0, F)
+                n_existing = n_ci + n_cj
+                if gap < p.cell_sense_distance:
+                    pj_v_2d = pos[i] + np.array([dx, dy])
+                    pf = _classify_bridge_path(gs, p, i, j, pos[i], pj_v_2d, gap)
+                    _attempt_new_bridges(
+                        gs, i, j, gap, p, rng, F_per_cell, nx, ny, 0.0, F,
+                        n_existing_bridges=n_existing, path_factor=pf,
+                        pos_i=pos[i], pos_j=pj_v_2d)
+            continue  # skip rigid contact path
+
+        # ── Contact detection (rigid, V2.2) ──
         if gs.is_circle:
             # Fast circle path (V1.2 behavior)
             overlap = gs.r[i] + gs.r[j] - d
@@ -2562,18 +3476,15 @@ def compute_forces(gs: GranuleSystem, p: Params, rng):
                 R_eff = 0.0
                 contact_x = contact_y = 0.0
 
-        # ── Contact forces: Hertz + DMT + friction ──
+        # ── Contact forces: JKR adhesive contact + friction (V2.3) ──
         if in_contact and overlap > 0:
-            Fc = hertz_contact_force(E_star_gg, R_eff, overlap)
-
             # Pair-type friction/adhesion parameters
             tau_0, W_adh = friction_lut[(gs.gtype[i], gs.gtype[j])]
 
-            # DMT adhesion: F_adh = 2π W R* [nN]
-            F_adh = 2.0 * np.pi * W_adh * R_eff * 1e3
+            # JKR force: replaces Hertz + DMT (reduces to Hertz when W=0)
+            F_normal, a_contact = jkr_force_from_overlap(
+                overlap, R_eff, E_star_gg, W_adh)
 
-            # Net normal force (positive = repulsive, negative = attractive)
-            F_normal = Fc - F_adh
             Fnx = F_normal * nx
             Fny = F_normal * ny
             F[i,0] -= Fnx; F[i,1] -= Fny
@@ -2581,7 +3492,6 @@ def compute_forces(gs: GranuleSystem, p: Params, rng):
 
             # Torque from normal force (off-centre contact)
             if not gs.is_circle:
-                # τ = (contact - centre) × F
                 rci_x = contact_x - pos[i,0]
                 rci_y = contact_y - pos[i,1]
                 rcj_x = contact_x - pos[j,0]
@@ -2589,8 +3499,15 @@ def compute_forces(gs: GranuleSystem, p: Params, rng):
                 torques[i] += rci_x * (-Fny) - rci_y * (-Fnx)
                 torques[j] += rcj_x * Fny - rcj_y * Fnx
 
-            # Tangential friction (area-dependent, opposes relative sliding)
-            A_contact = np.pi * R_eff * overlap   # Hertzian contact area (µm²)
+            # Contact clip planes for rendering (half-plane at flat face)
+            if a_contact > 1e-6:
+                clip_d_i = np.sqrt(max(gs.r[i]**2 - a_contact**2, 0.01))
+                clip_d_j = np.sqrt(max(gs.r[j]**2 - a_contact**2, 0.01))
+                gs.contact_clips[i].append((nx, ny, clip_d_i))
+                gs.contact_clips[j].append((-nx, -ny, clip_d_j))
+
+            # Tangential friction (JKR contact area: π a²)
+            A_contact = np.pi * a_contact**2 if a_contact > 0 else 0.0
             dvx = gs.vx[j] - gs.vx[i]
             dvy = gs.vy[j] - gs.vy[i]
             v_dot_n = dvx * nx + dvy * ny
@@ -2599,7 +3516,6 @@ def compute_forces(gs: GranuleSystem, p: Params, rng):
             vt_mag = np.sqrt(vtx*vtx + vty*vty)
 
             if vt_mag > 1e-12:
-                # F = τ₀ × A × tanh(|v_t|/v_ref) [Pa × µm² × 1e-3 → nN]
                 F_fric = tau_0 * A_contact * 1e-3 * np.tanh(
                     vt_mag / p.friction_v_ref)
                 tx, ty = vtx / vt_mag, vty / vt_mag
@@ -2607,18 +3523,17 @@ def compute_forces(gs: GranuleSystem, p: Params, rng):
                 F[i,0] += Ftx; F[i,1] += Fty
                 F[j,0] -= Ftx; F[j,1] -= Fty
 
-                # Torque from friction
                 if not gs.is_circle:
                     torques[i] += rci_x * Fty - rci_y * Ftx
                     torques[j] += rcj_x * (-Fty) - rcj_y * (-Ftx)
 
-            # V1.5.2: Record contact data for stress visualization
             contacts.append({
                 'i': i, 'j': j,
                 'cx': contact_x, 'cy': contact_y, 'cz': 0.0,
                 'nx': nx, 'ny': ny, 'nz': 0.0,
                 'overlap': overlap, 'R_eff': R_eff,
                 'F_normal': F_normal, 'A_contact': A_contact,
+                'a_contact': a_contact,
                 'gtype_i': int(gs.gtype[i]), 'gtype_j': int(gs.gtype[j]),
             })
 
@@ -2639,21 +3554,31 @@ def compute_forces(gs: GranuleSystem, p: Params, rng):
             F_per_cell = motor_clutch_force(p.E_modulus, p, avg_maturity)
 
             # 1) Service committed bridges (apply force with maturity ramp)
-            n_existing = 0
-            if gap > p.L_rest:
-                n_ci, n_cj = _service_committed_bridges(
-                    gs, i, j, gap, p, F_per_cell, nx, ny, 0.0, F)
-                n_existing = n_ci + n_cj
+            n_ci, n_cj = _service_committed_bridges(
+                gs, i, j, gap, p, F_per_cell, nx, ny, 0.0, F)
+            n_existing = n_ci + n_cj
 
-            # 2) Probabilistic new bridge formation
-            if 0 < gap < p.cell_sense_distance and gap > p.L_rest:
+            # 2) Path-dependent bridge formation (V2.1)
+            if gap < p.cell_sense_distance:
+                pj_v_2d = pos[i] + np.array([dx, dy])
+                pf = _classify_bridge_path(gs, p, i, j, pos[i], pj_v_2d, gap)
                 _attempt_new_bridges(
                     gs, i, j, gap, p, rng, F_per_cell, nx, ny, 0.0, F,
-                    n_existing_bridges=n_existing)
+                    n_existing_bridges=n_existing, path_factor=pf,
+                    pos_i=pos[i], pos_j=pj_v_2d)
 
-    # ── Wall repulsion (skip for periodic boundaries) ──
+    # ── Wall repulsion: JKR adhesive contact (skip for periodic boundaries) ──
+    # Wall is rigid (R_eff = R_granule for flat surface), treated as inert surface.
     if not periodic:
+        W_wall_lut = {0: p.W_adh_if, 1: p.W_adh_ii}  # func→mixed, inert→inert
+        wall_normals_2d = [
+            (0, +1, 0),  # left:   +x normal, axis=0
+            (0, -1, 0),  # right:  -x normal, axis=0
+            (1, +1, 1),  # bottom: +y normal, axis=1
+            (1, -1, 1),  # top:    -y normal, axis=1
+        ]
         for i in range(N):
+            W_wall = W_wall_lut[int(gs.gtype[i])]
             if gs.is_circle:
                 r = gs.r[i]
                 for pen, axis, sign in [
@@ -2663,10 +3588,18 @@ def compute_forces(gs: GranuleSystem, p: Params, rng):
                     (gs.y[i] - (p.Ly - r),   1, -1),   # top
                 ]:
                     if pen > 0:
-                        Fw = hertz_contact_force(E_star_gw, r, pen)
+                        Fw, a_w = jkr_force_from_overlap(pen, r, E_star_gw, W_wall)
                         F[i, axis] += sign * Fw
+                        # Wall clip: distance from centre to wall face
+                        if axis == 0:
+                            wall_d = abs(gs.x[i]) if sign > 0 else abs(p.Lx - gs.x[i])
+                        else:
+                            wall_d = abs(gs.y[i]) if sign > 0 else abs(p.Ly - gs.y[i])
+                        # Clip normal points TOWARD wall (opposite of force sign)
+                        nx_w = -float(sign) if axis == 0 else 0.0
+                        ny_w = 0.0 if axis == 0 else -float(sign)
+                        gs.contact_clips[i].append((nx_w, ny_w, wall_d))
             else:
-                # Superellipse wall contact
                 walls = [
                     (0.0,    0, +1),   # left wall at x=0
                     (p.Lx,   0, -1),   # right wall at x=Lx
@@ -2680,8 +3613,18 @@ def compute_forces(gs: GranuleSystem, p: Params, rng):
                         wall_pos, wall_axis, wall_sign)
                     if wresult is not None:
                         pen, R_local = wresult
-                        Fw = hertz_contact_force(E_star_gw, R_local, pen)
+                        Fw, a_w = jkr_force_from_overlap(
+                            pen, R_local, E_star_gw, W_wall)
                         F[i, wall_axis] += wall_sign * Fw
+                        # Wall clip
+                        if wall_axis == 0:
+                            wall_d = abs(gs.x[i] - wall_pos)
+                        else:
+                            wall_d = abs(gs.y[i] - wall_pos)
+                        # Clip normal points TOWARD wall (opposite of force sign)
+                        nx_w = -float(wall_sign) if wall_axis == 0 else 0.0
+                        ny_w = 0.0 if wall_axis == 0 else -float(wall_sign)
+                        gs.contact_clips[i].append((nx_w, ny_w, wall_d))
 
     # MC-DEM multi-contact stiffening correction (Giannis et al. 2021)
     if p.mc_dem_enabled and len(contacts) > 0:
@@ -2752,8 +3695,81 @@ def compute_forces_3d(gs: GranuleSystem, p: Params, rng):
             continue
         nv = dp / d  # unit normal i->j
 
-        # Contact detection — use virtual position of j for periodic BCs
-        pj_v = pos[i] + dp  # nearest image of j relative to i
+        # ── LS-DEM deformable contact detection 3D (V2.3) ──
+        pj_v = pos[i] + dp
+        if p.deformable_enabled:
+            from lsdem import find_contacts_lsdem_3d
+            lsdem_result = find_contacts_lsdem_3d(
+                gs, i, j, pos[i,0], pos[i,1], pos[i,2],
+                pj_v[0], pj_v[1], pj_v[2], p)
+            if lsdem_result is not None:
+                F[i] += lsdem_result['F_i']
+                F[j] += lsdem_result['F_j']
+                torques[i] += lsdem_result['tau_i']
+                torques[j] += lsdem_result['tau_j']
+                if gs.F_eps_accum is not None:
+                    gs.F_eps_accum[i] += lsdem_result['F_eps_i']
+                    gs.F_eps_accum[j] += lsdem_result['F_eps_j']
+                overlap = lsdem_result['overlap_max']
+                R_eff_approx = gs.r[i] * gs.r[j] / (gs.r[i] + gs.r[j])
+
+                # JKR adhesion correction — translational only (V2.3)
+                _, W_adh_pair = friction_lut.get(
+                    (int(gs.gtype[i]), int(gs.gtype[j])), (0.0, 0.0))
+                if W_adh_pair > 0 and overlap > 0:
+                    F_jkr, a_est = jkr_force_from_overlap(
+                        overlap, R_eff_approx, E_star_gg, W_adh_pair)
+                    F_hertz = hertz_contact_force(E_star_gg, R_eff_approx, overlap)
+                    F_adh_corr = F_jkr - F_hertz
+                    F[i] += F_adh_corr * nv
+                    F[j] -= F_adh_corr * nv
+                else:
+                    a_est = np.sqrt(max(R_eff_approx * overlap, 0.0))
+
+                # Estimate contact radius from overlap for clip rendering
+                if a_est > 1e-6:
+                    clip_d_i = np.sqrt(max(gs.r[i]**2 - a_est**2, 0.01))
+                    clip_d_j = np.sqrt(max(gs.r[j]**2 - a_est**2, 0.01))
+                    gs.contact_clips[i].append((nv[0], nv[1], nv[2], clip_d_i))
+                    gs.contact_clips[j].append((-nv[0], -nv[1], -nv[2], clip_d_j))
+                contacts.append({
+                    'i': i, 'j': j,
+                    'cx': (pos[i,0]+pj_v[0])/2, 'cy': (pos[i,1]+pj_v[1])/2,
+                    'cz': (pos[i,2]+pj_v[2])/2,
+                    'nx': nv[0], 'ny': nv[1], 'nz': nv[2],
+                    'overlap': overlap, 'R_eff': R_eff_approx,
+                    'F_normal': np.linalg.norm(lsdem_result['F_i']),
+                    'A_contact': np.pi * a_est**2,
+                    'gtype_i': int(gs.gtype[i]), 'gtype_j': int(gs.gtype[j]),
+                })
+                in_contact = True
+                contact_overlap = overlap
+            else:
+                in_contact = False
+                contact_overlap = 0.0
+
+            # Cell bridging
+            if gs.gtype[i] == 0 and gs.gtype[j] == 0:
+                if in_contact:
+                    gap = -contact_overlap
+                else:
+                    gap = d - gs.r_bound[i] - gs.r_bound[j]
+                    if gap < 0: gap = 0.0
+                avg_maturity = 0.5 * (gs.fa_maturity[i] + gs.fa_maturity[j])
+                F_per_cell = motor_clutch_force(p.E_modulus, p, avg_maturity)
+                n_ci, n_cj = _service_committed_bridges(
+                    gs, i, j, gap, p, F_per_cell, nv[0], nv[1], nv[2], F)
+                n_existing = n_ci + n_cj
+                if gap < p.cell_sense_distance:
+                    pf = _classify_bridge_path(gs, p, i, j, pos[i], pj_v, gap)
+                    _attempt_new_bridges(
+                        gs, i, j, gap, p, rng, F_per_cell,
+                        nv[0], nv[1], nv[2], F,
+                        n_existing_bridges=n_existing, path_factor=pf,
+                        pos_i=pos[i], pos_j=pj_v)
+            continue  # skip rigid contact path
+
+        # Contact detection (rigid, V2.2) — use virtual position of j for periodic BCs
         if gs.is_circle:
             result = find_contact_spheres_3d(
                 pos[i,0], pos[i,1], pos[i,2], gs.r[i],
@@ -2772,10 +3788,11 @@ def compute_forces_3d(gs: GranuleSystem, p: Params, rng):
             n_vec = np.array([nx, ny, nz])
 
             if overlap > 0:
-                Fc = hertz_contact_force(E_star_gg, R_eff, overlap)
+                # JKR adhesive contact (V2.3, replaces Hertz + DMT)
                 tau_0, W_adh = friction_lut[(gs.gtype[i], gs.gtype[j])]
-                F_adh = 2.0 * np.pi * W_adh * R_eff * 1e3
-                F_normal = Fc - F_adh
+                F_normal, a_contact = jkr_force_from_overlap(
+                    overlap, R_eff, E_star_gg, W_adh)
+
                 Fn = F_normal * n_vec
                 F[i] -= Fn
                 F[j] += Fn
@@ -2787,8 +3804,15 @@ def compute_forces_3d(gs: GranuleSystem, p: Params, rng):
                     torques[i] += np.cross(rc_i, -Fn)
                     torques[j] += np.cross(rc_j, Fn)
 
-                # Tangential friction
-                A_contact = np.pi * R_eff * overlap
+                # Contact clip planes for 3D rendering
+                if a_contact > 1e-6:
+                    clip_d_i = np.sqrt(max(gs.r[i]**2 - a_contact**2, 0.01))
+                    clip_d_j = np.sqrt(max(gs.r[j]**2 - a_contact**2, 0.01))
+                    gs.contact_clips[i].append((nx, ny, nz, clip_d_i))
+                    gs.contact_clips[j].append((-nx, -ny, -nz, clip_d_j))
+
+                # Tangential friction (JKR contact area: π a²)
+                A_contact = np.pi * a_contact**2 if a_contact > 0 else 0.0
                 dv = np.array([gs.vx[j]-gs.vx[i], gs.vy[j]-gs.vy[i],
                                gs.vz[j]-gs.vz[i]])
                 v_dot_n = np.dot(dv, n_vec)
@@ -2806,13 +3830,13 @@ def compute_forces_3d(gs: GranuleSystem, p: Params, rng):
                         torques[i] += np.cross(rc_i, Ft)
                         torques[j] += np.cross(rc_j, -Ft)
 
-            # V1.5.2: Record contact data for stress visualization
             contacts.append({
                 'i': i, 'j': j,
                 'cx': cx, 'cy': cy, 'cz': cz_pt,
                 'nx': nx, 'ny': ny, 'nz': nz,
                 'overlap': overlap, 'R_eff': R_eff,
                 'F_normal': F_normal, 'A_contact': A_contact,
+                'a_contact': a_contact,
                 'gtype_i': int(gs.gtype[i]), 'gtype_j': int(gs.gtype[j]),
             })
 
@@ -2835,39 +3859,45 @@ def compute_forces_3d(gs: GranuleSystem, p: Params, rng):
             F_per_cell = motor_clutch_force(p.E_modulus, p, avg_maturity)
 
             # 1) Service committed bridges (apply force with maturity ramp)
-            n_existing = 0
-            if gap > p.L_rest:
-                n_ci, n_cj = _service_committed_bridges(
-                    gs, i, j, gap, p, F_per_cell,
-                    nv[0], nv[1], nv[2], F)
-                n_existing = n_ci + n_cj
+            n_ci, n_cj = _service_committed_bridges(
+                gs, i, j, gap, p, F_per_cell,
+                nv[0], nv[1], nv[2], F)
+            n_existing = n_ci + n_cj
 
-            # 2) Probabilistic new bridge formation
-            if 0 < gap < p.cell_sense_distance and gap > p.L_rest:
+            # 2) Path-dependent bridge formation (V2.1)
+            if gap < p.cell_sense_distance:
+                pf = _classify_bridge_path(gs, p, i, j, pos[i], pj_v, gap)
                 _attempt_new_bridges(
                     gs, i, j, gap, p, rng, F_per_cell,
                     nv[0], nv[1], nv[2], F,
-                    n_existing_bridges=n_existing)
+                    n_existing_bridges=n_existing, path_factor=pf,
+                    pos_i=pos[i], pos_j=pj_v)
 
-    # Wall repulsion (6 faces) — skip for periodic boundaries
+    # Wall repulsion: JKR adhesive contact (6 faces) — skip for periodic
     if not periodic:
+        W_wall_lut_3d = {0: p.W_adh_if, 1: p.W_adh_ii}
         for i in range(N):
+            W_wall = W_wall_lut_3d[int(gs.gtype[i])]
             walls = [
-                (0.0, 0, +1), (p.Lx, 0, -1),  # x walls
-                (0.0, 1, +1), (p.Ly, 1, -1),  # y walls
-                (0.0, 2, +1), (p.Lz, 2, -1),  # z walls
+                (0.0, 0, +1), (p.Lx, 0, -1),
+                (0.0, 1, +1), (p.Ly, 1, -1),
+                (0.0, 2, +1), (p.Lz, 2, -1),
             ]
+            coords = [gs.x[i], gs.y[i], gs.z[i]]
             if gs.is_circle:
                 r = gs.r[i]
-                coords = [gs.x[i], gs.y[i], gs.z[i]]
                 for wall_pos, axis, sign in walls:
-                    if sign > 0:
-                        pen = r - (coords[axis] - wall_pos)
-                    else:
-                        pen = (coords[axis] + r) - wall_pos
+                    pen = (r - (coords[axis] - wall_pos)) if sign > 0 \
+                        else ((coords[axis] + r) - wall_pos)
                     if pen > 0:
-                        Fw = hertz_contact_force(E_star_gw, r, pen)
+                        Fw, a_w = jkr_force_from_overlap(
+                            pen, r, E_star_gw, W_wall)
                         F[i, axis] += sign * Fw
+                        wall_d = abs(coords[axis] - wall_pos)
+                        # Clip normal points TOWARD wall (opposite of force sign)
+                        n3 = [0.0, 0.0, 0.0]; n3[axis] = -float(sign)
+                        gs.contact_clips[i].append(
+                            (n3[0], n3[1], n3[2], wall_d))
             else:
                 for wall_pos, axis, sign in walls:
                     wresult = find_contact_wall_3d(
@@ -2877,8 +3907,14 @@ def compute_forces_3d(gs: GranuleSystem, p: Params, rng):
                         wall_pos, axis, sign)
                     if wresult is not None:
                         pen, R_local = wresult
-                        Fw = hertz_contact_force(E_star_gw, R_local, pen)
+                        Fw, a_w = jkr_force_from_overlap(
+                            pen, R_local, E_star_gw, W_wall)
                         F[i, axis] += sign * Fw
+                        wall_d = abs(coords[axis] - wall_pos)
+                        # Clip normal points TOWARD wall (opposite of force sign)
+                        n3 = [0.0, 0.0, 0.0]; n3[axis] = -float(sign)
+                        gs.contact_clips[i].append(
+                            (n3[0], n3[1], n3[2], wall_d))
 
     # MC-DEM multi-contact stiffening correction (Giannis et al. 2021)
     if p.mc_dem_enabled and len(contacts) > 0:
@@ -2899,6 +3935,97 @@ def compute_forces_3d(gs: GranuleSystem, p: Params, rng):
 
 
 # ══════════════════════════════════════════════════════════════════════
+# Post-step overlap resolution (V2.1 — prevents granule pass-through)
+# ══════════════════════════════════════════════════════════════════════
+
+def _resolve_overlaps(gs, p):
+    """Push apart deeply interpenetrating granules after position integration.
+
+    Uses bounding-sphere overlap to detect pairs where overlap exceeds
+    max_overlap_frac * min(r_bound_i, r_bound_j), then projects each
+    granule apart by half the excess.  Handles both 2D/3D and periodic/wall BCs.
+    """
+    N = gs.N
+    if N < 2 or p.max_overlap_frac <= 0:
+        return
+
+    r_bound = gs.r_bound[:N]
+    max_r = float(np.max(r_bound))
+    cutoff = 2.0 * max_r
+    periodic = p.boundary_mode == 'periodic'
+
+    if gs.is_3d:
+        pos = np.column_stack([gs.x[:N], gs.y[:N], gs.z[:N]])
+        if periodic:
+            tree = cKDTree(pos, boxsize=[p.Lx, p.Ly, p.Lz])
+        else:
+            tree = cKDTree(pos)
+    else:
+        pos = np.column_stack([gs.x[:N], gs.y[:N]])
+        if periodic:
+            tree = cKDTree(pos, boxsize=[p.Lx, p.Ly])
+        else:
+            tree = cKDTree(pos)
+
+    pairs = tree.query_pairs(cutoff, output_type='ndarray')
+    if len(pairs) == 0:
+        return
+
+    ii = pairs[:, 0]
+    jj = pairs[:, 1]
+
+    dx = pos[jj, 0] - pos[ii, 0]
+    dy = pos[jj, 1] - pos[ii, 1]
+    if periodic:
+        dx -= p.Lx * np.round(dx / p.Lx)
+        dy -= p.Ly * np.round(dy / p.Ly)
+
+    if gs.is_3d:
+        dz = pos[jj, 2] - pos[ii, 2]
+        if periodic:
+            dz -= p.Lz * np.round(dz / p.Lz)
+        dist = np.sqrt(dx * dx + dy * dy + dz * dz)
+    else:
+        dist = np.sqrt(dx * dx + dy * dy)
+
+    dist = np.maximum(dist, 1e-12)
+    overlap = r_bound[ii] + r_bound[jj] - dist
+
+    # Only correct overlaps exceeding the allowed threshold
+    r_min = np.minimum(r_bound[ii], r_bound[jj])
+    threshold = p.max_overlap_frac * r_min
+    deep = overlap > threshold
+    if not np.any(deep):
+        return
+
+    # Push each granule apart by half the excess overlap
+    excess = overlap[deep] - threshold[deep]
+    inv_d = 1.0 / dist[deep]
+    nx = dx[deep] * inv_d
+    ny = dy[deep] * inv_d
+    correction = 0.5 * excess
+
+    i_deep = ii[deep]
+    j_deep = jj[deep]
+
+    corr_x = np.zeros(N)
+    corr_y = np.zeros(N)
+    np.subtract.at(corr_x, i_deep, correction * nx)
+    np.subtract.at(corr_y, i_deep, correction * ny)
+    np.add.at(corr_x, j_deep, correction * nx)
+    np.add.at(corr_y, j_deep, correction * ny)
+    gs.x[:N] += corr_x
+    gs.y[:N] += corr_y
+
+    if gs.is_3d:
+        nz = dz[deep] * inv_d
+        corr_z = np.zeros(N)
+        np.subtract.at(corr_z, i_deep, correction * nz)
+        np.add.at(corr_z, j_deep, correction * nz)
+        gs.z[:N] += corr_z
+
+
+# ══════════════════════════════════════════════════════════════════════
 # Time integration (overdamped: γ dx/dt = F  →  dx = F/γ · dt)
 # ══════════════════════════════════════════════════════════════════════
 
@@ -2906,10 +4033,23 @@ def step(gs: GranuleSystem, p: Params, rng, t: float):
     """One overdamped Euler step with cell state evolution and rotation."""
     update_cell_state(gs, p, t, rng)
 
+    # Reset contact clip planes (populated by compute_forces for rendering)
+    for k in range(gs.N):
+        gs.contact_clips[k] = []
+
+    # Reset deformation force accumulator before force computation
+    if p.deformable_enabled and gs.F_eps_accum is not None:
+        gs.F_eps_accum[:] = 0.0
+
     if gs.is_3d:
         F, torques, contacts = compute_forces_3d(gs, p, rng)
     else:
         F, torques, contacts = compute_forces(gs, p, rng)
+
+    # Integrate deformation DOFs (implicit Euler, after force computation)
+    if p.deformable_enabled and gs.epsilon is not None:
+        from lsdem import integrate_deformation_implicit
+        integrate_deformation_implicit(gs, p)
 
     if gs.is_3d:
         # ── 3D integration (vectorized translational, per-granule quaternion) ──
@@ -2952,6 +4092,16 @@ def step(gs: GranuleSystem, p: Params, rng, t: float):
             gs.x[:gs.N] = np.clip(gs.x[:gs.N], rb + 0.5, p.Lx - rb - 0.5)
             gs.y[:gs.N] = np.clip(gs.y[:gs.N], rb + 0.5, p.Ly - rb - 0.5)
             gs.z[:gs.N] = np.clip(gs.z[:gs.N], rb + 0.5, p.Lz - rb - 0.5)
+
+        # Post-step overlap resolution (V2.1 — prevents granule pass-through)
+        _resolve_overlaps(gs, p)
+        if p.boundary_mode == 'periodic':
+            wrap_positions(gs, p)
+        else:
+            rb = gs.r_bound[:gs.N]
+            gs.x[:gs.N] = np.clip(gs.x[:gs.N], rb + 0.5, p.Lx - rb - 0.5)
+            gs.y[:gs.N] = np.clip(gs.y[:gs.N], rb + 0.5, p.Ly - rb - 0.5)
+            gs.z[:gs.N] = np.clip(gs.z[:gs.N], rb + 0.5, p.Lz - rb - 0.5)
     else:
         # ── 2D integration (vectorized) ──
         gamma = p.drag_scale * gs.r[:gs.N]         # (N,)
@@ -2984,6 +4134,15 @@ def step(gs: GranuleSystem, p: Params, rng, t: float):
             gs.x[:gs.N] = np.clip(gs.x[:gs.N], rb + 0.5, p.Lx - rb - 0.5)
             gs.y[:gs.N] = np.clip(gs.y[:gs.N], rb + 0.5, p.Ly - rb - 0.5)
 
+        # Post-step overlap resolution (V2.1 — prevents granule pass-through)
+        _resolve_overlaps(gs, p)
+        if p.boundary_mode == 'periodic':
+            wrap_positions(gs, p)
+        else:
+            rb = gs.r_bound[:gs.N]
+            gs.x[:gs.N] = np.clip(gs.x[:gs.N], rb + 0.5, p.Lx - rb - 0.5)
+            gs.y[:gs.N] = np.clip(gs.y[:gs.N], rb + 0.5, p.Ly - rb - 0.5)
+
     return F, contacts
 
 
@@ -2991,27 +4150,174 @@ def step(gs: GranuleSystem, p: Params, rng, t: float):
 # Phase field rendering (from particle positions)
 # ══════════════════════════════════════════════════════════════════════
 
-def _stamp_circle_2d(X, Y, cx, cy, r_eff_i, w, phi_f, phi_i, gtype):
-    """Stamp a single circle profile onto the 2D field."""
-    dist = np.sqrt((X - cx)**2 + (Y - cy)**2)
-    profile = 0.5 * (1.0 - np.tanh((dist - r_eff_i) / w))
+def _apply_clips_2d(sdf, X, Y, cx, cy, clips):
+    """Apply JKR half-plane clips to a 2D SDF array (in-place max).
+
+    Each clip is a tuple (nx, ny, clip_d) defining a half-plane constraint:
+        sdf = max(sdf, dot(x - center, n) - clip_d)
+    This creates flat faces at contact regions, matching JKR contact geometry.
+    """
+    if not clips:
+        return sdf
+    for clip in clips:
+        nx_c, ny_c, clip_d = clip[0], clip[1], clip[2]
+        plane = (X - cx) * nx_c + (Y - cy) * ny_c - clip_d
+        np.maximum(sdf, plane, out=sdf)
+    return sdf
+
+
+def _apply_clips_3d(sdf, X, Y, Z, cx, cy, cz, clips):
+    """Apply JKR half-plane clips to a 3D SDF array (in-place max).
+
+    Each clip is a tuple (nx, ny, nz, clip_d) defining a half-space constraint.
+    """
+    if not clips:
+        return sdf
+    for clip in clips:
+        nx_c, ny_c, nz_c, clip_d = clip[0], clip[1], clip[2], clip[3]
+        plane = (X - cx) * nx_c + (Y - cy) * ny_c + (Z - cz) * nz_c - clip_d
+        np.maximum(sdf, plane, out=sdf)
+    return sdf
+
+
+def _stamp_circle_2d(X, Y, cx, cy, r_eff_i, w, phi_f, phi_i, gtype, clips=None):
+    """Stamp a single circle profile onto the 2D field (additive blending).
+
+    When clips is provided, JKR half-plane clipping creates flat contact faces.
+    """
+    sdf = np.sqrt((X - cx)**2 + (Y - cy)**2) - r_eff_i
+    if clips:
+        _apply_clips_2d(sdf, X, Y, cx, cy, clips)
+    profile = 0.5 * (1.0 - np.tanh(sdf / w))
     if gtype == 0:
-        np.maximum(phi_f, profile, out=phi_f)
+        phi_f += profile
     else:
-        np.maximum(phi_i, profile, out=phi_i)
+        phi_i += profile
 
 
-def _stamp_superellipse_2d(X, Y, cx, cy, a, b, n_s, theta, r, w, phi_f, phi_i, gtype):
-    """Stamp a single superellipse profile onto the 2D field."""
+def _stamp_superellipse_2d(X, Y, cx, cy, a, b, n_s, theta, r, w, phi_f, phi_i, gtype,
+                            clips=None):
+    """Stamp a single superellipse profile onto the 2D field (additive blending).
+
+    When clips is provided, JKR half-plane clipping creates flat contact faces.
+    """
     bx, by = _world_to_body(X, Y, cx, cy, theta)
     se_val = (np.abs(bx) / a)**n_s + (np.abs(by) / b)**n_s
     n_inv = 1.0 / n_s
-    dist_approx = (se_val**n_inv - 1.0) * r
-    profile = 0.5 * (1.0 - np.tanh(dist_approx / w))
+    sdf = (se_val**n_inv - 1.0) * r
+    if clips:
+        _apply_clips_2d(sdf, X, Y, cx, cy, clips)
+    profile = 0.5 * (1.0 - np.tanh(sdf / w))
     if gtype == 0:
-        np.maximum(phi_f, profile, out=phi_f)
+        phi_f += profile
     else:
-        np.maximum(phi_i, profile, out=phi_i)
+        phi_i += profile
+
+
+def _stamp_deformed_2d(X, Y, cx, cy, theta, gs, i, p, w, phi_f, phi_i):
+    """Stamp a deformed particle (semi-Lagrangian pull-back) onto 2D field.
+
+    V2.3: Uses the mode-shape displacement to pull grid points back to the
+    undeformed reference configuration, then evaluates the analytical implicit
+    function.  JKR contact clips applied after pull-back SDF computation.
+    """
+    bx, by = _world_to_body(X, Y, cx, cy, theta)
+    eps = gs.epsilon[i]          # (n_modes,)
+    nu = p.poisson_ratio
+    n_modes = len(eps)
+
+    # Vectorised mode-shape displacement (mirrors lsdem._mode_displacement_2d)
+    ux = eps[0] * (-nu * bx) + (eps[1] * bx if n_modes > 1 else 0.0)
+    uy = eps[0] * by           + (eps[1] * (-by) if n_modes > 1 else 0.0)
+
+    bx_ref = bx - ux
+    by_ref = by - uy
+
+    # Evaluate undeformed SDF at the pulled-back coordinate
+    a_i, b_i, n_s = gs.a[i], gs.b[i], gs.n_shape[i]
+    se_val = (np.abs(bx_ref) / a_i)**n_s + (np.abs(by_ref) / b_i)**n_s
+    n_inv = 1.0 / n_s
+    sdf = (se_val**n_inv - 1.0) * gs.r[i]
+
+    # Apply JKR contact clips (flat faces at contact regions)
+    clips = gs.contact_clips[i] if hasattr(gs, 'contact_clips') and gs.contact_clips else None
+    if clips:
+        _apply_clips_2d(sdf, X, Y, cx, cy, clips)
+
+    profile = 0.5 * (1.0 - np.tanh(sdf / w))
+    if gs.gtype[i] == 0:
+        phi_f += profile
+    else:
+        phi_i += profile
+
+
+def _stamp_deformed_3d(phi_f, phi_i, gs, i, cx, cy, cz, xg, yg, zg,
+                       dx_g, dy_g, dz_g, Ng, w, p):
+    """Stamp a deformed 3D particle via semi-Lagrangian SDF pull-back.
+
+    V2.3: Transforms grid points to body frame, applies inverse mode-shape
+    displacement, then evaluates the analytical superellipsoid implicit.
+    """
+    rb = gs.r_bound[i] + 3 * w
+    ix0 = max(0, int((cx - rb) / dx_g))
+    ix1 = min(Ng, int((cx + rb) / dx_g) + 1)
+    iy0 = max(0, int((cy - rb) / dy_g))
+    iy1 = min(Ng, int((cy + rb) / dy_g) + 1)
+    iz0 = max(0, int((cz - rb) / dz_g))
+    iz1 = min(Ng, int((cz + rb) / dz_g) + 1)
+    if ix0 >= ix1 or iy0 >= iy1 or iz0 >= iz1:
+        return
+
+    X, Y, Z = np.meshgrid(xg[ix0:ix1], yg[iy0:iy1], zg[iz0:iz1],
+                           indexing='ij')
+    dx_l, dy_l, dz_l = X - cx, Y - cy, Z - cz
+
+    # Rotate to body frame
+    R_mat = quat_to_rotation_matrix(gs.quat[i])
+    bx = R_mat[0, 0] * dx_l + R_mat[1, 0] * dy_l + R_mat[2, 0] * dz_l
+    by = R_mat[0, 1] * dx_l + R_mat[1, 1] * dy_l + R_mat[2, 1] * dz_l
+    bz = R_mat[0, 2] * dx_l + R_mat[1, 2] * dy_l + R_mat[2, 2] * dz_l
+
+    # Mode-shape displacement (mirrors lsdem._mode_displacement_3d)
+    eps = gs.epsilon[i]
+    nu = p.poisson_ratio
+    n_modes = len(eps)
+    ux = eps[0] * (-nu * bx)
+    uy = eps[0] * (-nu * by)
+    uz = eps[0] * bz
+    if n_modes > 1:
+        ux += eps[1] * bx
+        uy += eps[1] * (-by)
+        # uz += 0 for mode 1
+    if n_modes > 2:
+        ux += eps[2] * bx
+        uy += eps[2] * by
+        uz += eps[2] * bz
+
+    bx_ref = bx - ux
+    by_ref = by - uy
+    bz_ref = bz - uz
+
+    # Evaluate undeformed superellipsoid implicit at pulled-back point
+    a_i, b_i, c_i = gs.a[i], gs.b[i], gs.c[i]
+    n1_i, n2_i = gs.n1[i], gs.n2[i]
+    se_val = ((np.abs(bx_ref / a_i)**n1_i +
+               np.abs(by_ref / b_i)**n1_i)**(n2_i / n1_i) +
+              np.abs(bz_ref / c_i)**n2_i)
+    n_inv = 1.0 / n2_i
+    sdf = (se_val**n_inv - 1.0) * gs.r[i]
+
+    # Apply JKR contact clips (flat faces at contact regions)
+    clips = gs.contact_clips[i] if hasattr(gs, 'contact_clips') and gs.contact_clips else None
+    if clips:
+        _apply_clips_3d(sdf, X, Y, Z, cx, cy, cz, clips)
+
+    profile = 0.5 * (1.0 - np.tanh(sdf / w))
+
+    if gs.gtype[i] == 0:
+        phi_f[ix0:ix1, iy0:iy1, iz0:iz1] += profile
+    else:
+        phi_i[ix0:ix1, iy0:iy1, iz0:iz1] += profile
 
 
 def _periodic_image_offsets_2d(cx, cy, rb, Lx, Ly):
@@ -3035,12 +4341,16 @@ def render_fields(gs: GranuleSystem, p: Params):
     For circles: radial profile with volume-conserving effective radii.
     For superellipses: implicit-function-based signed distance.
     For periodic boundaries, ghost images are stamped at boundary crossings.
-    Returns φ_f, φ_i, φ_v arrays of shape (Ngrid, Ngrid).
+    Returns φ_f, φ_i, φ_v arrays of shape (Ng, Ng).
     """
-    Ng = p.Ngrid
+    # Auto-scale grid to resolve interface (V2.4: prevents aliasing on large domains)
+    # Ensure grid spacing ≤ 2× interface_width so tanh spans ≥ 2 pixels
+    min_Ng = int(np.ceil(max(p.Lx, p.Ly) / (p.interface_width * 2.0)))
+    Ng = max(p.Ngrid, min_Ng)
     dx = p.Lx / Ng
+    dy = p.Ly / Ng
     xg = np.linspace(dx/2, p.Lx - dx/2, Ng)
-    yg = np.linspace(dx/2, p.Ly - dx/2, Ng)
+    yg = np.linspace(dy/2, p.Ly - dy/2, Ng)
     X, Y = np.meshgrid(xg, yg, indexing='ij')
 
     phi_f = np.zeros((Ng, Ng))
@@ -3048,20 +4358,42 @@ def render_fields(gs: GranuleSystem, p: Params):
     w = p.interface_width
     periodic = (p.boundary_mode == 'periodic')
 
-    if gs.is_circle:
-        r_eff, _ = compute_effective_radii(gs)
+    use_deformed = (p.deformable_enabled and gs.epsilon is not None)
+
+    if use_deformed:
+        # V2.3: Semi-Lagrangian deformed rendering — all particles go through
+        # the pull-back path regardless of circle/superellipse distinction.
         for i in range(gs.N):
+            theta_i = gs.theta[i] if hasattr(gs, 'theta') and gs.theta is not None else 0.0
+            if periodic:
+                rb = gs.r_bound[i] + 3 * w
+                for sx, sy in _periodic_image_offsets_2d(
+                        gs.x[i], gs.y[i], rb, p.Lx, p.Ly):
+                    _stamp_deformed_2d(X, Y, gs.x[i] + sx, gs.y[i] + sy,
+                                       theta_i, gs, i, p, w, phi_f, phi_i)
+            else:
+                _stamp_deformed_2d(X, Y, gs.x[i], gs.y[i],
+                                   theta_i, gs, i, p, w, phi_f, phi_i)
+    elif gs.is_circle:
+        r_eff, _ = compute_effective_radii(gs, p)
+        has_clips = hasattr(gs, 'contact_clips') and gs.contact_clips is not None
+        for i in range(gs.N):
+            clips_i = gs.contact_clips[i] if has_clips and gs.contact_clips[i] else None
             if periodic:
                 rb = r_eff[i] + 3*w
                 for sx, sy in _periodic_image_offsets_2d(
                         gs.x[i], gs.y[i], rb, p.Lx, p.Ly):
                     _stamp_circle_2d(X, Y, gs.x[i]+sx, gs.y[i]+sy,
-                                     r_eff[i], w, phi_f, phi_i, gs.gtype[i])
+                                     r_eff[i], w, phi_f, phi_i, gs.gtype[i],
+                                     clips=clips_i)
             else:
                 _stamp_circle_2d(X, Y, gs.x[i], gs.y[i],
-                                 r_eff[i], w, phi_f, phi_i, gs.gtype[i])
+                                 r_eff[i], w, phi_f, phi_i, gs.gtype[i],
+                                 clips=clips_i)
     else:
+        has_clips = hasattr(gs, 'contact_clips') and gs.contact_clips is not None
         for i in range(gs.N):
+            clips_i = gs.contact_clips[i] if has_clips and gs.contact_clips[i] else None
             if periodic:
                 rb = gs.r_bound[i] + 3*w
                 for sx, sy in _periodic_image_offsets_2d(
@@ -3069,26 +4401,54 @@ def render_fields(gs: GranuleSystem, p: Params):
                     _stamp_superellipse_2d(
                         X, Y, gs.x[i]+sx, gs.y[i]+sy,
                         gs.a[i], gs.b[i], gs.n_shape[i], gs.theta[i],
-                        gs.r[i], w, phi_f, phi_i, gs.gtype[i])
+                        gs.r[i], w, phi_f, phi_i, gs.gtype[i],
+                        clips=clips_i)
             else:
                 _stamp_superellipse_2d(
                     X, Y, gs.x[i], gs.y[i],
                     gs.a[i], gs.b[i], gs.n_shape[i], gs.theta[i],
-                    gs.r[i], w, phi_f, phi_i, gs.gtype[i])
+                    gs.r[i], w, phi_f, phi_i, gs.gtype[i],
+                    clips=clips_i)
 
-    # Prevent total > 1
-    total = phi_f + phi_i
-    over = total > 0.99
-    if np.any(over):
-        phi_f[over] *= 0.99 / total[over]
-        phi_i[over] *= 0.99 / total[over]
+    # Volume-conserving normalization (V2.1): see render_fields_3d.
+    A_pixel = (p.Lx / Ng) * (p.Ly / Ng)
+    func_mask_g = gs.gtype == 0
+    inert_mask_g = gs.gtype == 1
+    if gs.is_circle:
+        A_f_true = float(np.sum(np.pi * gs.r[func_mask_g] ** 2)) \
+            if np.any(func_mask_g) else 0.0
+        A_i_true = float(np.sum(np.pi * gs.r[inert_mask_g] ** 2)) \
+            if np.any(inert_mask_g) else 0.0
+    else:
+        A_f_true = float(sum(superellipse_area(gs.a[j], gs.b[j], gs.n_shape[j])
+            for j in np.where(func_mask_g)[0])) if np.any(func_mask_g) else 0.0
+        A_i_true = float(sum(superellipse_area(gs.a[j], gs.b[j], gs.n_shape[j])
+            for j in np.where(inert_mask_g)[0])) if np.any(inert_mask_g) else 0.0
+    A_solid_true = A_f_true + A_i_true
+    for _iter in range(20):
+        A_solid_rendered = float(np.sum(phi_f + phi_i)) * A_pixel
+        if A_solid_rendered < 1e-30:
+            break
+        if abs(A_solid_rendered - A_solid_true) / A_solid_true < 1e-3:
+            break
+        scale = A_solid_true / A_solid_rendered
+        phi_f *= scale
+        phi_i *= scale
+        total = phi_f + phi_i
+        over = total > 1.0
+        if np.any(over):
+            phi_f[over] /= total[over]
+            phi_i[over] /= total[over]
 
     return phi_f, phi_i, 1.0 - phi_f - phi_i
 
 
 def _stamp_granule_3d(phi_f, phi_i, gs, i, cx, cy, cz, r_eff_3d_i,
-                      xg, yg, zg, dx_g, dy_g, dz_g, Ng, w):
-    """Stamp one 3D granule image at (cx, cy, cz) onto the field grids."""
+                      xg, yg, zg, dx_g, dy_g, dz_g, Ng, w, clips=None):
+    """Stamp one 3D granule image at (cx, cy, cz) onto the field grids.
+
+    When clips is provided, JKR half-space clipping creates flat contact faces.
+    """
     rb = gs.r_bound[i] + 3*w
     ix0 = max(0, int((cx - rb) / dx_g))
     ix1 = min(Ng, int((cx + rb) / dx_g) + 1)
@@ -3103,8 +4463,7 @@ def _stamp_granule_3d(phi_f, phi_i, gs, i, cx, cy, cz, r_eff_3d_i,
                            indexing='ij')
 
     if gs.is_circle:
-        dist = np.sqrt((X - cx)**2 + (Y - cy)**2 + (Z - cz)**2)
-        profile = 0.5 * (1.0 - np.tanh((dist - r_eff_3d_i) / w))
+        sdf = np.sqrt((X - cx)**2 + (Y - cy)**2 + (Z - cz)**2) - r_eff_3d_i
     else:
         dx_l = X - cx
         dy_l = Y - cy
@@ -3118,15 +4477,17 @@ def _stamp_granule_3d(phi_f, phi_i, gs, i, cx, cy, cz, r_eff_3d_i,
                    np.abs(by/gs.b[i])**gs.n1[i])**(gs.n2[i]/gs.n1[i]) +
                   np.abs(bz/gs.c[i])**gs.n2[i])
         n_inv = 1.0 / gs.n2[i]
-        dist_approx = (se_val**n_inv - 1.0) * gs.r[i]
-        profile = 0.5 * (1.0 - np.tanh(dist_approx / w))
+        sdf = (se_val**n_inv - 1.0) * gs.r[i]
+
+    if clips:
+        _apply_clips_3d(sdf, X, Y, Z, cx, cy, cz, clips)
+
+    profile = 0.5 * (1.0 - np.tanh(sdf / w))
 
     if gs.gtype[i] == 0:
-        phi_f[ix0:ix1, iy0:iy1, iz0:iz1] = np.maximum(
-            phi_f[ix0:ix1, iy0:iy1, iz0:iz1], profile)
+        phi_f[ix0:ix1, iy0:iy1, iz0:iz1] += profile
     else:
-        phi_i[ix0:ix1, iy0:iy1, iz0:iz1] = np.maximum(
-            phi_i[ix0:ix1, iy0:iy1, iz0:iz1], profile)
+        phi_i[ix0:ix1, iy0:iy1, iz0:iz1] += profile
 
 
 def render_fields_3d(gs: GranuleSystem, p: Params):
@@ -3135,7 +4496,10 @@ def render_fields_3d(gs: GranuleSystem, p: Params):
     For periodic boundaries, ghost images are stamped at boundary crossings.
     Returns φ_f, φ_i, φ_v arrays of shape (Ng, Ng, Ng).
     """
-    Ng = p.Ngrid_3d
+    # Auto-scale grid to resolve interface (V2.4: prevents aliasing on large domains)
+    min_Ng = int(np.ceil(max(p.Lx, p.Ly, p.Lz) / (p.interface_width * 2.0)))
+    # Cap 3D auto-scale at 200 to avoid excessive memory (200^3 = 8M voxels)
+    Ng = max(p.Ngrid_3d, min(min_Ng, 200))
     dx_g = p.Lx / Ng
     dy_g = p.Ly / Ng
     dz_g = p.Lz / Ng
@@ -3143,45 +4507,96 @@ def render_fields_3d(gs: GranuleSystem, p: Params):
     yg = np.linspace(dy_g/2, p.Ly - dy_g/2, Ng)
     zg = np.linspace(dz_g/2, p.Lz - dz_g/2, Ng)
 
+    # For 3D, also widen interface if grid is still too coarse (cheaper than more voxels)
+    w_3d = max(p.interface_width, max(dx_g, dy_g, dz_g))
+
     phi_f = np.zeros((Ng, Ng, Ng))
     phi_i = np.zeros((Ng, Ng, Ng))
-    w = p.interface_width
+    w = w_3d
     periodic = (p.boundary_mode == 'periodic')
 
+    use_deformed = (p.deformable_enabled and gs.epsilon is not None)
+
     if gs.is_circle:
-        r_eff_3d, _ = compute_effective_radii_3d(gs)
+        r_eff_3d, _ = compute_effective_radii_3d(gs, p)
     else:
         r_eff_3d = gs.r
 
+    has_clips = hasattr(gs, 'contact_clips') and gs.contact_clips is not None
+
     for i in range(gs.N):
         r_eff_i = r_eff_3d[i]
+        clips_i = gs.contact_clips[i] if has_clips and gs.contact_clips[i] else None
         if periodic:
             rb = gs.r_bound[i] + 3*w
-            # Generate ghost offsets for this granule
             for sx in (-p.Lx, 0, p.Lx):
                 for sy in (-p.Ly, 0, p.Ly):
                     for sz in (-p.Lz, 0, p.Lz):
                         gx = gs.x[i] + sx
                         gy = gs.y[i] + sy
                         gz = gs.z[i] + sz
-                        # Only stamp if image overlaps the domain
                         if (gx + rb > 0 and gx - rb < p.Lx and
                             gy + rb > 0 and gy - rb < p.Ly and
                             gz + rb > 0 and gz - rb < p.Lz):
-                            _stamp_granule_3d(
-                                phi_f, phi_i, gs, i, gx, gy, gz,
-                                r_eff_i, xg, yg, zg,
-                                dx_g, dy_g, dz_g, Ng, w)
+                            if use_deformed:
+                                _stamp_deformed_3d(
+                                    phi_f, phi_i, gs, i, gx, gy, gz,
+                                    xg, yg, zg, dx_g, dy_g, dz_g, Ng, w, p)
+                            else:
+                                _stamp_granule_3d(
+                                    phi_f, phi_i, gs, i, gx, gy, gz,
+                                    r_eff_i, xg, yg, zg,
+                                    dx_g, dy_g, dz_g, Ng, w,
+                                    clips=clips_i)
         else:
-            _stamp_granule_3d(
-                phi_f, phi_i, gs, i, gs.x[i], gs.y[i], gs.z[i],
-                r_eff_i, xg, yg, zg, dx_g, dy_g, dz_g, Ng, w)
+            if use_deformed:
+                _stamp_deformed_3d(
+                    phi_f, phi_i, gs, i,
+                    gs.x[i], gs.y[i], gs.z[i],
+                    xg, yg, zg, dx_g, dy_g, dz_g, Ng, w, p)
+            else:
+                _stamp_granule_3d(
+                    phi_f, phi_i, gs, i, gs.x[i], gs.y[i], gs.z[i],
+                    r_eff_i, xg, yg, zg, dx_g, dy_g, dz_g, Ng, w,
+                    clips=clips_i)
 
-    total = phi_f + phi_i
-    over = total > 0.99
-    if np.any(over):
-        phi_f[over] *= 0.99 / total[over]
-        phi_i[over] *= 0.99 / total[over]
+    # Volume-conserving normalization (V2.1): additive blending over-counts
+    # at overlap zones.  Iterative scale-and-cap: each iteration normalises
+    # the integral to match true granule volume, then caps per-voxel at 1.0.
+    # Excess from capped voxels is redistributed in the next iteration.
+    # Converges in ~5-10 iterations to <0.1% volume error.
+    V_voxel = dx_g * dy_g * dz_g
+    func_mask_g = gs.gtype == 0
+    inert_mask_g = gs.gtype == 1
+    if gs.is_circle:
+        V_f_true = float(np.sum((4.0 / 3.0) * np.pi * gs.r[func_mask_g] ** 3)) \
+            if np.any(func_mask_g) else 0.0
+        V_i_true = float(np.sum((4.0 / 3.0) * np.pi * gs.r[inert_mask_g] ** 3)) \
+            if np.any(inert_mask_g) else 0.0
+    else:
+        V_f_true = float(sum(superellipsoid_volume(
+            gs.a[j], gs.b[j], gs.c[j], gs.n1[j], gs.n2[j])
+            for j in np.where(func_mask_g)[0])) if np.any(func_mask_g) else 0.0
+        V_i_true = float(sum(superellipsoid_volume(
+            gs.a[j], gs.b[j], gs.c[j], gs.n1[j], gs.n2[j])
+            for j in np.where(inert_mask_g)[0])) if np.any(inert_mask_g) else 0.0
+    V_solid_true = V_f_true + V_i_true
+    for _iter in range(20):
+        V_solid_rendered = float(np.sum(phi_f + phi_i)) * V_voxel
+        if V_solid_rendered < 1e-30:
+            break
+        rel_err = abs(V_solid_rendered - V_solid_true) / V_solid_true
+        if rel_err < 1e-3:
+            break
+        scale = V_solid_true / V_solid_rendered
+        phi_f *= scale
+        phi_i *= scale
+        # Cap per-voxel total to 1.0 (preserving phi_f/phi_i ratio)
+        total = phi_f + phi_i
+        over = total > 1.0
+        if np.any(over):
+            phi_f[over] /= total[over]
+            phi_i[over] /= total[over]
 
     return phi_f, phi_i, 1.0 - phi_f - phi_i
 
@@ -3275,7 +4690,7 @@ def compute_metrics(gs, p, phi_f, phi_i, phi_v, t, forces):
     # Max cluster area (inner region)
     thr = np.mean(pf_inner) + 0.3*np.std(pf_inner)
     b = (pf_inner > thr).astype(int); lab, nc = label(b)
-    dxg = p.Lx / p.Ngrid
+    dxg = p.Lx / phi_f.shape[0]
     if nc > 0:
         sizes = np.array([np.sum(lab==l) for l in range(1, nc+1)])
         m['func_max_area'] = float(np.max(sizes) * dxg**2)
@@ -3442,6 +4857,8 @@ def compute_metrics(gs, p, phi_f, phi_i, phi_v, t, forces):
     m['n_overcrowded_total'] = float(np.sum(gs.n_overcrowded[func]))
 
     # ── Per-cell bridge force monitoring (V1.9) ──
+    migrating_mask = gs.cell_state == int(CellState.MIGRATING)
+    m['n_migrating_cells'] = int(np.sum(migrating_mask))
     bridging_mask = gs.cell_state == int(CellState.BRIDGING)
     n_bridging_cells = int(np.sum(bridging_mask))
     m['n_bridging_cells'] = n_bridging_cells
@@ -3473,6 +4890,33 @@ def compute_metrics(gs, p, phi_f, phi_i, phi_v, t, forces):
     # Compaction ratio (inner region)
     phi_solid = float(np.mean(pf_inner) + np.mean(pi_inner))
     m['phi_solid'] = phi_solid
+
+    # True granule-based volume fractions (V2.1, invariant to rendering)
+    if gs.is_3d:
+        V_domain = p.Lx * p.Ly * p.Lz
+        if gs.is_circle:
+            V_f_true = float(np.sum((4.0 / 3.0) * np.pi * gs.r[gs.func_mask] ** 3))
+            V_i_true = float(np.sum((4.0 / 3.0) * np.pi * gs.r[gs.inert_mask] ** 3))
+        else:
+            V_f_true = float(sum(superellipsoid_volume(
+                gs.a[j], gs.b[j], gs.c[j], gs.n1[j], gs.n2[j])
+                for j in np.where(gs.func_mask)[0]))
+            V_i_true = float(sum(superellipsoid_volume(
+                gs.a[j], gs.b[j], gs.c[j], gs.n1[j], gs.n2[j])
+                for j in np.where(gs.inert_mask)[0]))
+    else:
+        V_domain = p.Lx * p.Ly
+        if gs.is_circle:
+            V_f_true = float(np.sum(np.pi * gs.r[gs.func_mask] ** 2))
+            V_i_true = float(np.sum(np.pi * gs.r[gs.inert_mask] ** 2))
+        else:
+            V_f_true = float(sum(superellipse_area(gs.a[j], gs.b[j], gs.n_shape[j])
+                for j in np.where(gs.func_mask)[0]))
+            V_i_true = float(sum(superellipse_area(gs.a[j], gs.b[j], gs.n_shape[j])
+                for j in np.where(gs.inert_mask)[0]))
+    m['phi_f_true'] = V_f_true / V_domain
+    m['phi_i_true'] = V_i_true / V_domain
+    m['phi_solid_true'] = (V_f_true + V_i_true) / V_domain
     ar_mean = float(np.mean(np.maximum(gs.a, gs.b) /
                             np.minimum(gs.a, gs.b))) if gs.N > 0 else 1.0
     phi_rcp = rcp_fraction_superellipsoid(ar_mean)
@@ -3485,6 +4929,54 @@ def compute_metrics(gs, p, phi_f, phi_i, phi_v, t, forces):
     else:
         L_char = np.sqrt(p.Lx * p.Ly)
     m['Da_number'] = m['K_kozeny_carman'] / (L_char**2) if L_char > 0 else 0.0
+
+    # V2.3: Deformation metrics (LS-DEM)
+    if gs.epsilon is not None:
+        eps_mag = np.sqrt(np.sum(gs.epsilon**2, axis=1))
+        m['def_strain_mean'] = float(np.mean(eps_mag))
+        m['def_strain_max'] = float(np.max(eps_mag))
+        m['def_strain_std'] = float(np.std(eps_mag))
+        for alpha in range(gs.epsilon.shape[1]):
+            m[f'def_mode_{alpha}_mean'] = float(np.mean(gs.epsilon[:, alpha]))
+            m[f'def_mode_{alpha}_std'] = float(np.std(gs.epsilon[:, alpha]))
+
+    # V2.1: Two-compartment volume conservation (Voronoi shrink-wrap)
+    if gs.N > 0 and np.any(gs.func_mask) and np.any(gs.inert_mask):
+        pos_vc = gs.positions()
+        if periodic:
+            if gs.is_3d:
+                tree_vc = cKDTree(pos_vc, boxsize=[p.Lx, p.Ly, p.Lz])
+            else:
+                tree_vc = cKDTree(pos_vc, boxsize=[p.Lx, p.Ly])
+        else:
+            tree_vc = tree  # reuse the tree built above
+        grid_shape = phi_f.shape
+        if gs.is_3d:
+            nx, ny, nz = grid_shape
+            cx = np.linspace(0.5 * p.Lx / nx, p.Lx - 0.5 * p.Lx / nx, nx)
+            cy = np.linspace(0.5 * p.Ly / ny, p.Ly - 0.5 * p.Ly / ny, ny)
+            cz = np.linspace(0.5 * p.Lz / nz, p.Lz - 0.5 * p.Lz / nz, nz)
+            gx_v, gy_v, gz_v = np.meshgrid(cx, cy, cz, indexing='ij')
+            voxel_pts = np.column_stack([gx_v.ravel(), gy_v.ravel(), gz_v.ravel()])
+        else:
+            nx, ny = grid_shape
+            cx = np.linspace(0.5 * p.Lx / nx, p.Lx - 0.5 * p.Lx / nx, nx)
+            cy = np.linspace(0.5 * p.Ly / ny, p.Ly - 0.5 * p.Ly / ny, ny)
+            gx_v, gy_v = np.meshgrid(cx, cy, indexing='ij')
+            voxel_pts = np.column_stack([gx_v.ravel(), gy_v.ravel()])
+        _, nearest_idx = tree_vc.query(voxel_pts)
+        nearest_type = gs.gtype[nearest_idx].reshape(grid_shape)
+        fm = nearest_type == 0
+        im = nearest_type == 1
+        n_func_v = int(np.sum(fm))
+        n_inert_v = int(np.sum(im))
+        m['x_f'] = n_func_v / max(phi_f.size, 1)
+        m['x_i'] = n_inert_v / max(phi_f.size, 1)
+        m['phi_v_in_func'] = float(np.mean(phi_v[fm])) if n_func_v > 0 else 0.0
+        m['phi_v_in_inert'] = float(np.mean(phi_v[im])) if n_inert_v > 0 else 0.0
+        m['phi_solid_func'] = float(np.mean((phi_f + phi_i)[fm])) if n_func_v > 0 else 0.0
+        m['phi_solid_inert'] = float(np.mean((phi_f + phi_i)[im])) if n_inert_v > 0 else 0.0
+        m['phi_v_crosscheck'] = m['x_f'] * m['phi_v_in_func'] + m['x_i'] * m['phi_v_in_inert']
 
     return m
 
@@ -3504,8 +4996,27 @@ def compute_displacement(gs, x0, y0, z0=None):
 
 
 # ══════════════════════════════════════════════════════════════════════
-# Data serialization (V1.5)
+# Data serialization (V1.5, updated V2.6)
 # ══════════════════════════════════════════════════════════════════════
+
+def check_disk_space(output_dir):
+    """Check available disk space for the output directory.
+
+    Returns 'ok' (>= 5 GB), 'warning' (1-5 GB), or 'critical' (< 1 GB).
+    """
+    import shutil
+    try:
+        usage = shutil.disk_usage(output_dir)
+        free_gb = usage.free / (1024 ** 3)
+        if free_gb < 1.0:
+            return 'critical'
+        elif free_gb < 5.0:
+            return 'warning'
+        return 'ok'
+    except OSError:
+        return 'ok'  # can't check, assume ok
+
+
 
 def save_snapshot_to_disk(snap_idx, gs, p, t, F, output_dir,
                            save_fields=False, phi_f=None, phi_i=None, phi_v=None,
@@ -3549,6 +5060,8 @@ def save_snapshot_to_disk(snap_idx, gs, p, t, F, output_dir,
     data['cell_bridge_target'] = gs.cell_bridge_target.copy()
     data['cell_bridge_age'] = gs.cell_bridge_age.copy()
     data['cell_bridge_locked'] = gs.cell_bridge_locked.copy()
+    data['cell_overcrowd_age'] = gs.cell_overcrowd_age.copy()
+    data['cell_alignment'] = gs.cell_alignment.copy()
     data['cell_contact_area'] = gs.cell_contact_area.copy()
     data['cell_offset'] = gs.cell_offset.copy()
 
@@ -3567,6 +5080,11 @@ def save_snapshot_to_disk(snap_idx, gs, p, t, F, output_dir,
         data['contact_R_eff'] = np.array([c['R_eff'] for c in contacts])
         data['contact_F_normal'] = np.array([c['F_normal'] for c in contacts])
         data['contact_A_contact'] = np.array([c['A_contact'] for c in contacts])
+
+    # V2.6: LS-DEM deformation state (needed for resume)
+    if gs.epsilon is not None:
+        data['epsilon'] = gs.epsilon.copy()
+        data['d_epsilon'] = gs.d_epsilon.copy()
 
     np.savez_compressed(
         os.path.join(snap_dir, f'snap_{snap_idx:04d}.npz'), **data)
@@ -3772,6 +5290,113 @@ def load_cells(run_dir, snap_index=None):
 
 
 # ══════════════════════════════════════════════════════════════════════
+# Resume from snapshot (V2.6)
+# ══════════════════════════════════════════════════════════════════════
+
+def find_last_snapshot(run_dir):
+    """Find the last (highest-numbered) snapshot file in a run directory.
+
+    Returns the absolute path to the last snap_XXXX.npz file.
+    Raises FileNotFoundError if none found.
+    """
+    snap_dir = os.path.join(run_dir, 'snapshots')
+    if not os.path.isdir(snap_dir):
+        raise FileNotFoundError(f"No snapshots/ directory in {run_dir}")
+    snap_files = sorted(
+        f for f in os.listdir(snap_dir)
+        if f.startswith('snap_') and f.endswith('.npz'))
+    if not snap_files:
+        raise FileNotFoundError(f"No snap_*.npz files in {snap_dir}")
+    return os.path.join(snap_dir, snap_files[-1])
+
+
+def restore_gs_from_snapshot(snap_path, p):
+    """Restore a GranuleSystem from a saved snapshot .npz file.
+
+    Parameters
+    ----------
+    snap_path : str
+        Path to a snap_XXXX.npz file.
+    p : Params
+        Simulation parameters (needed for mode, LS-DEM config).
+
+    Returns
+    -------
+    gs : GranuleSystem
+        Fully restored granule system.
+    t_resume : float
+        Simulation time at the snapshot.
+    snap_idx : int
+        Snapshot index (parsed from filename).
+    """
+    data = dict(np.load(snap_path, allow_pickle=False))
+    t_resume = float(data['time'])
+
+    # Parse snap index from filename: snap_XXXX.npz -> XXXX
+    basename = os.path.basename(snap_path)
+    snap_idx = int(basename.replace('snap_', '').replace('.npz', ''))
+
+    # Construct GranuleSystem
+    gs = GranuleSystem(
+        x=data['x'], y=data['y'], r=data['r'],
+        gtype=data['gtype'], n_cells=data['n_cells'],
+        z=data['z'] if 'z' in data else None,
+        a=data['a'], b=data['b'],
+        c=data.get('c', None),
+        n1=data['n1'], n2=data['n2'],
+        theta=data.get('theta', None),
+        quat=data.get('quat', None),
+        mode=p.mode
+    )
+
+    # Restore velocity state
+    gs.vx[:] = data['vx']
+    gs.vy[:] = data['vy']
+    gs.vz[:] = data['vz']
+
+    # Restore per-granule cell state
+    gs.n_attached[:] = data['n_attached']
+    gs.spread_fraction[:] = data['spread_fraction']
+    gs.fa_maturity[:] = data['fa_maturity']
+    gs.n_overcrowded[:] = data['n_overcrowded']
+
+    # Restore per-cell arrays
+    gs.cell_granule_id[:] = data['cell_granule_id']
+    gs.cell_state[:] = data['cell_state']
+    gs.cell_theta_local[:] = data['cell_theta_local']
+    gs.cell_eta_local[:] = data.get('cell_eta_local', np.zeros(gs.total_cells))
+    gs.cell_omega_local[:] = data.get('cell_omega_local', np.zeros(gs.total_cells))
+    gs.cell_fx[:] = data['cell_fx']
+    gs.cell_fy[:] = data['cell_fy']
+    gs.cell_fz[:] = data.get('cell_fz', np.zeros(gs.total_cells))
+    gs.cell_bridge_target[:] = data['cell_bridge_target']
+    gs.cell_bridge_age[:] = data['cell_bridge_age']
+    gs.cell_bridge_locked[:] = data['cell_bridge_locked']
+    gs.cell_overcrowd_age[:] = data['cell_overcrowd_age']
+    gs.cell_alignment[:] = data['cell_alignment']
+    gs.cell_contact_area[:] = data['cell_contact_area']
+    gs.cell_offset[:] = data['cell_offset']
+
+    # Unwrapped positions: reset to current (displacement tracked from resume point)
+    gs.x_unwrap[:] = gs.x
+    gs.y_unwrap[:] = gs.y
+    gs.z_unwrap[:] = gs.z
+
+    # LS-DEM: re-init SDF grids from params, then restore deformation state
+    if p.deformable_enabled:
+        from lsdem import init_lsdem
+        init_lsdem(gs, p)
+        if 'epsilon' in data:
+            gs.epsilon[:] = data['epsilon']
+            gs.d_epsilon[:] = data['d_epsilon']
+        else:
+            print("  WARNING: Resuming deformable run but snapshot has no epsilon data.")
+            print("           Starting deformation from zero.")
+
+    return gs, t_resume, snap_idx
+
+
+# ══════════════════════════════════════════════════════════════════════
 # Main simulation loop
 # ══════════════════════════════════════════════════════════════════════
 
@@ -3799,6 +5424,10 @@ def _warmup_jit(is_3d=False):
 
 def run(p=None, seed=None):
     if p is None: p = Params()
+    # Re-derive phi targets in case overrides were applied after __post_init__
+    if p.phi_solid_target > 0:
+        p.phi_f_target = p.phi_solid_target * p.func_ratio
+        p.phi_i_target = p.phi_solid_target * (1.0 - p.func_ratio)
     if seed is None:
         seed = int(np.random.default_rng().integers(0, 2**31))
         print(f"  Using random seed: {seed}")
@@ -3808,27 +5437,47 @@ def run(p=None, seed=None):
     if HAS_NUMBA and p.shape_enabled:
         _warmup_jit(p.mode == "3D")
 
-    print(f"\n  Mode: {p.mode}")
-    print("  Generating packing...")
+    # ── V2.6: Resume or fresh start ──
+    resume_t = 0.0
+    resume_snap_idx = -1  # -1 means fresh start (snap_counter will be 0)
+    hist = []
 
-    # Mode-aware packing generation
-    if p.mode == "3D":
-        gs = generate_packing_3d(p, seed=seed)
-    elif p.mode == "2D-slice":
-        gs = generate_packing_2d_slice(p, seed=seed)
+    if p.resume_from:
+        print(f"\n  RESUMING from: {p.resume_from}")
+        snap_path = find_last_snapshot(p.resume_from)
+        gs, resume_t, resume_snap_idx = restore_gs_from_snapshot(snap_path, p)
+        print(f"  Restored state at t={resume_t:.2f} h (snapshot {resume_snap_idx})")
+        # Load existing history if available
+        hist_json = os.path.join(p.resume_from, 'history.json')
+        if os.path.exists(hist_json):
+            with open(hist_json) as _hf:
+                hist = json.load(_hf)
+            print(f"  Loaded {len(hist)} history entries")
     else:
-        gs = generate_packing(p, seed=seed)
+        print(f"\n  Mode: {p.mode}")
+        print("  Generating packing...")
+        # Mode-aware packing generation
+        if p.mode == "3D":
+            gs = generate_packing_3d(p, seed=seed)
+        elif p.mode == "2D-slice":
+            gs = generate_packing_2d_slice(p, seed=seed)
+        else:
+            gs = generate_packing(p, seed=seed)
+        # V2.3: Initialize LS-DEM deformable particles if enabled
+        if p.deformable_enabled:
+            from lsdem import init_lsdem
+            init_lsdem(gs, p)
 
-    # Store initial positions
+    # Store initial positions (displacement tracked from this point)
     x0 = gs.x.copy(); y0 = gs.y.copy()
     z0 = gs.z.copy() if gs.is_3d else None
 
     n_steps = int(p.t_total / p.dt)
-    hist, snaps = [], []
+    snaps = []
 
     # V1.5: Initialize output directory and save metadata
     output_dir = p.output_dir
-    snap_counter = [0]  # mutable counter for closure
+    snap_counter = [resume_snap_idx + 1]  # continues from resume point
     if p.save_data:
         os.makedirs(output_dir, exist_ok=True)
         save_params_metadata(p, gs, output_dir, seed)
@@ -3865,6 +5514,8 @@ def run(p=None, seed=None):
             'cell_bridge_target': gs.cell_bridge_target.copy(),
             'cell_bridge_age': gs.cell_bridge_age.copy(),
             'cell_bridge_locked': gs.cell_bridge_locked.copy(),
+            'cell_overcrowd_age': gs.cell_overcrowd_age.copy(),
+            'cell_alignment': gs.cell_alignment.copy(),
             'cell_contact_area': gs.cell_contact_area.copy(),
             'cell_offset': gs.cell_offset.copy(),
             # V1.5.2: Per-contact data for stress visualization
@@ -3881,53 +5532,71 @@ def run(p=None, seed=None):
             snap['theta'] = gs.theta.copy()
         # Store n_shape for 2D viz compat
         snap['n_shape'] = gs.n1.copy()
+        # V2.3: LS-DEM deformation state
+        if gs.epsilon is not None:
+            snap['epsilon'] = gs.epsilon.copy()
+            snap['d_epsilon'] = gs.d_epsilon.copy()
         snaps.append(snap)
 
-        # V1.5: Save to disk
+        # V1.5: Save to disk (V2.6: with disk space guard and rolling cleanup)
         if p.save_data:
-            save_snapshot_to_disk(
-                snap_counter[0], gs, p, t, F, output_dir,
-                save_fields=p.save_fields,
-                phi_f=pf, phi_i=pi, phi_v=pv,
-                contacts=contacts)
-            snap_counter[0] += 1
+            disk_status = check_disk_space(output_dir)
+            if disk_status == 'critical':
+                print(f"  CRITICAL: < 1 GB disk space — SKIPPING snapshot "
+                      f"{snap_counter[0]} at t={t:.1f} h")
+            else:
+                use_fields = p.save_fields and disk_status != 'warning'
+                if disk_status == 'warning':
+                    print(f"  WARNING: < 5 GB disk space — saving WITHOUT fields")
+                save_snapshot_to_disk(
+                    snap_counter[0], gs, p, t, F, output_dir,
+                    save_fields=use_fields,
+                    phi_f=pf, phi_i=pi, phi_v=pv,
+                    contacts=contacts)
+                snap_counter[0] += 1
 
         return m
 
-    # Initial save
-    update_cell_state(gs, p, 0.0, rng)
-    if gs.is_3d:
-        F0, _, contacts0 = compute_forces_3d(gs, p, rng)
+    # ── Print header ──
+    _hdr = (f"\n  {'t(h)':>6} {'f_cl':>5} {'f_lf':>6} {'v_cl':>5} "
+            f"{'tissue':>7} {'bridges':>7} {'attach':>7} {'spread':>6} "
+            f"{'FA_mat':>6} {'disp_f':>7} {'K_KC':>8} "
+            f"{'bCells':>6} {'bF_avg':>6} {'lock':>4}")
+
+    def _print_metrics(t, m):
+        print(f"  {t:6.1f} {m['func_nc']:5d} {m['func_lf']:6.2f} "
+              f"{m['void_nc']:5d} {m['tissue_frac']:7.3f} "
+              f"{m['n_bridges']:7d} {m['n_attached_total']:7.0f} "
+              f"{m['mean_spread_frac']:6.2f} {m['mean_fa_maturity']:6.2f} "
+              f"{m['disp_func']:7.1f} {m['K_kozeny_carman']:8.1f} "
+              f"{m['n_bridging_cells']:6d} {m['bridge_force_mean']:6.1f} "
+              f"{m['n_locked_in_cells']:4d}")
+
+    # ── Initial save (only for fresh starts) ──
+    resume_step = int(round(resume_t / p.dt))
+    if not p.resume_from:
+        update_cell_state(gs, p, 0.0, rng)
+        if gs.is_3d:
+            F0, _, contacts0 = compute_forces_3d(gs, p, rng)
+        else:
+            F0, _, contacts0 = compute_forces(gs, p, rng)
+        m = save(0.0, F0, contacts0)
+        print(_hdr)
+        _print_metrics(0.0, m)
     else:
-        F0, _, contacts0 = compute_forces(gs, p, rng)
-    m = save(0.0, F0, contacts0)
-    print(f"\n  {'t(h)':>6} {'f_cl':>5} {'f_lf':>6} {'v_cl':>5} "
-          f"{'tissue':>7} {'bridges':>7} {'attach':>7} {'spread':>6} "
-          f"{'FA_mat':>6} {'disp_f':>7} {'K_KC':>8} "
-          f"{'bCells':>6} {'bF_avg':>6} {'lock':>4}")
-    print(f"  {0:6.1f} {m['func_nc']:5d} {m['func_lf']:6.2f} {m['void_nc']:5d} "
-          f"{m['tissue_frac']:7.3f} {m['n_bridges']:7d} "
-          f"{m['n_attached_total']:7.0f} {m['mean_spread_frac']:6.2f} "
-          f"{m['mean_fa_maturity']:6.2f} {m['disp_func']:7.1f} "
-          f"{m['K_kozeny_carman']:8.1f} "
-          f"{m['n_bridging_cells']:6d} {m['bridge_force_mean']:6.1f} "
-          f"{m['n_locked_in_cells']:4d}")
+        print(f"  Resuming from step {resume_step + 1} "
+              f"(t={resume_t:.2f} h) → step {n_steps} (t={p.t_total:.2f} h)")
+        print(_hdr)
 
     wall_t0 = timer.time()
-    t = 0.0
-    for s in range(1, n_steps + 1):
+    t = resume_t
+    for s in range(resume_step + 1, n_steps + 1):
         t += p.dt
         F, contacts = step(gs, p, rng, t)
 
         if s % p.save_every == 0:
             m = save(t, F, contacts)
-            print(f"  {t:6.1f} {m['func_nc']:5d} {m['func_lf']:6.2f} "
-                  f"{m['void_nc']:5d} {m['tissue_frac']:7.3f} "
-                  f"{m['n_bridges']:7d} {m['n_attached_total']:7.0f} "
-                  f"{m['mean_spread_frac']:6.2f} {m['mean_fa_maturity']:6.2f} "
-                  f"{m['disp_func']:7.1f} {m['K_kozeny_carman']:8.1f} "
-                  f"{m['n_bridging_cells']:6d} {m['bridge_force_mean']:6.1f} "
-                  f"{m['n_locked_in_cells']:4d}")
+            _print_metrics(t, m)
 
     elapsed = timer.time() - wall_t0
     print(f"\n  Done in {elapsed:.1f}s ({n_steps} steps, {gs.N} granules)")
@@ -3980,7 +5649,7 @@ def run(p=None, seed=None):
 
 if __name__ == '__main__':
     print("="*65)
-    print("  GELLS-DEM V1.6: Cell-Driven Granular Rearrangement")
+    print("  GELS V1.6: Cell-Driven Granular Rearrangement")
     print("="*65)
 
     p = Params()

@@ -6,19 +6,19 @@
 
 set -euo pipefail
 
-echo "=== Setting up GELLS-DEM environment for mcgheealex ==="
+echo "=== Setting up GELS environment for mcgheealex ==="
 
 module load python/3.11/3.11.4
 
-python3 -m venv --system-site-packages $HOME/gells-dem-env
-source $HOME/gells-dem-env/bin/activate
+python3 -m venv --system-site-packages $HOME/gels-env
+source $HOME/gels-env/bin/activate
 
 pip install --upgrade pip
 pip install numpy scipy matplotlib
 
 echo ""
-echo "=== Environment ready at $HOME/gells-dem-env ==="
+echo "=== Environment ready at $HOME/gels-env ==="
 echo "To activate:"
-echo "  module load python/3.11/3.11.4 && source $HOME/gells-dem-env/bin/activate"
+echo "  module load python/3.11/3.11.4 && source $HOME/gels-env/bin/activate"
 echo "To submit a job:"
 echo "  sbatch run.slurm"

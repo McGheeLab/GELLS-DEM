@@ -1,6 +1,6 @@
-# GELLS-DEM
+# GELS
 
-**Granular Encapsulated Living-cell Laden Scaffold - Discrete Element Method**
+**Granule-Enabled Living Scaffolds**
 
 A 2D/3D particle dynamics simulator for modelling cell-driven rearrangement of
 hydrogel granular scaffolds.
@@ -9,7 +9,7 @@ hydrogel granular scaffolds.
 
 ## What It Does
 
-GELLS-DEM simulates how cell-laden hydrogel granules reorganize over time within
+GELS simulates how cell-laden hydrogel granules reorganize over time within
 a confined domain. Functional granules carry cells that form mechanical bridges
 to neighbouring functional granules, pulling them together. Inert granules act as
 passive spacers. The simulation predicts how scaffold microstructure --- void
@@ -113,7 +113,7 @@ The Young's modulus `E_modulus` controls how much granules overlap under cell fo
 ## Project Structure
 
 ```
-GELLS-DEM/
+GELS/
 ├── new_dem_0.py                 # Primary simulation engine (V1.12, no plotting)
 ├── run_hpc_headless.py          # HPC headless runner (supports 2D/3D)
 ├── run_all_trials.py            # Batch trial runner (local / SLURM array)

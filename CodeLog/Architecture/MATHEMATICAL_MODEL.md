@@ -613,11 +613,11 @@ whose components fall into six categories:
 
 ### 7.2 Architectural Distance
 
-Given a GELLS scaffold descriptor $\mathbf{d}^{\text{GELLS}}$ and a target organ
+Given a GELS scaffold descriptor $\mathbf{d}^{\text{GELS}}$ and a target organ
 descriptor $\mathbf{d}^{\text{organ}}$ with population standard deviation
 $\boldsymbol{\sigma}^{\text{organ}}$, the architectural distance is:
 
-$$D_{\text{arch}} = \sqrt{\sum_{k=1}^{n_d} w_k \left(\frac{d_k^{\text{GELLS}} - d_k^{\text{organ}}}{\sigma_k^{\text{organ}}}\right)^2}$$
+$$D_{\text{arch}} = \sqrt{\sum_{k=1}^{n_d} w_k \left(\frac{d_k^{\text{GELS}} - d_k^{\text{organ}}}{\sigma_k^{\text{organ}}}\right)^2}$$
 
 where $w_k$ are importance weights. Log-transforms are applied to scale-dependent
 quantities (Tb.Th, Tb.Sp, $k$, $\xi$) before computing the distance, so that
@@ -702,7 +702,7 @@ curve $\beta(E)$.
 
 **Tissue architecture from histology and micro-CT.** Histological sections or micro-CT
 reconstructions of both the scaffold and native organ tissue yield the descriptor
-vectors $\mathbf{d}^{\text{GELLS}}$ and $\mathbf{d}^{\text{organ}}$. The architectural
+vectors $\mathbf{d}^{\text{GELS}}$ and $\mathbf{d}^{\text{organ}}$. The architectural
 distance $D_{\text{arch}}$ (Section 7.2) quantifies how closely the scaffold
 recapitulates the target organ. Minimization of $D_{\text{arch}}$ over the design
 parameter space constitutes the scaffold optimization problem.
@@ -852,7 +852,7 @@ in adult human trabecular bone) and tortuosity.
 
 4. **Scaffold architectures span a wide range** of tissue descriptors
    ($\text{BV/TV} \in [0.14,\, 0.58]$, $\text{SMI} \in [-2.7,\, 1.8]$), suggesting
-   the GELLS system can be tuned toward multiple organ targets.
+   the GELS system can be tuned toward multiple organ targets.
 
 5. **Trabecular bone is the most accessible target** with $D_{\text{arch}} = 15.1$
    at optimal parameters. Liver and kidney cortex are secondary targets requiring

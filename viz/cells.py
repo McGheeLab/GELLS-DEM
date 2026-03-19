@@ -42,6 +42,7 @@ CELL_COLORS = {
     int(CellState.PROLIFERATING):'#228B22',  # forest green
     int(CellState.BRIDGING):     '#DC143C',  # crimson
     int(CellState.SENESCENT):    '#696969',  # dim gray
+    int(CellState.MIGRATING):    '#4169E1',  # royal blue
 }
 
 CELL_LABELS = {
@@ -50,6 +51,7 @@ CELL_LABELS = {
     int(CellState.PROLIFERATING):'Proliferating',
     int(CellState.BRIDGING):     'Bridging',
     int(CellState.SENESCENT):    'Senescent',
+    int(CellState.MIGRATING):    'Migrating',
 }
 
 

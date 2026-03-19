@@ -1,14 +1,14 @@
-# GELLS-DEM Architecture Document
+# GELS Architecture Document
 
-**Version:** V1.12
-**Last updated:** 2026-03-16
-**Primary source file:** `new_dem_0.py`
+**Version:** V2.4
+**Last updated:** 2026-03-17
+**Primary source files:** `new_dem_0.py`, `lsdem.py`
 
 ---
 
 ## 1. System Overview
 
-GELLS-DEM simulates the rearrangement of hydrogel granular scaffolds driven by
+GELS simulates the rearrangement of hydrogel granular scaffolds driven by
 cell-mediated forces. It models two populations of granules --- functional (cell-laden)
 and inert (passive) --- within a confined domain, using overdamped Langevin dynamics.
 
@@ -35,11 +35,12 @@ relevant timescales (24--72 hours).
 │  │                                                                │  │
 │  │   ┌───────────────────────┐    ┌────────────────────────────┐  │  │
 │  │   │ compute_forces*()     │───▶│     step()                 │  │  │
-│  │   │  • Hertz contact      │    │  • update_cell_state       │  │  │
+│  │   │  • JKR contact (V2.3) │    │  • update_cell_state       │  │  │
+│  │   │  • LS-DEM (lsdem.py)  │    │  • deformation integration │  │  │
 │  │   │  • motor-clutch       │    │  • overdamped Euler (2D/3D)│  │  │
 │  │   │  • wall (4 or 6 face) │    │  • velocity cap            │  │  │
 │  │   │  • friction + torques │    │  • wall clamp              │  │  │
-│  │   │  • active noise       │    │  • quaternion integration  │  │  │
+│  │   │  • contact clips      │    │  • quaternion integration  │  │  │
 │  │   └───────────────────────┘    └────────────────────────────┘  │  │
 │  │                                                                │  │
 │  │   ┌───────────────────────┐    ┌────────────────────────────┐  │  │
@@ -48,6 +49,7 @@ relevant timescales (24--72 hours).
 │  │   │  • 3D: volumetric     │    │  • overlap stats           │  │  │
 │  │   │  • eff. radii         │    │  • Kozeny-Carman, Darcy    │  │  │
 │  │   │  • bbox clipping (3D) │    │  • RCP, compaction ratio   │  │  │
+│  │   │  • deformed SDF (V2.3)│    │  • deformation strain      │  │  │
 │  │   └───────────────────────┘    └────────────────────────────┘  │  │
 │  └────────────────────────────────────────────────────────────────┘  │
 │                                                                      │
@@ -55,7 +57,7 @@ relevant timescales (24--72 hours).
             │ saves data to disk (snapshots, fields, history, params)
             ▼
 ┌──────────────────────────────────────────────────────────────────────┐
-│                  viz/postprocess.py (V1.8)                             │
+│                  viz/postprocess.py (V2.3)                             │
 │                  Unified post-processing orchestrator                 │
 │                                                                      │
 │  Delegates to viz/ package:                                          │
@@ -83,6 +85,22 @@ relevant timescales (24--72 hours).
 └──────────────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────────────┐
+│              viz2/postprocess.py (V2.4) — NEW                         │
+│              Rebuilt 2D/3D visualization system                       │
+│                                                                      │
+│  viz2/common.py           Shared colors, drawing, 3D slicing         │
+│  viz2/voronoi.py          Voronoi engine (center + boundary modes)   │
+│  viz2/scaffold_map.py     Module 1: Vector scaffold map              │
+│  viz2/voronoi_shapes.py   Module 2: Voronoi shape factors + overlay  │
+│  viz2/phase_fractions.py  Module 3: Global + local phase fractions   │
+│  viz2/movies.py           Module 4: GIF animations (all evolutions)  │
+│  viz2/energy_stress.py    Module 5: 6 energy modes + stress/strain   │
+│  viz2/void_percolation.py Module 6: Void percolation theory          │
+│  viz2/scaffold_map_3d.py  Module 7: PyVista 3D rendering (optional)  │
+│  viz2/postprocess.py      Orchestrator (CLI + programmatic)          │
+└──────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────┐
 │          analysis/ — Mathematical Analysis Framework (V1.7+)          │
 │                                                                      │
 │  mean_field_model.py    Two-zone ODE: dx_f/dt = -x_f*(σ_cell-σ_r)/η │
@@ -92,7 +110,40 @@ relevant timescales (24--72 hours).
 │  tissue_descriptors.py  BV/TV, Tb.Th, Tb.Sp, SMI, MIL, tortuosity  │
 │  organ_targets.py       7 organ targets + phase mapping (V1.9)       │
 │  arch_distance.py       Weighted Mahalanobis distance to organs      │
+│  spatial_pde.py         1D radial PDE compaction model (V2.5)        │
+│  contact_network.py     Graph-based topology model (V2.5)            │
+│  contact_network_model.py Gillespie SSA stochastic model (V2.5)     │
 │  MATHEMATICAL_MODEL.md  Formal model document for publications       │
+└──────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────┐
+│       Mesoscale Modelling Hierarchy (V2.5)                            │
+│                                                                      │
+│  Level 1: Mean-field ODE (mean_field_model.py)                       │
+│    • 1 DOF (x_f scalar), milliseconds, no spatial info               │
+│                                                                      │
+│  Level 2a: Spatial PDE (spatial_pde.py)  ◄──► Level 2b               │
+│    • N_x=20 radial grid points           │                           │
+│    • Compaction waves, local jamming      │                           │
+│    • Porosity/permeability profiles       │                           │
+│                                           │                           │
+│  Level 2b: Contact Network (contact_network.py) ◄──► Level 2a       │
+│    • Graph G=(V,E), N nodes              │                           │
+│    • Bridge percolation, Z(t), clusters  │                           │
+│    • Force chain statistics              │                           │
+│    • Deterministic per-timestep stepping │                           │
+│                                                                      │
+│  Level 2c: Stochastic Network (contact_network_model.py)            │
+│    • Gillespie SSA for exact bridge kinetics (BKL 1975)             │
+│    • Union-find percolation tracking (Newman-Ziff 2001)             │
+│    • Monte Carlo ensemble: 1000 runs → mean, IQR, spanning prob    │
+│    • ~2.5s per 72h realization, seconds for full ensemble           │
+│                                                                      │
+│  Level 3: Full DEM (new_dem_0.py)                                    │
+│    • N × (pos + orient + cells + deform), hours                      │
+│    • Full particle resolution, superellipsoids, LS-DEM               │
+│                                                                      │
+│  viz/mesoscale.py: Kymographs, profiles, network plots, combined     │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -355,7 +406,35 @@ plot_timeseries plot_granules    plot_fields  plot_composite
 | `viz/scaffold_evolution_3d.py` | 3D volumetric evolution with PyVista per organ (V1.9) | `sweep_dir` |
 | `viz/energy_landscape.py` | Energy landscape per organ, time evolution, decomposition, design space (V1.11) | `sweep_dir` |
 
-### 4.2 Mathematical Analysis Scripts — `analysis/` package (V1.12)
+### 4.2 Rebuilt 2D Visualization — `viz2/` package (V2.4)
+
+Unified 2D visualization system built on the scaffold map foundation, with Voronoi-based
+spatial analysis, full energy mode decomposition, and void percolation theory.
+
+**Architecture**: All modules share `viz2/common.py` for drawing primitives and data loading.
+`viz2/voronoi.py` is the shared computational engine used by modules 2, 3, and 4.
+
+| File | Module | Outputs |
+|------|--------|---------|
+| `viz2/common.py` | Shared utilities | Colors, `load_data()`, `ensure_phase_fields()`, `draw_granule_patches()`, `draw_cells_on_ax()`, `render_frame_to_array()`, 3D: `is_3d()`, `slice_snap_z_midplane()`, `slice_field_z_midplane()`, `cell_world_positions_3d()` |
+| `viz2/voronoi.py` | Voronoi engine | `voronoi_from_centers()` (all granules, functional clipped to body), `voronoi_from_boundaries()` (shrink-wrap), `compute_shape_factors()`, `compute_local_phase_fractions()`, Sutherland-Hodgman clipping |
+| `viz2/scaffold_map.py` | 1: Scaffold map | Multi-panel scaffold maps (void=black, functional=red, inert=green, bridges=crimson). 3D: z-midplane slice |
+| `viz2/voronoi_shapes.py` | 2: Shape factors | Voronoi overlay, shape factor maps (circularity/elongation/area), distributions, timeseries. 3D: z-slice |
+| `viz2/phase_fractions.py` | 3: Phase fractions | Global stacked area (conservation check), local heatmaps, inner vs outer timeseries, heterogeneity scatter. 3D: field + snap slicing |
+| `viz2/movies.py` | 4: GIF movies | scaffold_evolution.gif, voronoi_evolution.gif, local_phi_f_evolution.gif, stress_evolution.gif, energy_modes_evolution.gif. 3D: z-slice per frame |
+| `viz2/energy_stress.py` | 5: Energy + stress | Stress/strain maps via coarse-graining, 6 energy mode spatial maps (traction, contact, friction, osmotic, frustration, interfacial), timeseries. 3D: midplane slice of coarse-grained fields |
+| `viz2/void_percolation.py` | 6: Percolation | Void cluster maps, percolation status evolution, P(s) power-law fits, Kozeny-Carman K(t). 3D: all 3 axes checked, z-slice for display |
+| `viz2/scaffold_map_3d.py` | 7: 3D rendering | PyVista off-screen: superellipsoid meshes, cell spheres, bridge tubes, z-clip. Skips if 2D or no PyVista |
+| `viz2/postprocess.py` | Orchestrator | CLI: `python viz2/postprocess.py -i results/default [--skip movies] [--only scaffold voronoi]` |
+
+**Key design decisions:**
+- Cell bridges count toward functional space in data analysis but retain crimson color for visibility
+- Voronoi tessellation supports two modes: center-based (standard) and boundary-based shrink-wrap (superellipse surface sampling + ConvexHull merge)
+- `ensure_phase_fields()` reconstructs phase fields from particle data when `save_fields=False`
+- Pure numpy polygon clipping (Sutherland-Hodgman) avoids shapely dependency
+- Each module is fault-isolated: one failure doesn't abort the rest
+
+### 4.3 Mathematical Analysis Scripts — `analysis/` package (V1.12)
 
 | Script | Plots | Input |
 |--------|-------|-------|
@@ -482,9 +561,11 @@ Power-law model predicts SLURM walltime from trial parameters:
    (minimum image convention, cKDTree boxsize, position wrapping, no walls).
 3. **Overdamped regime**: No inertial terms. Valid for cell-culture timescales
    (hours) in viscous medium.
-4. **Rigid granules**: Granule shapes do not deform during simulation. Deformation
-   effects captured through Hertz contact force and volume-conserving effective radii.
-5. **Hertz validity**: Contact model assumes small overlaps (delta/R < ~10%).
+4. **Rigid or deformable granules**: Rigid shapes use volume-conserving effective radii;
+   deformable LS-DEM shapes use modal deformation DOFs (V2.3). Both rendered with JKR
+   contact-face clipping for physically realistic flat faces at contacts.
+5. **JKR contact model** (V2.3): Replaces Hertz+DMT. JKR is correct for soft hydrogels
+   (Tabor parameter μ_T >> 1). Reduces exactly to Hertz when W=0.
 6. **Random by default**: Seed is `None` (random) unless explicitly set. All randomness
    flows through `numpy.random.Generator`.
 7. **Performance target**: 500-1000 granules in 3D with optional Numba JIT.

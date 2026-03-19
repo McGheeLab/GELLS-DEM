@@ -1,8 +1,8 @@
 Ready for review
 Select text to add comments on the plan
-GELLS-DEM V1.4: Full 3D Volumetric Simulation
+GELS V1.4: Full 3D Volumetric Simulation
 Context
-GELLS-DEM V1.3 is a 2D overdamped particle dynamics simulator with superellipse granule shapes. The primary goal of V1.4 is to upgrade to a full 3D volumetric simulation to model compaction, percolation, and transport through granular hydrogel scaffolds. This enables physically meaningful predictions of void-space evolution, permeability (Darcy/Kozeny-Carman), and phase connectivity that cannot be captured in 2D.
+GELS V1.3 is a 2D overdamped particle dynamics simulator with superellipse granule shapes. The primary goal of V1.4 is to upgrade to a full 3D volumetric simulation to model compaction, percolation, and transport through granular hydrogel scaffolds. This enables physically meaningful predictions of void-space evolution, permeability (Darcy/Kozeny-Carman), and phase connectivity that cannot be captured in 2D.
 
 Key Decisions (from user input)
 Single file: All simulation physics stays in new_dem_0.py (~3000+ lines)

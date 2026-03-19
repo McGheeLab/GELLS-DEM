@@ -1,5 +1,5 @@
 """
-Continuum Coarse-Graining for GELLS-DEM
+Continuum Coarse-Graining for GELS
 ========================================
 Extracts continuum-level quantities (stress tensor, strain rate tensor,
 effective viscosity, coordination number) from DEM simulation snapshots
@@ -1081,7 +1081,7 @@ def run_all(run_dir, outdir=None):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
-        description='Continuum coarse-graining for GELLS-DEM simulations')
+        description='Continuum coarse-graining for GELS simulations')
     parser.add_argument('-i', '--input', required=True,
                         help='Input run directory or .tar.gz archive')
     parser.add_argument('-o', '--outdir', default=None,

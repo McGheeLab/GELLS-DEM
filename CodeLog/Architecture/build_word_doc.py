@@ -157,7 +157,7 @@ def build_document():
     subtitle = doc.add_paragraph()
     subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
     subtitle.paragraph_format.space_after = Pt(12)
-    run = subtitle.add_run('GELLS-DEM V1.7 -- March 2026')
+    run = subtitle.add_run('GELS V1.7 -- March 2026')
     run.font.size = Pt(11)
     run.font.color.rgb = RGBColor(100, 100, 100)
 

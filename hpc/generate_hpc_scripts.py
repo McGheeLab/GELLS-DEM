@@ -2,7 +2,7 @@
 """
 Generate user-specific HPC scripts and configure local/remote environment.
 
-Automates everything possible for running GELLS-DEM on UArizona HPC (Puma):
+Automates everything possible for running GELS on UArizona HPC (Puma):
   - Generates setup_env.sh and run.slurm from a JSON user config
   - Generates/checks SSH keys
   - Writes ~/.ssh/config entries
@@ -29,7 +29,7 @@ USER_CONFIG = os.path.join(os.path.dirname(__file__), "Alex.json")
 SSH_KEY = os.path.expanduser("~/.ssh/id_rsa")
 BASTION = "hpc.arizona.edu"
 FILEXFER = "filexfer.hpc.arizona.edu"
-REPO_URL = "https://github.com/McGheeLab/GELLS-DEM.git"
+REPO_URL = "https://github.com/McGheeLab/GELS.git"
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -104,7 +104,7 @@ def generate_setup_env(cfg: dict) -> str:
 
 set -euo pipefail
 
-echo "=== Setting up GELLS-DEM environment for {cfg['netid']} ==="
+echo "=== Setting up GELS environment for {cfg['netid']} ==="
 
 module load {cfg['python_module']}
 
@@ -131,7 +131,7 @@ def generate_run_slurm(cfg: dict, sim_args: str = "") -> str:
     #       Puma allocates 5 GB/CPU automatically.
     return f"""\
 #!/bin/bash
-#SBATCH --job-name=gells-dem
+#SBATCH --job-name=gels
 #SBATCH --account={cfg['group']}
 #SBATCH --partition={cfg['partition']}
 #SBATCH --nodes=1
@@ -162,7 +162,7 @@ def generate_setup_env_slurm(cfg: dict, setup_script_remote: str) -> str:
     repo_path = cfg['repo_path'].replace('~', '$HOME')
     return f"""\
 #!/bin/bash
-#SBATCH --job-name=gells-setup
+#SBATCH --job-name=gels-setup
 #SBATCH --account={cfg['group']}
 #SBATCH --partition={cfg['partition']}
 #SBATCH --nodes=1
@@ -402,7 +402,7 @@ def main():
     local_repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
     print("=" * 60)
-    print(f"  GELLS-DEM HPC Setup for {cfg['netid']}")
+    print(f"  GELS HPC Setup for {cfg['netid']}")
     print(f"  Cluster: {cfg['cluster']}  |  Group: {cfg['group']}")
     print("=" * 60)
 

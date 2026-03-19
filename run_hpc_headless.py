@@ -1,5 +1,5 @@
 """
-Headless runner for GELLS-DEM on HPC.
+Headless runner for GELS on HPC.
 
 Runs the simulation and saves all figures to disk (no plt.show()).
 Use this instead of `python3 new_dem_0.py` on HPC where there's no display.
@@ -158,7 +158,7 @@ def _load_legacy(t: dict) -> dict:
 def main():
     # Parse optional Params overrides from command line
     p = Params()
-    parser = argparse.ArgumentParser(description="GELLS-DEM HPC runner")
+    parser = argparse.ArgumentParser(description="GELS HPC runner")
     parser.add_argument("--trial", type=str, default=None,
                         help="Path to a Trial JSON config file")
     for field_name, field_val in vars(p).items():
@@ -179,6 +179,8 @@ def main():
     parser.add_argument("--output-dir", type=str, default="results",
                         help="Directory for output figures")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--resume-from", type=str, default="",
+                        help="Path to run directory to resume from (V2.6)")
 
     args = parser.parse_args()
 
@@ -201,10 +203,14 @@ def main():
     # V1.5: Wire output_dir for data serialization
     p.output_dir = out_dir
 
+    # V2.6: Wire resume path
+    if args.resume_from:
+        p.resume_from = args.resume_from
+
     # Print config
     trial_label = f" (trial: {os.path.basename(args.trial)})" if args.trial else ""
     print("=" * 65)
-    print(f"  GELLS-DEM: Headless HPC Run{trial_label}")
+    print(f"  GELS: Headless HPC Run{trial_label}")
     print("=" * 65)
     print(f"  Output dir: {os.path.abspath(out_dir)}")
     mode = getattr(p, 'mode', '2D')
@@ -223,9 +229,9 @@ def main():
     # Run simulation (data saved to out_dir by engine)
     hist, _, p, _ = run(p, seed=args.seed)
 
-    # Post-process: all visualizations from saved data
-    from viz.postprocess import run_all as postprocess
-    postprocess(out_dir)
+    # Post-process: viz2 (scaffold maps, Voronoi, phase fractions, etc.)
+    from viz2 import run_all as postprocess_v2
+    postprocess_v2(run_dir=out_dir)
 
     # Print summary
     h0, hf = hist[0], hist[-1]

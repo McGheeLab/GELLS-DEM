@@ -1,5 +1,5 @@
 % ============================================================
-% GELLS-DEM: Cell-Driven Granular Scaffold Remodeling
+% GELS: Cell-Driven Granular Scaffold Remodeling
 % PNAS-format manuscript
 % ============================================================
 \documentclass[9pt,twocolumn,twoside]{pnas-new}
@@ -73,7 +73,7 @@ porosity, mechanics, and biological function. When a fraction of the granules
 are laden with cells (functional) and the remainder are passive (inert),
 cell-generated traction forces drive selective compaction of the functional
 phase, producing macroscopic shape transformations. Here we develop
-GELLS-DEM, a two- and three-dimensional overdamped discrete element method
+GELS, a two- and three-dimensional overdamped discrete element method
 that resolves individual granule contacts through Hertzian mechanics,
 motor-clutch cell traction, area-dependent hydrogel friction, DMT adhesion,
 and superellipsoidal particle shapes. We derive a volume-conserving two-zone
@@ -135,8 +135,8 @@ A predictive framework requires both a particle-resolved simulation that
 captures these interactions and a reduced-order model that identifies the
 governing dimensionless groups.
 
-Here we present GELLS-DEM (Granular Encapsulated Living-cell Laden
-Scaffold---Discrete Element Method), a simulation framework that addresses
+Here we present GELS (Granule-Enabled Living
+Scaffolds), a simulation framework that addresses
 both needs. The DEM engine resolves the overdamped dynamics of $N \sim
 500$--$1000$ superellipsoidal granules with Hertzian contact mechanics,
 motor-clutch cell traction, area-dependent friction, and DMT adhesion. A
@@ -476,7 +476,7 @@ modify compaction profiles.
 \section*{Discussion}
 % ============================================================
 
-Three key insights emerge from the GELLS-DEM framework.
+Three key insights emerge from the GELS framework.
 First, the cell--elastic ratio $\beta = \sigmacell/\sigmazero$ is the
 primary design knob. Although $\sigmacell \sim 10^{-3}\kPa$ is small
 compared to the bulk modulus $E$, the relevant resistance is the Hertzian
@@ -506,7 +506,7 @@ proliferation and ECM deposition beyond 72\,h.
 % ============================================================
 
 \subsection*{DEM implementation.}
-GELLS-DEM is implemented in Python~3.9+ (NumPy, SciPy). Neighbor search
+GELS is implemented in Python~3.9+ (NumPy, SciPy). Neighbor search
 uses \texttt{cKDTree} with cutoff $2R_\mathrm{max} + L_\mathrm{max}$;
 optional Numba JIT accelerates the Newton-Raphson solver. Domain: rectangular
 box with rigid walls. Integration: forward Euler, $v_\mathrm{max} = 50\um$/h.
@@ -523,7 +523,7 @@ Tb.Sp, Conn.D, DA, $\phiv$, and $\kappa$ values
 \cite{Hollister2005,Harrigan1984,Hildebrand1997}. The energy landscape is
 evaluated and $\xistar$ computed by root-finding for each sample; tissue
 descriptors are mapped to targets via weighted Euclidean distance. Source
-code: \url{https://github.com/McGheeLab/GELLS-DEM}.
+code: \url{https://github.com/McGheeLab/GELS}.
 
 % ============================================================
 % Figures

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Dimensionless Analysis for GELLS-DEM DOE Results
+Dimensionless Analysis for GELS DOE Results
 ==================================================
 Collapses DOE simulation results by key dimensionless groups to reveal
 universal scaling relationships governing cell-driven granular scaffold
@@ -1139,7 +1139,7 @@ def _write_summary_table(data, outdir):
 
     path = os.path.join(outdir, 'dimensionless_summary.txt')
     with open(path, 'w') as f:
-        f.write("GELLS-DEM Dimensionless Analysis Summary\n")
+        f.write("GELS Dimensionless Analysis Summary\n")
         f.write("=" * 70 + "\n\n")
         f.write(f"Runs analysed: {len(runs)} / 24\n\n")
 
@@ -1246,7 +1246,7 @@ def run_all(data=None, scan_dir=None, outdir=None, skip=None):
     os.makedirs(outdir, exist_ok=True)
 
     print("\n" + "=" * 65)
-    print("  GELLS-DEM Dimensionless Analysis")
+    print("  GELS Dimensionless Analysis")
     print("=" * 65)
     print(f"  Runs: {len(data['runs'])}")
     print(f"  Output: {outdir}/")
@@ -1286,7 +1286,7 @@ def run_all(data=None, scan_dir=None, outdir=None, skip=None):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
-        description='GELLS-DEM dimensionless analysis: collapse DOE results by '
+        description='GELS dimensionless analysis: collapse DOE results by '
                     'key dimensionless groups (beta, Ca, jamming proximity, etc.).')
     parser.add_argument('--scan-dir', default=None,
                         help='Directory containing DOE_01/...DOE_24/ results '

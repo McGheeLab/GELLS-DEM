@@ -2,7 +2,7 @@
 """
 Architectural Distance: Scaffold vs. Native Organ Targets
 ==========================================================
-Computes the weighted Mahalanobis-like distance between GELLS-DEM scaffold
+Computes the weighted Mahalanobis-like distance between GELS scaffold
 descriptors and native organ architecture targets defined in organ_targets.py.
 
 The distance metric uses log-transform for scale-dependent quantities so that

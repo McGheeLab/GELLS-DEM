@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-viz_shapes.py — Display all granule shapes available in GELLS-DEM.
+viz_shapes.py — Display all granule shapes available in GELS.
 
 Shows 2D superellipses and 3D superellipsoids with varying aspect ratios
 and blockiness exponents, annotated with the parameters that create them.
@@ -171,7 +171,7 @@ def plot_3d_gallery(fig, grid_spec):
 # ── Main ─────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description='Display GELLS-DEM granule shapes')
+    parser = argparse.ArgumentParser(description='Display GELS granule shapes')
     parser.add_argument('--mode', choices=['2D', '3D', 'both'], default='both',
                         help='Which shape gallery to show (default: both)')
     parser.add_argument('-o', '--output', type=str, default=None,
@@ -192,7 +192,7 @@ def main():
         plot_2d_gallery(fig, gs[0])
         plot_3d_gallery(fig, gs[1])
 
-    fig.suptitle('GELLS-DEM Granule Shape Catalogue', fontsize=16,
+    fig.suptitle('GELS Granule Shape Catalogue', fontsize=16,
                  fontweight='bold', y=0.98)
 
     if args.output:

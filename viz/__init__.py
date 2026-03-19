@@ -1,1 +1,1 @@
-"""GELLS-DEM visualization modules."""
+"""GELS visualization modules."""

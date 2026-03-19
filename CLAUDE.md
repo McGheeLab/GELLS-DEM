@@ -1,18 +1,19 @@
-# GELLS-DEM Project Guide
+# GELS Project Guide
 
 ## Project Overview
 
-**GELLS-DEM** (Granular Encapsulated Living-cell Laden Scaffold - Discrete Element Method)
+**GELS** (Granule-Enabled Living Scaffolds)
 is a 2D/3D overdamped particle dynamics simulator for modelling cell-driven rearrangement
 of hydrogel granular scaffolds. The primary simulation engine is `new_dem_0.py`.
 
-**Current version: V2.2**
+**Current version: V2.6**
 
 ## Repository Layout
 
 ```
-GELLS-DEM/
-├── new_dem_0.py                 # PRIMARY simulation engine (V2.1, no plotting)
+GELS/
+├── new_dem_0.py                 # PRIMARY simulation engine (V2.3, no plotting)
+├── lsdem.py                     # LS-DEM deformable particle module (V2.3, Henzel 2026)
 ├── run_hpc_headless.py          # HPC headless runner (supports 2D/3D modes)
 ├── run_all_trials.py            # Batch trial runner (local / SLURM)
 ├── run_analysis_pipeline.py     # Full V1.7 analysis pipeline orchestrator
@@ -29,12 +30,18 @@ GELLS-DEM/
 │   ├── shapes.py                # Granule shape gallery (superellipses, superellipsoids)
 │   ├── doe.py                   # DOE statistical analysis & visualization
 │   ├── dimensionless.py         # Dimensionless analysis, data collapse by β/Ca (V1.7)
+│   ├── doe_2d_vs_3d.py         # 2D vs 3D DOE comparison & scaling analysis (V2.6)
+│   ├── doe_dem_vs_network.py   # DEM vs contact network model comparison (V2.6)
 │   ├── scaffold_evolution.py    # 2D microstructure evolution + timelapse (V1.11)
 │   ├── scaffold_evolution_3d.py # 3D volumetric evolution (PyVista) per organ (V1.9)
-│   └── energy_landscape.py     # Energy landscape visualization (V1.11)
+│   ├── energy_landscape.py     # Energy landscape visualization (V1.11)
+│   └── mesoscale.py            # Mesoscale model visualization (V2.5)
 ├── analysis/                    # Mathematical analysis package
 │   ├── __init__.py
 │   ├── mean_field_model.py      # Volume-conserving two-zone compaction model (V1.9)
+│   ├── spatial_pde.py           # 1D radial PDE compaction model (V2.5)
+│   ├── contact_network.py       # Graph-based contact network model (V2.5)
+│   ├── contact_network_model.py # Gillespie SSA stochastic network model (V2.5)
 │   ├── energy_landscape.py      # Free energy landscape decomposition (V1.11)
 │   ├── coarse_grain.py          # Stress tensor, strain rate, viscosity from DEM (V1.7)
 │   ├── tissue_descriptors.py    # Tissue architecture descriptor vector (V1.7)
@@ -65,16 +72,33 @@ GELLS-DEM/
   equatorial blockiness n1 and meridional blockiness n2. Spheres when a=b=c, n1=n2=2.
 - **Quaternion orientation** (V1.4+): 3D rotational state stored as unit quaternions (w,x,y,z).
   Overdamped angular dynamics: `γ_rot dω/dt = Σ τ`. Integrated via `quat_integrate()`.
-- **Contact model**: Hertzian (V1.1+). Stiffness is derived from `E_modulus` and `poisson_ratio`,
-  NOT set as an arbitrary spring constant. See `hertz_contact_force()`.
+- **Contact model**: JKR adhesive contact (V2.3+, replaces Hertz+DMT from V1.1). Stiffness
+  derived from `E_modulus` and `poisson_ratio`. JKR force:
+  F = (4/3)E*a³/R* − √(8πWE*a³). Reduces exactly to Hertz when W=0. Contact radius
+  solved via Newton-Raphson from overlap. Functions: `jkr_force_from_overlap()`,
+  `jkr_contact_radius()`, `jkr_pulloff_force()`. Legacy `hertz_contact_force()` retained
+  for reference. Per-particle contact clip planes (`gs.contact_clips`) store half-plane
+  constraints at JKR contact faces for rendering with flat faces instead of overlapping
+  circles.
 - **Cell force model**: Motor-clutch (V1.2+, Chan & Odde 2008). Cell traction depends on
   substrate stiffness, replacing the old simple spring. See `motor_clutch_force()`.
-- **Cell lifecycle** (V1.2+, updated V1.5.2): Cells are 20 µm spheres that attach instantly
+- **Cell lifecycle** (V1.2+, updated V2.3): Cells are 20 µm spheres that attach instantly
   (default `t_attach_onset=0`, `t_attach_half=0`) → spread to 5 µm-tall ellipsoids (volume
-  conserved) → overcrowded cells go senescent. Bridges form probabilistically
-  (`bridge_attempt_rate`, `min_fa_for_bridge`) with force ramp over `bridge_formation_time`.
-  Persistent bridges → SENESCENT after `bridge_senescence_time`. See `update_cell_state()`,
-  `_service_committed_bridges()`, `_attempt_new_bridges()`.
+  conserved) → overcrowded cells go senescent. **Multi-stage bridge formation** (V2.3):
+  PROLIFERATING → MIGRATING → BRIDGING → SENESCENT. Cells sense targets via hemisphere
+  check (only cells on the target-facing side can bridge), compute cell-specific gap decay
+  from their centroid (not granule center), then either fast-path to BRIDGING (if within
+  `bridge_commit_angle` of contact azimuth) or enter MIGRATING state for directed crawl.
+  MIGRATING cells move along the host granule surface toward the contact point at
+  `cell_migration_speed × bridge_directed_speed_mult` (default 2×), abandon if target
+  leaves sensing range, and transition to BRIDGING upon arrival. **Bridge exclusion zone**:
+  cells avoid bridging near existing BRIDGING/MIGRATING cells on the same granule→target
+  pair (min angular separation `bridge_exclusion_angle`, default 0.8 rad ≈ 46°), forcing
+  bridges to spread spatially. **Post-bridge alignment**: bridging cells progressively
+  align stress fibers along bridge axis (`cell_alignment` grows from `bridge_alignment_min`
+  toward 1.0 at `bridge_alignment_rate`), modulating force: `F = F_mc × maturity × alignment`.
+  Persistent bridges → SENESCENT after `bridge_senescence_time`.
+  See `update_cell_state()`, `_update_individual_cells()`, `_attempt_new_bridges()`.
 - **Granule shape 2D** (V1.3+): Superellipses `|x/a|^n + |y/b|^n = 1` parameterised by
   semi-axes (a, b), blockiness exponent (n), and orientation (θ). Circles are the
   special case a=b, n=2. Enable with `shape_enabled=True`. See `superellipse_*()` functions.
@@ -95,9 +119,12 @@ GELLS-DEM/
   `L_max = max(cell_sense_distance, bridge_break_gap)`.
 - **Performance** (V1.4+): Optional Numba JIT for Newton-Raphson solver and superellipsoid
   geometry. Bounding-box clipping in 3D field rendering. Target: 500-1000 granules.
-- **Packing** (V1.4.1+): RSA placement followed by compression settle phase
-  (`packing_settle_steps=200`) to achieve granule contact. No artificial gap
-  (`packing_gap=0.0`). Seed is random by default (`seed=None`).
+- **Packing** (V1.4.1+, updated V2.4): Lubachevsky-Stillinger inflate-and-relax in both
+  2D and 3D. RSA places granules at deflated radii (α = (φ_safe/φ_target)^(1/d) where
+  d=2 for 2D, d=3 for 3D), then settle inflates to target with Hertz repulsion + velocity
+  cap over `packing_settle_steps` (400) × `packing_relax_substeps` (15), plus post-inflation
+  overlap relaxation. Achieves jammed packing (Z ≈ 3–4 in 2D, Z ≈ 4–6 in 3D). No artificial
+  gap (`packing_gap=0.0`). Seed is random by default (`seed=None`).
 - **Packing composition** (V1.9+): Two ways to specify functional/inert fractions.
   Option A: `phi_f_target` + `phi_i_target` directly. Option B: `phi_solid_target` +
   `func_ratio` — total solid fraction (0.55–0.75 typical) split by functional ratio.
@@ -115,14 +142,27 @@ GELLS-DEM/
 - **Trial JSON format** (V1.4.1+): Two formats supported. **Flat**: keys are `Params` field
   names directly (e.g., `"E_modulus": 10.0`). **Legacy**: nested sections (domain,
   mechanics, shape, etc.) with translated key names. Flat format detected by `"_format": "flat"`.
-- **Individual cell tracking** (V1.5+): Each cell tracked individually via `CellState` enum
-  (ATTACHED, SPREADING, PROLIFERATING, BRIDGING, SENESCENT). Flat arrays in
+- **Individual cell tracking** (V1.5+, updated V2.3): Each cell tracked individually via
+  `CellState` enum (ATTACHED, SPREADING, PROLIFERATING, MIGRATING, BRIDGING, SENESCENT).
+  Flat arrays in
   `GranuleSystem` indexed by `cell_offset[i]:cell_offset[i+1]`. Per-granule aggregates
   remain authoritative for force computation (physics identical to V1.4.1).
-- **Data serialization** (V1.5+): Per-timepoint `.npz` snapshots with granule + cell arrays.
-  Scalar metrics as CSV/JSON. Params and metadata as JSON. Archived as `.tar.gz`.
-  Controlled by `Params.save_data`, `save_fields` (default `True`), `output_dir`,
-  `compress_archive`.
+- **Data serialization** (V1.5+, updated V2.6): Per-timepoint `.npz` snapshots with granule
+  + cell arrays. Scalar metrics as CSV/JSON. Params and metadata as JSON. Archived as
+  `.tar.gz`. Controlled by `Params.save_data`, `save_fields` (default `True`), `output_dir`,
+  `compress_archive`. **V2.6 changes**: `save_fields` default changed to `False` — field
+  grids (phi_f/phi_i/phi_v) are no longer saved during simulation since they can be
+  reconstructed from particle positions at plot time. This roughly halves storage per run.
+  `check_disk_space()` guards against full filesystems: < 5 GB skips fields, < 1 GB skips
+  save entirely. SLURM pre-flight aborts if < 2 GB free.
+- **Resume from snapshot** (V2.6+): `Params.resume_from` (str, default empty). When set to
+  a run directory path, `run()` loads the last snapshot via `find_last_snapshot()` +
+  `restore_gs_from_snapshot()`, skips packing generation, and continues the main loop from
+  the last saved timestep. Full state restored: positions, velocities, cell state, per-cell
+  arrays, LS-DEM deformation (epsilon/d_epsilon). Displacement tracking resets to resume
+  point. CLI: `--resume-from` in `run_hpc_headless.py`. Batch resume: `RUN_MODE=4` in
+  `run_all_trials.py` scans for incomplete trials, uploads last snapshot + metadata to HPC,
+  generates and submits resume SLURM scripts.
 - **Visualization decoupled** (V1.6+): `new_dem_0.py` has no matplotlib dependency. All
   plotting is done via `viz/postprocess.py` which loads saved data and runs all viz scripts.
 - **Data loading** (V1.5+): `load_run(run_dir)` → `(hist, snaps, p, metadata)`. Also
@@ -130,14 +170,24 @@ GELLS-DEM/
 - **Per-contact data** (V1.5.2+): Each contact stores point, normal, overlap, R_eff,
   F_normal, A_contact. Serialized to `.npz` as structured arrays. Used by `viz/stress.py`
   for Hertzian surface stress mapping.
-- **Bridge formation kinetics** (V1.5.2+, updated V1.9): Bridges form probabilistically via
+- **Bridge formation kinetics** (V1.5.2+, updated V2.3): Bridges form probabilistically via
   Poisson process, ramp force over `bridge_formation_time`, persist across timesteps, and
   transition to SENESCENT after sustained load. **Bridge lock-in** (V1.9): bridges whose force
   exceeds `bridge_lock_force_threshold` bypass senescence and persist indefinitely.
   **Secondary migration** (V1.9): non-bridging cells can migrate along existing bridges
-  (`bridge_secondary_rate_mult`). Parameters: `bridge_attempt_rate`, `bridge_formation_time`,
-  `bridge_senescence_time`, `min_fa_for_bridge`, `bridge_break_gap`,
-  `bridge_lock_force_threshold`, `bridge_secondary_rate_mult`, `expected_bridge_force`.
+  (`bridge_secondary_rate_mult`). **Cell spatial awareness** (V2.3): hemisphere check
+  ensures only target-facing cells attempt bridges; probability decays from cell centroid
+  position, not granule center. **Path-dependent probability** (V2.3): gap classification
+  (contact/void/inert-blocked) with `bridge_contact_factor`, `bridge_decay_length`,
+  `bridge_inert_factor`. **Multi-stage formation** (V2.3): MIGRATING state for directed
+  crawl before bridging; `bridge_commit_angle` (arrival threshold, default 0.5 rad),
+  `bridge_directed_speed_mult` (crawl speed multiplier, default 2.0). Parameters:
+  `bridge_attempt_rate`, `bridge_formation_time`, `bridge_senescence_time`,
+  `min_fa_for_bridge`, `bridge_break_gap`, `bridge_lock_force_threshold`,
+  `bridge_secondary_rate_mult`, `expected_bridge_force`, `bridge_contact_factor`,
+  `bridge_decay_length`, `bridge_inert_factor`, `bridge_commit_angle`,
+  `bridge_directed_speed_mult`, `bridge_exclusion_angle`, `bridge_alignment_rate`,
+  `bridge_alignment_min`.
 - **Tissue volume tracking** (V2.1+): Spatially-resolved `phi_tissue(xi, t)` on the N_x=20
   radial grid tracks cell + ECM volume fraction growing in the functional zone. Logistic
   growth ODE driven by cell count, FA maturity, and bridge formation. No feedback into
@@ -159,6 +209,54 @@ GELLS-DEM/
   stiffening at typical packing. Capped at `mc_dem_kappa_max=5.0`. Applied as post-correction
   via `mc_dem_correction()` in both 2D and 3D force computations. Params: `mc_dem_enabled`
   (bool, default True), `mc_dem_kappa_max` (float, default 5.0).
+- **LS-DEM deformable particles** (V2.3+): Variational level-set DEM following
+  Henzel & Karapiperis 2026 (arXiv:2602.12895). Each particle gets scalar deformation
+  DOFs ε_α(t) modulating fixed spatial mode shapes Φ_α(x). Particle geometry tracked
+  via signed distance fields (SDF) on body-frame grids. Contact detection uses
+  surface-node-to-SDF queries instead of Newton-Raphson, yielding multi-point contact
+  patches. Overdamped deformation: γ_def dε/dt + K ε = F_ε, implicit Euler integration.
+  Semi-Lagrangian SDF update: φ(x,t) = φ₀(x − Σ ε_α Φ_α(x)). Modes: axial compression
+  (volume-preserving), prolate-oblate, volumetric (3D). MC-DEM auto-disabled when active.
+  JKR-consistent adhesion at surface nodes: penetrating nodes get repulsion − adhesion,
+  near-surface nodes (0 < SDF < 10% radius) get linearly fading attraction.
+  All functions in `lsdem.py`. Params: `deformable_enabled` (bool, default False),
+  `n_def_modes` (int, default 2), `sdf_resolution` (int, default 32),
+  `n_surface_nodes` (int, default 128), `n_surface_nodes_3d` (int, default 512),
+  `sdf_padding` (float, default 1.3), `def_drag_scale` (float, default 0.1),
+  `def_eps_max` (float, default 0.3).
+- **Deformed rendering** (V2.3+): `render_fields()` and `render_fields_3d()` stamp deformed
+  particle shapes via semi-Lagrangian pull-back when `deformable_enabled=True`. Grid points
+  are transformed to body frame, inverse mode-shape displacement is subtracted, then the
+  analytical implicit function is evaluated at the pulled-back coordinate. Functions
+  `_stamp_deformed_2d()` and `_stamp_deformed_3d()`. Zero overhead when deformable is off.
+- **Deformation visualization** (V2.3+): `viz/postprocess.py` includes `plot_deformation()`
+  (particle map colored by |ε|, inferno colourmap) and `plot_deformation_timeseries()`
+  (mean/max strain + per-mode amplitudes with ±σ bands). Both gracefully skip for rigid runs.
+  Skip key: `'deformation'`.
+- **Mesoscale models** (V2.5+): Two complementary models between full DEM and mean-field ODE.
+  **Spatial PDE** (`analysis/spatial_pde.py`): 1D radial grid ξ ∈ [0,1], N_x=20 points.
+  State: x_f(ξ,t) functional zone fraction + φ_tissue(ξ,t). Physics:
+  ∂x_f/∂t = −x_f·(σ_cell−σ_resist)/η_eff + D·∂²x_f/∂ξ². Cell stress modulated by
+  neighbor_factor(ξ) = ½(1+cos(πξ)). Zero-flux BCs. Tissue volume logistic growth.
+  Initializable from Params, DEM snapshot (radial binning), or DEM run (with fitting).
+  Class: `SpatialPDE` with `solve()`, `fit_to_data()`, `descriptors()`.
+  **Contact Network** (`analysis/contact_network.py`): Graph G=(V,E), spheres only (no
+  superellipsoid solver). Bridge state machine: NONE→FORMING→ACTIVE→LOCKED/SENESCENT.
+  Hertz+DMT contact, motor-clutch bridge force, overdamped dynamics. cKDTree neighbor
+  search (periodic or wall BCs). Metrics: Z(t), Z_ff, bridge fraction, percolation
+  (spanning cluster), cluster size distribution, force statistics. Monte Carlo ensembles
+  via `run_ensemble()`. Class: `ContactNetwork` with `step()`, `solve()`, `metrics()`,
+  `adjacency_matrix()`, `descriptors()`.
+  **Stochastic Contact Network** (`analysis/contact_network_model.py`): Gillespie SSA
+  (Bortz-Kalos-Lebowitz 1975) for exact stochastic bridge formation/senescence.
+  Union-find percolation tracking (Newman-Ziff 2001) with O(N) spanning detection.
+  JKR adhesive contact, motor-clutch cell traction, path-dependent bridge probability
+  (contact/void/inert-blocked), bridge lock-in, secondary migration boost. Monte Carlo
+  ensemble with full statistical summary (mean, IQR, min/max). Interface: `from_params(p)`
+  → `solve(model)` or `ensemble(model, n_runs=1000)`. ~2.5s per 72h realization (2D).
+  All three produce tissue descriptors for organ distance via `arch_distance.py`.
+  Visualization: `viz/mesoscale.py` (kymographs, radial profiles, network snapshots,
+  evolution panels, combined summary).
 
 ## Conventions
 
@@ -281,10 +379,10 @@ password attempts lock your account for 1 hour.
 **For scripted automation (run_all_trials.py Mode 3):**
 ```bash
 # Submit jobs via double-hop SSH:
-ssh netid@hpc.arizona.edu "ssh shell.hpc.arizona.edu 'cd ~/GELLS-DEM && sbatch script.slurm'"
+ssh netid@hpc.arizona.edu "ssh shell.hpc.arizona.edu 'cd ~/GELS && sbatch script.slurm'"
 
 # File transfers via filexfer:
-rsync -ravz local_dir/ netid@filexfer.hpc.arizona.edu:~/GELLS-DEM/
+rsync -ravz local_dir/ netid@filexfer.hpc.arizona.edu:~/GELS/
 ```
 
 ### Clusters
@@ -295,7 +393,7 @@ rsync -ravz local_dir/ netid@filexfer.hpc.arizona.edu:~/GELLS-DEM/
 | Ocelote | 28 | 192 GB | P100 | CentOS 7 | 6 GB |
 | El Gato | 16 | 64 GB | none | CentOS 7 | 4 GB |
 
-**Use Puma for GELLS-DEM.** Software compiled on CentOS 7 (Ocelote) may fail on Rocky Linux 9
+**Use Puma for GELS.** Software compiled on CentOS 7 (Ocelote) may fail on Rocky Linux 9
 (Puma) and vice versa. Always compile and test on the same cluster you'll run on.
 
 ### Allocations & Limits
@@ -328,8 +426,8 @@ killed at any time. Good for testing, not for production runs.
 - Redirect pip/conda cache to `/groups` or `/xdisk` — they default to `~/.local` and eat `/home` quota.
 - Check usage: `uquota` command. Find hidden space hogs: `du -hs $(ls -A ~)`.
 
-**For GELLS-DEM:** Store results in `/groups` (persistent) or `/xdisk` (temporary, larger).
-Keep the repo clone in `/home/uXX/netid/GELLS-DEM` or `/groups`. Transfer results to your
+**For GELS:** Store results in `/groups` (persistent) or `/xdisk` (temporary, larger).
+Keep the repo clone in `/home/uXX/netid/GELS` or `/groups`. Transfer results to your
 local machine via rsync before `/xdisk` expires.
 
 ### Python Environment Setup
@@ -337,15 +435,15 @@ local machine via rsync before `/xdisk` expires.
 ```bash
 # On a login node (after typing 'shell'):
 module load python/3.11/3.11.4
-python3 -m venv --system-site-packages /groups/<pi_group>/gells_env
-source /groups/<pi_group>/gells_env/bin/activate
+python3 -m venv --system-site-packages /groups/<pi_group>/gels_env
+source /groups/<pi_group>/gels_env/bin/activate
 pip install numpy scipy matplotlib imageio scikit-image tqdm pyvista numba
 ```
 
 **In batch scripts:**
 ```bash
 module load python/3.11/3.11.4
-source /groups/<pi_group>/gells_env/bin/activate
+source /groups/<pi_group>/gels_env/bin/activate
 export MPLBACKEND=Agg  # headless matplotlib
 ```
 
@@ -362,11 +460,11 @@ export MPLBACKEND=Agg  # headless matplotlib
 **Minimum SLURM script:**
 ```bash
 #!/bin/bash
-#SBATCH --job-name=gells-run
+#SBATCH --job-name=gels-run
 #SBATCH --account=your_group       # omit for windfall
 #SBATCH --partition=standard       # or windfall, gpu_standard
 #SBATCH --nodes=1
-#SBATCH --ntasks=1                 # GELLS-DEM is single-process
+#SBATCH --ntasks=1                 # GELS is single-process
 #SBATCH --cpus-per-task=4          # more CPUs = more memory (5 GB/CPU on Puma)
 #SBATCH --time=04:00:00            # HHH:MM:SS, max 240:00:00
 #SBATCH --output=slurm_logs/%x_%j.out
@@ -378,7 +476,7 @@ export MPLBACKEND=Agg  # headless matplotlib
 specify one and let the scheduler calculate the other. Invalid ratios may redirect to
 high-memory queues (longer wait).
 
-**GELLS-DEM is single-node, single-process.** Always use `--nodes=1 --ntasks=1`.
+**GELS is single-node, single-process.** Always use `--nodes=1 --ntasks=1`.
 Increase `--cpus-per-task` if you need more memory (e.g., large 3D grids).
 
 ### Array Jobs (Parameter Sweeps)
@@ -440,16 +538,16 @@ is below ~80%, reduce resource requests for future jobs. This shortens queue wai
 ```bash
 # Upload repo to cluster (trailing slash = contents only)
 rsync -ravz --exclude __pycache__ --exclude .git --exclude results/ \
-    ./  netid@filexfer.hpc.arizona.edu:~/GELLS-DEM/
+    ./  netid@filexfer.hpc.arizona.edu:~/GELS/
 
 # Download results from cluster
-rsync -ravz netid@filexfer.hpc.arizona.edu:~/GELLS-DEM/results/ ./results/
+rsync -ravz netid@filexfer.hpc.arizona.edu:~/GELS/results/ ./results/
 ```
 
 **SCP:**
 ```bash
-scp -rp ./Trials/ netid@filexfer.hpc.arizona.edu:~/GELLS-DEM/Trials/
-scp -rp netid@filexfer.hpc.arizona.edu:~/GELLS-DEM/results/ ./results/
+scp -rp ./Trials/ netid@filexfer.hpc.arizona.edu:~/GELS/Trials/
+scp -rp netid@filexfer.hpc.arizona.edu:~/GELS/results/ ./results/
 ```
 
 **Best practices:**
@@ -459,29 +557,37 @@ scp -rp netid@filexfer.hpc.arizona.edu:~/GELLS-DEM/results/ ./results/
 - If SCP/SFTP fails with "Received message too long", check `~/.bashrc` for echo/printf
   statements and comment them out.
 
-### GELLS-DEM HPC Workflow
+### GELS HPC Workflow
 
 **Automated (run_all_trials.py Mode 3):**
 ```
 1. Finds all .json files in Trials/
-2. Generates SLURM array job script
+2. Generates SLURM array job script (results → /groups, staggered starts)
 3. Rsyncs repo to cluster via filexfer
 4. Submits via SSH: bastion → shell → sbatch
 5. Polls with squeue -r (per-task progress)
-6. Incremental rsync as tasks complete
+6. Incremental rsync as tasks complete (delete from HPC after transfer)
 7. Final rsync when all tasks done
+```
+
+**Resume incomplete trials (run_all_trials.py Mode 4, V2.6):**
+```
+1. Scans local results/LHC/ for incomplete trials (t_last < t_total)
+2. Uploads last snapshot + params.json + history.json to HPC for each
+3. Generates resume SLURM script with --resume-from
+4. Rsyncs repo, submits, polls, and syncs as in Mode 3
 ```
 
 **Manual workflow:**
 ```bash
 # 1. Sync code to cluster
 rsync -ravz --exclude __pycache__ --exclude .git --exclude results/ \
-    ./  netid@filexfer.hpc.arizona.edu:~/GELLS-DEM/
+    ./  netid@filexfer.hpc.arizona.edu:~/GELS/
 
 # 2. SSH in and submit
 ssh netid@hpc.arizona.edu
 shell
-cd ~/GELLS-DEM
+cd ~/GELS
 sbatch hpc/run_all_trials.slurm
 
 # 3. Monitor
@@ -489,7 +595,7 @@ squeue -r --me
 seff JOBID   # after completion
 
 # 4. Sync results back (from local machine)
-rsync -ravz netid@filexfer.hpc.arizona.edu:~/GELLS-DEM/results/ ./results/
+rsync -ravz netid@filexfer.hpc.arizona.edu:~/GELS/results/ ./results/
 ```
 
 **Standalone result sync:**
@@ -505,14 +611,19 @@ Each user's HPC settings are stored in a JSON file:
 {
     "netid": "mcgheealex",
     "group": "your_pi_group",
-    "repo_path": "~/GELLS-DEM",
+    "repo_path": "~/GELS",
     "python_module": "python/3.11/3.11.4",
-    "venv_path": "/groups/your_pi_group/gells_env",
+    "venv_path": "/groups/your_pi_group/gels_env",
     "partition": "standard",
     "cpus": 4,
-    "walltime": "04:00:00"
+    "walltime": "04:00:00",
+    "results_path": "/groups/your_pi_group/results",
+    "max_concurrent": 10
 }
 ```
+
+**V2.6 fields**: `results_path` directs simulation output to `/groups` (500 GB) instead of
+`/home` (50 GB). `max_concurrent` limits simultaneous SLURM array tasks (default 10).
 
 ### Common Gotchas
 

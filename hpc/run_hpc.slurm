@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=gells-dem
+#SBATCH --job-name=gels
 #SBATCH --account=YOUR_GROUP          # <- replace with your PI's group name
 #SBATCH --partition=standard
 #SBATCH --nodes=1
@@ -13,13 +13,13 @@
 
 # ── Load Python and activate virtual environment ──
 module load python/3.11/3.11.4
-source $HOME/gells-dem-env/bin/activate
+source $HOME/gels-env/bin/activate
 
 # ── Use non-interactive matplotlib backend (no display on HPC) ──
 export MPLBACKEND=Agg
 
 # ── Run simulation ──
-cd $HOME/GELLS-DEM
+cd $HOME/GELS
 python3 run_hpc_headless.py --output-dir results
 
 echo "Job $SLURM_JOB_ID finished at $(date)"

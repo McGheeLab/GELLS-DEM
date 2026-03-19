@@ -234,7 +234,7 @@ def run_arch_distance():
 
 
 def main():
-    print("GELLS-DEM V1.7 Mathematical Analysis Pipeline")
+    print("GELS V1.7 Mathematical Analysis Pipeline")
     print(f"Data: {SCAN_DIR}")
     print(f"Output: {OUTDIR}")
 
