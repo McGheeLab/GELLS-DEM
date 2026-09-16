@@ -2,6 +2,7 @@
 simulations/
 results/
 Trials/trials/
+Research/References
 *.npy
 *.npz
 *.pkl
