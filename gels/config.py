@@ -312,6 +312,7 @@ class Output:
     Ngrid_3d: int = _P.Ngrid_3d
     interface_width_um: float = _P.interface_width
     metrics_boundary_exclusion: float = _P.boundary_exclusion
+    metrics_laguerre: bool = _P.metrics_laguerre
     keep_snaps_in_memory: bool = _P.perf_keep_snaps_in_memory
 
 
@@ -517,6 +518,7 @@ FLAT_MAP = [
     ('output.Ngrid_3d', 'Ngrid_3d'),
     ('output.interface_width_um', 'interface_width'),
     ('output.metrics_boundary_exclusion', 'boundary_exclusion'),
+    ('output.metrics_laguerre', 'metrics_laguerre'),
     ('output.keep_snaps_in_memory', 'perf_keep_snaps_in_memory'),
     ('performance.threads', 'perf_threads'),
     ('performance.threading_layer', 'perf_threading_layer'),
@@ -1331,6 +1333,7 @@ output:
   Ngrid_3d: 80
   interface_width_um: 3.0
   metrics_boundary_exclusion: 0.2
+  metrics_laguerre: false          # halo-free local packing fraction; ~0.3-1 s/frame at N=1000
   keep_snaps_in_memory: true
 
 performance:

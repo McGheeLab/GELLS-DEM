@@ -198,6 +198,25 @@ class TestMetricsMatchReference(unittest.TestCase):
     def test_3d_spheres_walls(self):
         self._check(_params('3D'))
 
+    # V3.3: the Laguerre block has no kernel twin -- both metrics paths call
+    # gels/laguerre.py -- so agreement is by construction. These cases assert
+    # that, and that the block is absent when the flag is off.
+    def test_2d_laguerre(self):
+        gs, m_r, m_k = self._check(_params('2D', metrics_laguerre=True))
+        self.assertIn('phi_loc_mean', m_k)
+        self.assertAlmostEqual(m_k['laguerre_vol_closure'], 1.0, places=6)
+
+    def test_3d_laguerre(self):
+        gs, m_r, m_k = self._check(_params('3D', metrics_laguerre=True))
+        self.assertIn('compaction_func', m_k)
+        self.assertAlmostEqual(m_k['laguerre_vol_closure'], 1.0, places=6)
+
+    def test_laguerre_absent_when_off(self):
+        gs, m_r, m_k = self._check(_params('2D'))
+        for key in ('phi_loc_mean', 'compaction_func', 'laguerre_valid_frac'):
+            self.assertNotIn(key, m_k)
+            self.assertNotIn(key, m_r)
+
     def test_3d_spheres_periodic(self):
         self._check(_params('3D', periodic=True))
 

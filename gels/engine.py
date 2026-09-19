@@ -307,6 +307,10 @@ class Params:
     # ── Packing ──
     packing_gap: float = 0.0        # µm, min gap between granule surfaces at placement
     boundary_exclusion: float = 0.2  # fraction of domain excluded from each edge for metrics
+    # V3.3: Laguerre (radical) local packing fraction in the metrics. Off by
+    # default because Qhull cannot be compiled and it costs ~0.3-1 s/frame at
+    # N = 1000; the same numbers are available post-hoc from viz2/step5.
+    metrics_laguerre: bool = False
     packing_settle_steps: int = 400  # inflation steps to reach target radii (jammed packing)
     packing_relax_substeps: int = 15  # overlap relaxation sub-steps per inflation step
     packing_inflate_phi_safe: float = 0.20  # initial deflated packing fraction for RSA
