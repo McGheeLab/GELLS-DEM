@@ -73,9 +73,11 @@ class TestWriteNpz(unittest.TestCase):
         paths = [os.path.join(self.tmp, f'snap_{k:04d}.npz') for k in range(6)]
         for k, path in enumerate(paths):
             w.submit(path, {'k': np.full(10, k)})
-        # an unwritable target is reported, not raised
-        w.submit(os.path.join(self.tmp, 'no_such_dir', 'x', 'y.npz') if os.name != 'nt'
-                 else 'Z:\\definitely\\not\\here\\y.npz', {'a': np.zeros(1)})
+        # an unwritable target is reported, not raised. write_npz_atomic does
+        # os.makedirs(exist_ok=True) (writer.py:29), so a merely missing parent
+        # is NOT unwritable -- the path has to be one that cannot be created.
+        w.submit('Z:\\definitely\\not\\here\\y.npz' if os.name == 'nt'
+                 else os.path.join('/dev/null', 'x', 'y.npz'), {'a': np.zeros(1)})
         errors = w.close()
         for k, path in enumerate(paths):
             with np.load(path) as d:
