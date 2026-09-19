@@ -13,8 +13,8 @@ reference contact geometry bit for bit.
 import numpy as np
 
 from gels.engine import (
-    _body_to_world, superellipse_curvature_radius, superellipse_implicit,
-    superellipse_normal_vec, superellipse_point,
+    _body_to_world, se2d_mtd_core, superellipse_curvature_radius,
+    superellipse_implicit, superellipse_normal_vec, superellipse_point,
 )
 from gels.kernels import njit
 
@@ -108,6 +108,18 @@ def se2d_contact_k(xi, yi, ai, bi, ni, thetai, xj, yj, aj, bj, nj, thetaj):
     R_loc_j = superellipse_curvature_radius(t_j, aj, bj, nj)
 
     return True, delta, nx, ny, contact_x, contact_y, R_loc_i, R_loc_j
+
+
+@njit(cache=True)
+def se2d_mtd_k(xi, yi, ai, bi, ni, thetai, xj, yj, aj, bj, nj, thetaj):
+    """Support-function MTD contact, in ``se2d_contact_k``'s tuple (V3.4).
+
+    A thin wrapper over the single solver in ``gels.engine``, not a second copy
+    -- see :func:`gels.kernels.geometry3d.se3d_mtd_k`.
+    """
+    hit, delta, nx, ny, cx, cy, R_loc_i, R_loc_j, _res = se2d_mtd_core(
+        xi, yi, ai, bi, ni, thetai, xj, yj, aj, bj, nj, thetaj)
+    return hit, delta, nx, ny, cx, cy, R_loc_i, R_loc_j
 
 
 @njit(cache=True)

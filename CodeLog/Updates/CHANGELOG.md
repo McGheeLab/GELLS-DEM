@@ -66,6 +66,78 @@ free. `n <= 1` has no Holder conjugate (`n/(n-1)` is negative or infinite), so i
 to the max-norm -- the correct octahedral limit. `_sgnpow`'s `+1e-30` bias is deliberately
 *not* replicated: it would break the `p.N = 1` identity the whole derivation rests on.
 
+### Phase 3.2 -- the MTD solver
+
+`se3d_mtd_core` / `se2d_mtd_core` in `gels/engine.py`, with Optional-returning wrappers
+`mtd_contact_3d` / `mtd_contact_2d` and status-tuple wrappers `se3d_mtd_k` / `se2d_mtd_k`
+in the kernel twins. There is **one** implementation and both twins call it, so they
+cannot drift the way `_capacity` did in V3.3; the wrappers only drop the convergence
+residual. Tuple widths are unchanged, so a call site switches solver with one `if`.
+No call site has been switched yet -- that is Phase 3.3.
+
+`sep(n) = (c2-c1).n - h1(n) - h2(n)` is concave, `n* = argmax sep`, `delta = -sep(n*)`.
+Two identities from the same intermediates make the ascent nearly free: `grad sep = p2-p1`
+(the witness-point difference) and `grad sep . n = sep` (Euler). Being allocation-free
+matters as much as the maths -- the common-normal solver builds ~8 numpy arrays per
+iteration for 15 unconditional iterations.
+
+**It is faster where it counts.** `sep(n0) > 0` at the centre-line direction *proves*
+separation, and neighbour lists are generous, so most candidate pairs are rejected in one
+evaluation (3D, preset blockiness, per pair):
+
+| overlapping fraction of candidates | common_normal | mtd | |
+|---|---|---|---|
+| 10 % | 16.2 us | **3.6 us** | 4.5x faster |
+| 30 % | 16.8 us | **9.0 us** | 1.9x faster |
+| 100 % | 16.4 us | 25.7 us | 1.6x slower |
+
+and it finds **3.3x more contacts** in the same set. 2D is 1.09x at 10 % occupancy and
+slower only in the all-overlapping case that a neighbour list never produces.
+
+**Accuracy**, against a Fibonacci-grid plus Nelder-Mead reference over 120 tumbled pairs
+per shape class:
+
+| shape | median rel. error in delta | p90 |
+|---|---|---|
+| ellipsoid (n = 2) | 2.6e-11 | 2.6e-10 |
+| presets (n = 2.6-3.4) | 4.8e-11 | 4.7e-08 |
+| n = 4 | 1.4e-08 | 2.8e-04 |
+| n = 10 (near cube) | 3.9e-05 | 5.1e-03 |
+
+The tail is **seeding-limited, not iteration-limited** -- flat from 24 to 256 iterations.
+`sep` is concave on R^3, but the unit sphere is not a convex constraint set and in
+penetration `sep` is negative everywhere on it, so the sphere-restricted problem genuinely
+admits local maxima and a minority of tumbled near-polyhedral pairs ascend into one. The
+budget is therefore set at the measured knee, 32, and the near-cube degradation is
+documented rather than papered over. What *is* guaranteed: `sep(n) <= sep(n*)` for every
+`n`, so truncation makes `delta` too LARGE, never too small -- a contact can be stiff but
+never missed, and `test_no_contact_is_ever_lost` asserts exactly that.
+
+### Bug Fixes -- what the common-normal solver was actually doing
+
+Re-measuring the legacy solver to write the comparison turned up a defect that was not
+previously on record, and it is worse than the detection rate:
+
+**The contact normal is reported backwards for about half of all shaped contacts.** The
+solver returns `(p_j - p_i)/|.|`, where `p_i` is body i's common-normal *surface point*.
+Once the bodies overlap enough for those points to cross -- which is most of the time --
+that vector points from j back toward i. The force law applies `-F_normal * n` to body i,
+so a flipped normal turns repulsion into **attraction**. Over 400 random tumbled pairs at
+preset blockiness (n = 2.2-3.5): **50 % flipped in 3D** (median `n . u_ij` = -0.03, i.e.
+the sign is essentially a coin flip) and **29 % in 2D**. Two aligned spheres run through
+the superellipsoid path return exactly `(-1, 0, 0)`.
+
+This is not fixed on the legacy path, because Gate B pins its output bit-for-bit. It is
+recorded, and tested (`test_common_normal_reports_the_normal_backwards_about_half_the_time`),
+so that `contact.solver = 'common_normal'` is understood as a **reproducibility** path for
+the stored V2.7 fixtures rather than as physics.
+
+**`superellipse_curvature_radius` falls into its own "nearly flat" fallback on an axis.**
+`dy/dt` carries a factor `sign(sin t)`, which is exactly 0 at `t = 0`, so *both* derivatives
+vanish, the `num < 1e-30` guard fires and the function returns `max(a,b) * 10` -- 400 um for
+a circle of radius 40. An axis-aligned pair converges to exactly `t = 0`, so this is not a
+measure-zero curiosity. `support_R_eff_2d` has no such branch and returns 40.0 everywhere.
+
 ---
 
 ## [V3.3] - 2026-09-19

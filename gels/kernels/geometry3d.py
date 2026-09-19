@@ -15,8 +15,9 @@ step.
 import numpy as np
 
 from gels.engine import (
-    quat_rotate, quat_rotate_inv, quat_to_rotation_matrix, superellipsoid_curvature_radii,
-    superellipsoid_implicit, superellipsoid_normal, superellipsoid_point,
+    quat_rotate, quat_rotate_inv, quat_to_rotation_matrix, se3d_mtd_core,
+    superellipsoid_curvature_radii, superellipsoid_implicit, superellipsoid_normal,
+    superellipsoid_point,
 )
 from gels.kernels import njit
 
@@ -140,6 +141,23 @@ def se3d_contact_k(xi, yi, zi, ai, bi, ci, n1i, n2i, qi,
     R_eff = R_eff_i * R_eff_j / (R_eff_i + R_eff_j) if (R_eff_i + R_eff_j) > 0 else 1.0
 
     return True, delta, nx, ny, nz, cx, cy, cz_pt, R_eff
+
+
+@njit(cache=True)
+def se3d_mtd_k(xi, yi, zi, ai, bi, ci, n1i, n2i, qi,
+               xj, yj, zj, aj, bj, cj, n1j, n2j, qj):
+    """Support-function MTD contact, in ``se3d_contact_k``'s tuple (V3.4).
+
+    A thin wrapper, not a second implementation: there is exactly one MTD solver
+    (``gels.engine.se3d_mtd_core``) and both twins call it, so they cannot drift
+    the way ``_capacity`` did in V3.3. All this does is drop the convergence
+    residual, which only the tests consume, so the two solvers are
+    interchangeable at a call site by one ``if``.
+    """
+    hit, delta, nx, ny, nz, cx, cy, cz, R_eff, _res = se3d_mtd_core(
+        xi, yi, zi, ai, bi, ci, n1i, n2i, qi,
+        xj, yj, zj, aj, bj, cj, n1j, n2j, qj)
+    return hit, delta, nx, ny, nz, cx, cy, cz, R_eff
 
 
 @njit(cache=True)
