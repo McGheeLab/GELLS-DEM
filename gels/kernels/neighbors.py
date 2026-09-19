@@ -183,6 +183,10 @@ def half_pairs_cells(pos, cutoff, periodic, box):
         return np.zeros(0, dtype=np.int32), np.zeros(0, dtype=np.int32)
     ncs = [max(1, int(float(box[k]) // cutoff)) for k in range(dim)]
     if periodic and min(ncs) < 3:
+        # Fewer than 3 cells on an axis: the 27-neighbour sweep would visit the
+        # same periodic image twice, so defer to the tree. That is sound only
+        # for L/3 < cutoff < L/2 -- at cutoff >= L/2 the tree silently DROPS
+        # pairs instead, which is why half_pairs() raises before we get here.
         return half_pairs_tree(pos, cutoff, periodic, box)
     if dim == 2:
         ncs.append(1)
@@ -207,8 +211,42 @@ def half_pairs_cells(pos, cutoff, periodic, box):
     return pair_i, pair_j
 
 
+def check_min_image(cutoff, box, dim=None):
+    """Raise if a periodic box is too small for ``cutoff`` (V3.3).
+
+    ``cKDTree(..., boxsize=L).query_pairs(r)`` returns each unordered pair AT
+    MOST ONCE, at its minimum image, and raises nothing when ``r > L/2``. So
+    above that the second image of a neighbour is silently DROPPED -- a missing
+    contact, not a double-counted one, which is why it never showed up as an
+    obviously wrong force.
+
+    Verified with scipy 1.17: box L=10, points at x=1 and x=9, cutoff 8 returns
+    one pair where a 27-image enumeration finds two interactions.
+
+    The bound is strict because ``query_pairs`` is inclusive (``d <= r``).
+    Non-periodic geometry has no images and is exempt.
+    """
+    n = len(box) if dim is None else dim
+    edges = [float(box[k]) for k in range(n)]
+    lim = 0.5 * min(edges)
+    if float(cutoff) >= lim:
+        k = int(np.argmin(edges))
+        raise ValueError(
+            f"periodic box too small for the interaction cutoff: cutoff="
+            f"{float(cutoff):.3f} um >= half the shortest edge "
+            f"({'xyz'[k]} = {edges[k]:.3f} um, limit {lim:.3f}). Above this, "
+            f"neighbour pairs are silently dropped. Enlarge the box to at "
+            f"least {2.0 * float(cutoff):.3f} um on that axis, or reduce the "
+            f"granule radii / cell_sense_distance / bridge_break_gap.")
+
+
 def half_pairs(pos, cutoff, periodic, box, backend='cells'):
-    """Dispatch on ``perf_neighbor_backend``: 'cells' (default) or 'ckdtree'."""
+    """Dispatch on ``perf_neighbor_backend``: 'cells' (default) or 'ckdtree'.
+
+    Both backends funnel through here, so the minimum-image guard lives here.
+    """
+    if periodic:
+        check_min_image(cutoff, box, pos.shape[1])
     if backend == 'cells':
         return half_pairs_cells(pos, cutoff, periodic, box)
     return half_pairs_tree(pos, cutoff, periodic, box)

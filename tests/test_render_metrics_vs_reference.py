@@ -49,6 +49,23 @@ def _params(mode='2D', shape=False, periodic=False, **kw):
                 perf_metrics_voronoi_stride=1)      # exact comparison with the full-grid reference
     if mode == '3D':
         base.update(Lx=250.0, Ly=250.0, Lz=250.0, phi_solid_target=0.5)
+    if periodic:
+        # V3.3: halve the granules under periodic BCs. The defaults (R 40/60,
+        # inflated further by r_bound for superellipsoids) put max r_bound at
+        # 82 um in a 400 um box -- about four granule diameters across, which
+        # makes the interaction cutoff 2*max_r_bound + L_max exceed L/2. Past
+        # that, cKDTree(boxsize=).query_pairs silently drops the second image
+        # of a neighbour, so the configuration was measuring the wrong physics;
+        # gels.kernels.neighbors.check_min_image now refuses it. Smaller
+        # granules keep the granule COUNT (and the runtime) rather than growing
+        # the box, which would be cubic in 3D.
+        base.update(R_func_mean=20.0, R_func_std=2.5, R_inert_mean=30.0, R_inert_std=4.0)
+        if mode == '3D':
+            # Even halved, 3D lands at cutoff 125.015 against a 125.0 limit:
+            # L_max (= max(cell_sense_distance, bridge_break_gap) = 60) is fixed
+            # and dominates 2*r_bound here, so the box has to give. 300 leaves a
+            # comfortable margin at ~1.7x the granule count.
+            base.update(Lx=300.0, Ly=300.0, Lz=300.0)
     if shape:
         base.update(shape_enabled=True, aspect_ratio_func_mean=1.3, blockiness_func_mean=2.6,
                     aspect_ratio_inert_mean=1.2, blockiness_inert_mean=2.2)
