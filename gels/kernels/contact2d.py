@@ -26,7 +26,7 @@ from gels.engine import (apply_gravity, boundary_geometry, hertz_contact_force,
 from gels.kernels import njit, prange
 from gels.kernels.bridging import bridging_pass
 from gels.kernels.contacts import ContactSoA, add_active_noise, alloc_records, clips_to_lists
-from gels.kernels.geometry2d import se2d_contact_k, se2d_wall_k
+from gels.kernels.geometry2d import se2d_contact_k, se2d_wall_k, se2d_wall_point_k
 from gels.kernels.neighbors import csr_from_pairs, half_pairs, neighbor_backend
 
 
@@ -173,7 +173,8 @@ def mc_dem_pairs(pair_i, pair_j, r, nu, kappa_max, c_hit, c_overlap, c_Reff, c_E
 def gather_2d(pos, r, a, b, n_shape, theta, sid, is_circle, periodic, Lx, Ly, top_free,
               off, nbr_pair, nbr_side,
               c_hit, c_overlap, c_nx, c_ny, c_cx, c_cy, c_Fn, c_a, c_Ftx, c_Fty, dF,
-              wall_W, wall_Estar, F, torques, clip_n, clip_d, clip_cnt, clip_over):
+              wall_W, wall_Estar, F, torques, clip_n, clip_d, clip_cnt, clip_over,
+              wall_torque):
     N = pos.shape[0]
     max_clips = clip_d.shape[1]
     for i in prange(N):
@@ -297,8 +298,18 @@ def gather_2d(pos, r, a, b, n_shape, theta, sid, is_circle, periodic, Lx, Ly, to
                         wall_pos = Ly
                         axis = 1
                         sign = -1
-                    ok, pen, R_local = se2d_wall_k(xi, yi, a[i], b[i], n_shape[i], theta[i],
-                                                   wall_pos, axis, sign)
+                    # V3.4: the support-function wall solver returns the contact
+                    # point, so the lever arm is free. A circle's wall contact is
+                    # on the centre line and its torque is identically zero, so
+                    # the point variant is only worth calling for shapes.
+                    wcx = 0.0
+                    wcy = 0.0
+                    if wall_torque:
+                        ok, pen, R_local, wcx, wcy = se2d_wall_point_k(
+                            xi, yi, a[i], b[i], n_shape[i], theta[i], wall_pos, axis, sign)
+                    else:
+                        ok, pen, R_local = se2d_wall_k(xi, yi, a[i], b[i], n_shape[i],
+                                                       theta[i], wall_pos, axis, sign)
                     if ok:
                         Fw, a_w = jkr_force_from_overlap(pen, R_local, E_star_gw, W_wall)
                         if axis == 0:
@@ -306,11 +317,15 @@ def gather_2d(pos, r, a, b, n_shape, theta, sid, is_circle, periodic, Lx, Ly, to
                             wall_d = abs(xi - wall_pos)
                             nxw = -float(sign)
                             nyw = 0.0
+                            if wall_torque:
+                                tq += -(wcy - yi) * sign * Fw
                         else:
                             fy += sign * Fw
                             wall_d = abs(yi - wall_pos)
                             nxw = 0.0
                             nyw = -float(sign)
+                            if wall_torque:
+                                tq += (wcx - xi) * sign * Fw
                         if nclip < max_clips:
                             clip_n[i, nclip, 0] = nxw
                             clip_n[i, nclip, 1] = nyw
@@ -389,7 +404,8 @@ def compute_forces_2d(gs, p, rng):
               off, nbr_pair, nbr_side,
               rec['hit'], rec['overlap'], rec['nx'], rec['ny'], rec['cx'], rec['cy'], rec['Fn'],
               rec['a'], rec['Ftx'], rec['Fty'], dF,
-              gs.wall_W, gs.wall_Estar, F, torques, clip_n, clip_d, clip_cnt, clip_over)
+              gs.wall_W, gs.wall_Estar, F, torques, clip_n, clip_d, clip_cnt, clip_over,
+              bool(getattr(p, 'contact_wall_torque', False)) and not bool(gs.is_circle))
     gs.clip_arrays = (clip_n, clip_d, clip_cnt)     # consumed by the compiled renderer
     _warn_clip_overflow(clip_over, max_clips)
 

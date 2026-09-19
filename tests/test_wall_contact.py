@@ -414,5 +414,164 @@ class TestAgainstTheRetiredSamplers(SeededCase):
         self.assertGreater(np.median(errs), 1e-4)
 
 
+# ── wall torque (contact.wall_torque) ────────────────────────────────
+
+class TestWallTorque(SeededCase):
+    """`contact.wall_torque` (V3.4, default off).
+
+    The lever arm is free once the wall solver returns its contact point, but
+    this is NEW physics -- a blocky granule can tip flat against a wall -- so it
+    is opt-in rather than a correction to what was there.
+    """
+
+    @staticmethod
+    def _wall_energy_torque_2d(cx, cy, a, b, n, th, wall_pos, axis, sign, Fw):
+        """-dE/dtheta for a wall contact, from the support function alone.
+
+        `pen = h(w; theta) - sign*(c - wall)`, and the repulsive force magnitude
+        is `E'(pen) = Fw`, so the generalised force conjugate to theta is
+        `-Fw * dh/dtheta`. Finite-differenced here, so it shares nothing with the
+        `r x F` the solver computes.
+        """
+        eps = 1e-6
+
+        def h(t):
+            w = (1.0, 0.0) if axis == 0 else (0.0, 1.0)
+            from gels.engine import se2d_support
+            ct, st = np.cos(t), np.sin(t)
+            bx = ct * w[0] + st * w[1]
+            by = -st * w[0] + ct * w[1]
+            return se2d_support(bx, by, a, b, n)[0]
+
+        return -Fw * (h(th + eps) - h(th - eps)) / (2 * eps)
+
+    def test_torque_is_minus_the_energy_gradient_in_orientation(self):
+        """The conservativity statement: r x F at the support point equals
+        -Fw * dh/dtheta, finite-differenced independently."""
+        from gels.kernels.geometry2d import se2d_wall_point_k
+        errs = []
+        for _ in range(60):
+            a, b = 40.0, 24.0
+            n = RNG.uniform(2.0, 6.0)
+            th = RNG.uniform(0, 2 * np.pi)
+            axis = int(RNG.integers(0, 2))
+            sign = int(RNG.choice([-1, 1]))
+            c = RNG.uniform(-10.0, 10.0, size=2)
+            wall = c[axis] - sign * RNG.uniform(0.5, 0.9) * max(a, b)
+            hit, pen, R, wcx, wcy = se2d_wall_point_k(c[0], c[1], a, b, n, th,
+                                                      wall, axis, sign)
+            if not hit:
+                continue
+            Fw = 13.7      # any magnitude; both sides are linear in it
+            if axis == 0:
+                tau = -(wcy - c[1]) * sign * Fw
+            else:
+                tau = (wcx - c[0]) * sign * Fw
+            ref = self._wall_energy_torque_2d(c[0], c[1], a, b, n, th, wall, axis,
+                                              sign, Fw)
+            errs.append(abs(tau - ref) / max(abs(ref), 1.0))
+        self.assertGreaterEqual(len(errs), 30)
+        self.assertLess(float(np.median(errs)), 1e-5)
+        self.assertLess(float(np.percentile(errs, 90)), 1e-3)
+
+    def test_a_circle_has_no_wall_torque(self):
+        """Its contact point is on the centre line, so r is parallel to F. This
+        is why both kernels skip the branch entirely when `is_circle`."""
+        from gels.kernels.geometry2d import se2d_wall_point_k
+        for _ in range(20):
+            R = 40.0
+            cy = RNG.uniform(-50.0, 50.0)
+            hit, pen, Rl, wcx, wcy = se2d_wall_point_k(20.0, cy, R, R, 2.0,
+                                                       RNG.uniform(0, 6.28), 0.0, 0, +1)
+            self.assertTrue(hit)
+            self.assertAlmostEqual(wcy, cy, places=7)      # zero lever arm
+
+    def test_torque_rotates_a_blocky_granule_flat_against_the_wall(self):
+        """The falsifiable physical claim. A square-ish granule tilted against a
+        flat wall must feel a torque toward face-on, i.e. toward the orientation
+        that MINIMISES its extent along the wall normal."""
+        from gels.kernels.geometry2d import se2d_wall_point_k
+        from gels.engine import se2d_support
+        a = b = 35.0
+        n = 8.0                      # nearly a square
+        Fw = 10.0
+        for th in (0.2, 0.5, 0.9, 1.1, -0.3, -0.7):
+            wall = -30.0
+            hit, pen, R, wcx, wcy = se2d_wall_point_k(0.0, 0.0, a, b, n, th, wall, 0, +1)
+            self.assertTrue(hit, f"th={th}")
+            tau = -(wcy - 0.0) * Fw
+            # dh/dtheta at this orientation
+            eps = 1e-6
+            hp = se2d_support(np.cos(th + eps), -np.sin(th + eps), a, b, n)[0]
+            hm = se2d_support(np.cos(th - eps), -np.sin(th - eps), a, b, n)[0]
+            dh = (hp - hm) / (2 * eps)
+            # torque must oppose the growth of the extent -> drive toward face-on
+            self.assertLess(tau * dh, 0.0, f"th={th}: torque increases the extent")
+
+    @staticmethod
+    def _bed_pressed_against_a_wall(seed=5):
+        """A packed shaped bed, translated until granules really overlap x = 0.
+
+        Necessary, and it is the reason these tests exist: a bed packed with the
+        default `packing_consolidation = 'centre'` sits OFF the walls, so a run
+        can look healthy while the whole wall path is dead code.
+        """
+        import copy
+        import contextlib
+        import io as _io
+        from gels.engine import Params, generate_packing
+        base = dict(mode='2D', Lx=300.0, Ly=300.0, shape_enabled=True,
+                    aspect_ratio_func_mean=1.8, blockiness_func_mean=3.5,
+                    aspect_ratio_inert_mean=1.6, blockiness_inert_mean=3.2,
+                    packing_shape_contact=True, contact_shape_dynamics=True,
+                    packing_consolidation='none', phi_solid_target=0.55,
+                    cell_surface_coverage=0.0, n_cells_per_granule=0, save_data=False)
+        p = Params(**base, contact_wall_torque=False)
+        with contextlib.redirect_stdout(_io.StringIO()):
+            gs = generate_packing(copy.deepcopy(p), seed=seed)
+        # put the leftmost centre half a bounding radius from x = 0, so its true
+        # extent certainly crosses whatever its orientation happens to be
+        shift = gs.x.min() - 0.5 * float(gs.r_bound.min())
+        gs.pos[:, 0] -= shift
+        gs.x[:] = gs.pos[:, 0]
+        return gs, base
+
+    def test_the_flag_changes_the_torque_and_only_the_torque(self):
+        from gels.engine import Params
+        from gels.kernels.contact2d import compute_forces_2d
+        gs, base = self._bed_pressed_against_a_wall()
+        self.assertTrue(_any_wall_contact(gs, Params(**base)),
+                        "the fixture must actually touch a wall")
+        off = Params(**base, contact_wall_torque=False)
+        on = Params(**base, contact_wall_torque=True)
+        F0, t0, _ = compute_forces_2d(gs, off, np.random.default_rng(0))
+        F1, t1, _ = compute_forces_2d(gs, on, np.random.default_rng(0))
+        np.testing.assert_array_equal(F0, F1, "the flag must not move any force")
+        self.assertGreater(int(np.count_nonzero(np.asarray(t0) != np.asarray(t1))), 0,
+                           "the flag did nothing on a bed that touches walls")
+
+    def test_both_twins_agree_with_the_flag_on(self):
+        from gels.engine import Params
+        import gels.kernels.reference as reference
+        from gels.kernels.contact2d import compute_forces_2d
+        gs, base = self._bed_pressed_against_a_wall()
+        on = Params(**base, contact_wall_torque=True)
+        Fk, tk, _ = compute_forces_2d(gs, on, np.random.default_rng(0))
+        Fr, tr, _ = reference.compute_forces(gs, on, np.random.default_rng(0))
+        np.testing.assert_allclose(np.asarray(Fr), Fk, rtol=0, atol=1e-12)
+        np.testing.assert_allclose(np.asarray(tr), np.asarray(tk), rtol=0, atol=1e-12)
+
+
+def _any_wall_contact(gs, p):
+    from gels.engine import se2d_wall_core
+    walls = [(0.0, 0, +1), (p.Lx, 0, -1), (0.0, 1, +1), (p.Ly, 1, -1)]
+    for i in range(gs.N):
+        for wp, ax, sg in walls:
+            if se2d_wall_core(gs.x[i], gs.y[i], gs.a[i], gs.b[i], gs.n_shape[i],
+                              gs.theta[i], wp, ax, sg)[0]:
+                return True
+    return False
+
+
 if __name__ == '__main__':
     unittest.main()

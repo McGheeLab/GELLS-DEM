@@ -272,6 +272,7 @@ class Contact:
     semi_implicit: bool = _P.contact_semi_implicit   # V3.2: damp the step by the local contact stiffness
     shape_dynamics: bool = _P.contact_shape_dynamics   # V3.2: shape-aware overlap projection / wall clamp
     curvature_R_cap: float = _P.curvature_R_cap        # V3.2: cap R_eff at cap*min(r_i,r_j); 0 = off
+    wall_torque: bool = _P.contact_wall_torque         # V3.4: r x F at the wall contact point
 
 
 @dataclass
@@ -495,6 +496,7 @@ FLAT_MAP = [
     ('contact.semi_implicit', 'contact_semi_implicit'),
     ('contact.shape_dynamics', 'contact_shape_dynamics'),
     ('contact.curvature_R_cap', 'curvature_R_cap'),
+    ('contact.wall_torque', 'contact_wall_torque'),
     ('dynamics.drag_scale', 'drag_scale'),
     ('dynamics.drag_scale_rot', 'drag_scale_rot'),
     ('dynamics.v_max_um_per_h', 'v_max'),
@@ -1312,6 +1314,9 @@ contact:                           # hydrogel granules
   curvature_R_cap: 2.0             # cap R_eff at this x min(r_i,r_j); 0 = off. REQUIRED for blocky shapes (2.0): a flat
                                    # face has an almost infinite curvature radius and F ~ sqrt(R_eff)
   stiffness_cap_kPa: 0.0           # 0 = none; caps the CONTACT modulus only (cells see the true E); PMMA preset 100
+  wall_torque: false               # apply r x F at the wall contact point (V3.4). Free -- the support function
+                                   #   returns the point -- but it is NEW physics: a blocky granule can tip flat
+                                   #   against a wall. Off by default.
   friction_mu: 0.0                 # Coulomb coefficient added to the shear-stress friction (0 = hydrogel law only)
 
 dynamics:

@@ -1697,6 +1697,18 @@ def compute_forces(gs: GranuleSystem, p: Params, rng):
                         Fw, a_w = jkr_force_from_overlap(
                             pen, R_local, E_star_gw, W_wall)
                         F[i, wall_axis] += wall_sign * Fw
+                        if getattr(p, 'contact_wall_torque', False) and not gs.is_circle:
+                            # V3.4: r x F at the wall contact point, which the
+                            # support-function solver hands back for free. A
+                            # circle's contact is on the centre line, so its wall
+                            # torque is identically zero and the branch is skipped.
+                            _, _, _, wcx, wcy = se2d_wall_core(
+                                gs.x[i], gs.y[i], gs.a[i], gs.b[i], gs.n_shape[i],
+                                gs.theta[i], wall_pos, wall_axis, wall_sign)
+                            if wall_axis == 0:
+                                torques[i] += -(wcy - gs.y[i]) * wall_sign * Fw
+                            else:
+                                torques[i] += (wcx - gs.x[i]) * wall_sign * Fw
                         # Wall clip
                         if wall_axis == 0:
                             wall_d = abs(gs.x[i] - wall_pos)
@@ -2026,6 +2038,15 @@ def compute_forces_3d(gs: GranuleSystem, p: Params, rng):
                         Fw, a_w = jkr_force_from_overlap(
                             pen, R_local, E_star_gw, W_wall)
                         F[i, axis] += sign * Fw
+                        if getattr(p, 'contact_wall_torque', False) and not gs.is_circle:
+                            # V3.4: see the 2D twin above.
+                            _, _, _, wcx, wcy, wcz = se3d_wall_core(
+                                gs.x[i], gs.y[i], gs.z[i], gs.a[i], gs.b[i], gs.c[i],
+                                gs.n1[i], gs.n2[i], gs.quat[i], wall_pos, axis, sign)
+                            rw = np.array([wcx - gs.x[i], wcy - gs.y[i], wcz - gs.z[i]])
+                            Fw_vec = np.zeros(3)
+                            Fw_vec[axis] = sign * Fw
+                            torques[i] += np.cross(rw, Fw_vec)
                         wall_d = abs(coords[axis] - wall_pos)
                         # Clip normal points TOWARD wall (opposite of force sign)
                         n3 = [0.0, 0.0, 0.0]; n3[axis] = -float(sign)
@@ -2053,6 +2074,15 @@ def compute_forces_3d(gs: GranuleSystem, p: Params, rng):
                         Fw, a_w = jkr_force_from_overlap(pen_c, R_loc_c, E_star_gw, W_wall)
                         F[i, 0] -= Fw * ux
                         F[i, 1] -= Fw * uy
+                        if getattr(p, 'contact_wall_torque', False) and not gs.is_circle:
+                            # V3.4: see the axis-wall branch above.
+                            _, _, _, wcx, wcy, wcz = se3d_wall_plane_core(
+                                gs.x[i], gs.y[i], gs.z[i], gs.a[i], gs.b[i], gs.c[i],
+                                gs.n1[i], gs.n2[i], gs.quat[i],
+                                _geom.cx + _geom.R_cyl * ux, _geom.cy + _geom.R_cyl * uy,
+                                gs.z[i], -ux, -uy, 0.0)
+                            rw = np.array([wcx - gs.x[i], wcy - gs.y[i], wcz - gs.z[i]])
+                            torques[i] += np.cross(rw, np.array([-Fw * ux, -Fw * uy, 0.0]))
                         gs.contact_clips[i].append((ux, uy, 0.0, _geom.R_cyl - rho))
 
     # MC-DEM multi-contact stiffening correction (Giannis et al. 2021)

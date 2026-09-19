@@ -245,6 +245,31 @@ it replaces. It also pins the property that makes a wall exact rather than merel
 The retired samplers survive as `*_cn`, called by nothing, so both measurements above stay
 reproducible from the suite.
 
+### `contact.wall_torque` (new, default false)
+
+The wall force has always been applied at the granule CENTRE, discarding the lever arm.
+Now that the solver returns the contact point, `r x F` costs nothing -- but it is **new
+physics**, not a correction to existing physics, so it is opt-in. A circle or sphere touches
+a wall on its own centre line, so its wall torque is identically zero and both kernels skip
+the branch entirely when `is_circle`; only shapes are affected.
+
+It is not a small term. On a shaped bed pressed against a wall the wall torque reaches
+**1.25e5 nN um against a largest pair torque of 5.97e4** -- twice the leading granule-granule
+contribution (that configuration is deliberately pressed hard, so read it as an order of
+magnitude, not a typical value). Turning it on can therefore change a walled run materially,
+which is exactly why it defaults off.
+
+The implementation is the conservative torque, and the test says so rather than assuming it:
+`pen = h(w; theta) - sign*(c - wall)` and the repulsive magnitude is `E'(pen) = Fw`, so the
+generalised force conjugate to orientation is `-Fw * dh/dtheta`. That is finite-differenced
+from the support function alone and agrees with the `r x F` the solver computes to a median
+1e-5 relative. The physical claim is tested directly too: a near-square granule tilted against
+a flat wall feels a torque toward face-on, i.e. toward the orientation minimising its extent
+along the wall normal.
+
+Both twins agree exactly (`max |dtau| = 0.0`), because both call the same wall core, and the
+flag provably moves no force (`assert_array_equal` on `F`).
+
 ---
 
 ## [V3.3] - 2026-09-19

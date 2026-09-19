@@ -325,6 +325,16 @@ percolation).
   median**, and reported the normal **backwards for ~50 % of 3D shaped contacts** (force is
   applied as `−F·n`, so that was attraction). `contact.curvature_R_cap` defaults to 2.0
   because the new `R_eff` at a flat face is the true ~1e15 µm; it cannot bind for spheres.
+- **Wall contact** (V3.4): a wall is a half-space, so `penetration = h(−ŵ) − (c−q)·ŵ` and
+  the contact point `= c + ∇h(−ŵ)` are exact in ONE support evaluation. This replaced six
+  brute-force samplers (a 64-point ring in 2D, four 20×20 (η,ω) grids in 3D) that
+  under-reported penetration by a median 0.118 µm — the size of the overlaps being
+  resolved — and the hardcoded `R_local = 0.5·r_bound`, which is exactly 2× low for a
+  sphere and ranges 0.51–11.2× across blocky orientations. **No stored fixture exercises
+  the shaped wall path**, so `tests/test_wall_contact.py` is its only guard.
+  `contact.wall_torque` (default false) applies `r × F` at that contact point; it is new
+  physics, it is zero for spheres by construction, and it can exceed the largest pair
+  torque on a bed pressed against a wall.
 - **Transport metrics** (V1.4+): Kozeny-Carman permeability, Darcy flow, RCP fraction,
   compaction ratio, Darcy number. See `kozeny_carman_permeability()`, `rcp_fraction_superellipsoid()`.
 - **Rotational dynamics**: Overdamped rotation from off-centre contact torques.

@@ -19,7 +19,8 @@ from gels.kernels import njit, prange
 from gels.kernels.bridging import bridging_pass
 from gels.kernels.contact2d import _warn_clip_overflow, mc_dem_pairs
 from gels.kernels.contacts import ContactSoA, add_active_noise, alloc_records, clips_to_lists
-from gels.kernels.geometry3d import se3d_contact_k, sph3d_contact_k, wall3d_k, wall3d_plane_k
+from gels.kernels.geometry3d import (se3d_contact_k, sph3d_contact_k, wall3d_k,
+                                     wall3d_plane_k, wall3d_plane_point_k, wall3d_point_k)
 from gels.kernels.neighbors import csr_from_pairs, half_pairs, neighbor_backend
 
 
@@ -137,7 +138,8 @@ def gather_3d(pos, r, a, b, c, n1, n2, quat, r_bound, sid, is_sphere, periodic, 
               shape_code, R_cyl, cxc, cyc, top_free,
               off, nbr_pair, nbr_side,
               c_hit, c_overlap, c_nx, c_ny, c_nz, c_cx, c_cy, c_cz, c_Fn, c_a, c_Ftx, c_Fty, c_Ftz, dF,
-              wall_W, wall_Estar, F, torques, clip_n, clip_d, clip_cnt, clip_over):
+              wall_W, wall_Estar, F, torques, clip_n, clip_d, clip_cnt, clip_over,
+              wall_torque):
     N = pos.shape[0]
     max_clips = clip_d.shape[1]
     for i in prange(N):
@@ -245,17 +247,43 @@ def gather_3d(pos, r, a, b, c, n1, n2, quat, r_bound, sid, is_sphere, periodic, 
                         pen = (coord + ri) - wall_pos
                     ok = pen > 0
                     R_local = ri
+                    wcx = 0.0
+                    wcy = 0.0
+                    wcz = 0.0
+                elif wall_torque:
+                    # V3.4: the support-function wall solver returns the contact
+                    # point, so the lever arm is free. A sphere's wall contact is
+                    # on the centre line and its torque is identically zero.
+                    ok, pen, R_local, wcx, wcy, wcz = wall3d_point_k(
+                        pos[i, 0], pos[i, 1], pos[i, 2], a[i], b[i], c[i],
+                        n1[i], n2[i], quat[i], wall_pos, axis, sign)
                 else:
                     ok, pen, R_local = wall3d_k(pos[i, 0], pos[i, 1], pos[i, 2], a[i], b[i], c[i],
                                                 n1[i], n2[i], quat[i], r_bound[i], wall_pos, axis, sign)
+                    wcx = 0.0
+                    wcy = 0.0
+                    wcz = 0.0
                 if ok:
                     Fw, a_w = jkr_force_from_overlap(pen, R_local, E_star_gw, W_wall)
+                    Fwx = 0.0
+                    Fwy = 0.0
+                    Fwz = 0.0
                     if axis == 0:
                         fx += sign * Fw
+                        Fwx = sign * Fw
                     elif axis == 1:
                         fy += sign * Fw
+                        Fwy = sign * Fw
                     else:
                         fz += sign * Fw
+                        Fwz = sign * Fw
+                    if wall_torque:
+                        rwx = wcx - pos[i, 0]
+                        rwy = wcy - pos[i, 1]
+                        rwz = wcz - pos[i, 2]
+                        tx += rwy * Fwz - rwz * Fwy
+                        ty += rwz * Fwx - rwx * Fwz
+                        tz += rwx * Fwy - rwy * Fwx
                     if nclip < max_clips:
                         clip_n[i, nclip, 0] = 0.0
                         clip_n[i, nclip, 1] = 0.0
@@ -277,14 +305,33 @@ def gather_3d(pos, r, a, b, c, n1, n2, quat, r_bound, sid, is_sphere, periodic, 
                         pen_c = r[i] + rho - R_cyl
                         ok_c = pen_c > 0
                         R_loc_c = r[i]
+                        wccx = 0.0
+                        wccy = 0.0
+                        wccz = 0.0
+                    elif wall_torque:
+                        ok_c, pen_c, R_loc_c, wccx, wccy, wccz = wall3d_plane_point_k(
+                            pos[i, 0], pos[i, 1], pos[i, 2], a[i], b[i], c[i], n1[i], n2[i], quat[i],
+                            cxc + R_cyl * ux, cyc + R_cyl * uy, pos[i, 2], -ux, -uy, 0.0)
                     else:
                         ok_c, pen_c, R_loc_c = wall3d_plane_k(
                             pos[i, 0], pos[i, 1], pos[i, 2], a[i], b[i], c[i], n1[i], n2[i], quat[i],
                             r_bound[i], cxc + R_cyl * ux, cyc + R_cyl * uy, pos[i, 2], -ux, -uy, 0.0)
+                        wccx = 0.0
+                        wccy = 0.0
+                        wccz = 0.0
                     if ok_c:
                         Fw, a_w = jkr_force_from_overlap(pen_c, R_loc_c, E_star_gw, W_wall)
                         fx -= Fw * ux
                         fy -= Fw * uy
+                        if wall_torque:
+                            rwx = wccx - pos[i, 0]
+                            rwy = wccy - pos[i, 1]
+                            rwz = wccz - pos[i, 2]
+                            Fwx = -Fw * ux
+                            Fwy = -Fw * uy
+                            tx += rwy * 0.0 - rwz * Fwy
+                            ty += rwz * Fwx - rwx * 0.0
+                            tz += rwx * Fwy - rwy * Fwx
                         if nclip < max_clips:
                             clip_n[i, nclip, 0] = ux
                             clip_n[i, nclip, 1] = uy
@@ -374,7 +421,8 @@ def compute_forces_3d(gs, p, rng):
               off, nbr_pair, nbr_side,
               rec['hit'], rec['overlap'], rec['nx'], rec['ny'], rec['nz'], rec['cx'], rec['cy'], rec['cz'],
               rec['Fn'], rec['a'], rec['Ftx'], rec['Fty'], rec['Ftz'], dF,
-              gs.wall_W, gs.wall_Estar, F, torques, clip_n, clip_d, clip_cnt, clip_over)
+              gs.wall_W, gs.wall_Estar, F, torques, clip_n, clip_d, clip_cnt, clip_over,
+              bool(getattr(p, 'contact_wall_torque', False)) and not bool(gs.is_circle))
     gs.clip_arrays = (clip_n, clip_d, clip_cnt)     # consumed by the compiled renderer
     _warn_clip_overflow(clip_over, max_clips)
 

@@ -229,6 +229,11 @@ class Params:
     packing_shape_contact: bool = False    # V3.2: shape-aware settle (true r_bound + directional overlap + rotation)
     packing_shape_margin: float = 0.0      # inflate every directional radius by (1 + margin); blunt, see the plan
     contact_shape_dynamics: bool = False   # V3.2: shape-aware overlap projection, wall clamp and bed surface
+    contact_wall_torque: bool = False      # V3.4: apply r x F at the wall contact point.
+                                           # Free now that the support function returns the
+                                           # contact point; OFF by default because it is new
+                                           # physics (a shaped granule can tip flat against a
+                                           # wall), not a correction to existing physics.
     curvature_R_cap: float = 2.0           # V3.4: cap R_eff at cap*min(r_i,r_j) (0 = off). Was 0.0
                                            # in V3.2-3.3. Cannot bind for spheres --
                                            # R_eff = r_i r_j/(r_i+r_j) <= min(r_i,r_j) < 2 min --
