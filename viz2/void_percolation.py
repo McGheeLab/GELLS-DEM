@@ -29,42 +29,14 @@ from viz2.common import (
 # ======================================================================
 
 def container_mask(phi_v, p, snap=None):
-    """True where a voxel is inside the container and below the free surface (V3.1).
+    """True where a voxel is inside the container and below the free surface.
 
-    Without this, everything outside a cylindrical wall or above an open top
-    reads as void: one cluster touching every face, so percolation is trivially
-    true and the cluster-size distribution is meaningless. Returns None for a
-    closed box, where the whole grid is the container and the V3.0 behaviour
-    is exactly right.
+    Thin delegation to ``gels.engine.container_voxel_mask`` (V3.3), which is
+    where this lives now so the compiled metrics path can use it too. Returns
+    ``None`` for a closed box, where the whole grid is the container.
     """
-    shape_code = 1 if (getattr(p, 'boundary_shape', 'box') == 'cylinder'
-                       and getattr(p, 'mode', '2D') == '3D') else 0
-    top_free = getattr(p, 'boundary_top', 'wall') == 'free'
-    if shape_code == 0 and not top_free:
-        return None
-    ndim = phi_v.ndim
-    shape = phi_v.shape
-    # voxel centres, in the engine's convention (axis 0 = x)
-    axes = [(np.arange(shape[k]) + 0.5) * (L / shape[k])
-            for k, L in enumerate((p.Lx, p.Ly, p.Lz)[:ndim])]
-    grids = np.meshgrid(*axes, indexing='ij')
-    mask = np.ones(shape, dtype=bool)
-    if shape_code == 1 and ndim == 3:
-        cx, cy = 0.5 * p.Lx, 0.5 * p.Ly
-        R = 0.5 * min(p.Lx, p.Ly)
-        mask &= (grids[0] - cx) ** 2 + (grids[1] - cy) ** 2 <= R ** 2
-    if top_free:
-        up = grids[2] if ndim == 3 else grids[1]
-        h = None
-        if snap is not None:
-            r = np.asarray(snap.get('r', []), dtype=float)
-            if r.size:
-                z = np.asarray(snap.get('z' if ndim == 3 else 'y'), dtype=float)
-                h = float(np.percentile(z + r, 99))
-        if h is None:
-            h = float(p.Lz if ndim == 3 else p.Ly)
-        mask &= up <= h
-    return mask
+    from gels.engine import container_voxel_mask
+    return container_voxel_mask(p, phi_v.shape, snap=snap)
 
 
 def compute_void_clusters(phi_v, threshold=0.3, mask=None):

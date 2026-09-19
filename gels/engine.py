@@ -3525,6 +3525,48 @@ def boundary_geometry(p, mode=None):
                         float(getattr(p, 'boundary_functionalization', 0.0)))
 
 
+def container_voxel_mask(p, shape, snap=None, mode=None):
+    """True where a voxel is inside the container and below the free surface (V3.3).
+
+    Promoted from ``viz2.void_percolation.container_mask`` so the compiled
+    metrics path can reach it -- ``gels.kernels`` cannot import from ``viz2``.
+    Behaviour is unchanged.
+
+    Without this, everything outside a cylindrical wall or above an open top
+    reads as void: one cluster touching every face, so percolation is trivially
+    true and the cluster-size distribution is meaningless. Returns ``None`` for
+    a closed box, where the whole grid is the container and the V3.0 behaviour
+    is exactly right -- callers must treat ``None`` as "no mask", not as "empty".
+
+    ``shape`` is the grid shape (axis 0 = x, the engine convention). ``snap``,
+    when given, supplies ``r`` and ``z``/``y`` so a free surface is cut at the
+    99th percentile of ``z + r`` rather than at the container height.
+    """
+    geom = boundary_geometry(p, mode)
+    if geom.shape_code == 0 and not geom.top_free:
+        return None
+    ndim = len(shape)
+    axes = [(np.arange(shape[k]) + 0.5) * (L / shape[k])
+            for k, L in enumerate((p.Lx, p.Ly, p.Lz)[:ndim])]
+    grids = np.meshgrid(*axes, indexing='ij')
+    mask = np.ones(tuple(shape), dtype=bool)
+    if geom.shape_code == 1 and ndim == 3:
+        mask &= ((grids[0] - geom.cx) ** 2 + (grids[1] - geom.cy) ** 2
+                 <= geom.R_cyl ** 2)
+    if geom.top_free:
+        up = grids[2] if ndim == 3 else grids[1]
+        h = None
+        if snap is not None:
+            r = np.asarray(snap.get('r', []), dtype=float)
+            if r.size:
+                z = np.asarray(snap.get('z' if ndim == 3 else 'y'), dtype=float)
+                h = float(np.percentile(z + r, 99))
+        if h is None:
+            h = float(p.Lz if ndim == 3 else p.Ly)
+        mask &= up <= h
+    return mask
+
+
 def domain_volume(p, mode=None):
     """Container volume (um^3; area in 2D). Box: the V2.7 expression verbatim."""
     geom = boundary_geometry(p, mode)

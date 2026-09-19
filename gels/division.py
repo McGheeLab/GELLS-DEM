@@ -241,8 +241,13 @@ def _draw_cycle_times(gs, p, rng, idx):
 def _daughter_angles(gs, parents, dest):
     """Surface coordinates of the daughters: beside the parent, or facing it on the target."""
     r_dest = np.maximum(gs.r[dest], 1e-9)
-    offset = np.minimum(np.pi / 2.0, gs.cell_diameter_offset if hasattr(gs, 'cell_diameter_offset')
-                        else 20.0 / r_dest)
+    # One cell-diameter of arc beside the parent. The 20.0 um is the default
+    # cell_diameter hard-coded: this helper has no `p`, so it cannot read
+    # p.cell_diameter without a signature change. Correct for the default and
+    # wrong for any other cell size -- worth fixing, but it is a behaviour
+    # change, so not here. (V3.3: dropped a `gs.cell_diameter_offset` hasattr
+    # branch that was dead -- the attribute is never assigned anywhere.)
+    offset = np.minimum(np.pi / 2.0, 20.0 / r_dest)
     same = dest == gs.cell_granule_id[parents]
     theta = np.where(same, gs.cell_theta_local[parents] + offset, 0.0)
     eta = np.where(same, gs.cell_eta_local[parents], 0.0)
