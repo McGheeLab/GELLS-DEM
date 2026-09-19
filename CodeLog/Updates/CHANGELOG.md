@@ -108,6 +108,60 @@ sensing) dominates**, so the candidate list is already ~50 neighbours per granul
 optimisation the data points at is splitting the short contact-range list from the long
 sensing-range one -- noted, not done.
 
+### Phase 2 -- structural metrics that measure structure, not the renderer
+
+Three measures that CLAUDE.md already warned were untrustworthy now have halo-free
+counterparts. All are computed by ONE shared module called from both metrics twins, so
+they agree by construction rather than by matching arithmetic.
+
+**Percolation on the real contact graph.** `func_lf` thresholds the rendered tanh field at
+`mean + 0.3*std` and runs `ndimage.label`: it joins granules separated by up to
+2*`interface_width` of nothing, and its value moves with `Ngrid`. The new `gran_*` block
+runs union-find on granules that actually touch, using the engine's own `overlap > 0`
+predicate (`contact_stats_k` gained an output array; the reference records the same flag),
+so there is no second definition of "touching" and no tolerance to tune. On a settled 2D
+packing `func_lf = 0.899` against `gran_lf_func = 0.750` **in five separate clusters** --
+the field measure both overstates continuity and hides the fragmentation. `func_lf` is
+untouched; the disagreement is the deliverable.
+
+Periodic boxes get the Newman-Ziff wrapping test; walled and cylindrical ones get a
+floor-to-**bed-surface** spanning test, because nothing reaches a lid that is not there.
+
+**Laguerre (radical) local packing fraction** (`output.metrics_laguerre`). Each granule's
+own share of space from an exact partition, weighting every bisector by radius as a
+polydisperse pack requires. Measured inflation of the field measure: **1.24x in 3D, 1.38x
+in 2D**. More sharply, the field-based `compaction_ratio` reads **1.024 and 1.302** -- denser
+than random close packing, which is impossible for a freshly settled bed; `compaction_func`
+gives 0.803.
+
+Three things the port needed that robotsim's version does not have:
+
+1. a **verified** neighbour cutoff -- a fixed `6*r_max` gave cells totalling **4.8x the box
+   volume**, because the cutoff is unrelated to the local spacing. The cell is now rebuilt
+   with a grown cutoff until no granule outside it could have clipped it;
+2. a **Chebyshev-centre fallback** -- a granule's centre is not always inside its own power
+   cell (when a larger neighbour overlaps it deeply), though the cell is still non-empty;
+3. **free-top handling** -- a loose lid bounds the tessellation and any cell touching it is
+   excluded, with `laguerre_valid_frac` reported so a mean is never quoted without its
+   denominator.
+
+**Katz-Thompson permeability** (`output.metrics_pore_field`). Kozeny-Carman is blind to
+channelization. Two fields with identical porosity, one dispersed into narrow pores and one
+coarsened into a wide channel:
+
+| | porosity | l_c | Katz-Thompson | Kozeny-Carman |
+|---|---|---|---|---|
+| dispersed | 0.111 | 1.00 | 0.0020 | 0.0039 |
+| coarsened | 0.111 | 10.00 | 0.1967 | 0.0039 |
+| **ratio** | 1.0x | | **100x** | **1.0x** |
+
+The signed-distance field was already half-built in both twins and discarded --
+`tree.query(voxel_pts)` returns `(distance, index)` and only the index was kept.
+`K_kc_analytic` states Kozeny-Carman on the same `eps` and `S_v`, so the only difference
+between the two is the channelization term. One correction to the source: the lateral
+`np.roll` in the tortuosity BFS is applied only under periodic boundaries -- a wall is not
+a mirror, and rolling across one invents paths and deflates the tortuosity.
+
 ### Testing -- the V2.7 fixture gate is platform-bound
 
 `test_legacy_identity` failed all four reference runs on macOS **before any V3.3 change**.
