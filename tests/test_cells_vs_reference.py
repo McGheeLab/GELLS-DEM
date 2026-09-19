@@ -86,8 +86,9 @@ def _assert_cells_equal(tc, ak, ar, exact=('cell_state', 'cell_bridge_target', '
 @unittest.skipUnless(HAS_NUMBA, "numba not installed")
 class TestDeterministicParts(unittest.TestCase):
 
-    def _check_state_machine(self, mode, periodic=False, seed=1):
-        p_py = _params(mode, periodic, backend='python')
+    def _check_state_machine(self, mode, periodic=False, seed=1, foothold=None):
+        kw = {} if foothold is None else dict(cell_capacity_foothold=foothold)
+        p_py = _params(mode, periodic, backend='python', **kw)
         gs, t = _prepared(p_py, seed)
         self.assertGreater(int(np.sum(gs.cell_state == BRIDGING)) + int(np.sum(gs.cell_state == MIGRATING)), 0,
                            "prepared system has no bridging/migrating cells")
@@ -108,6 +109,28 @@ class TestDeterministicParts(unittest.TestCase):
 
     def test_state_machine_3d(self):
         self._check_state_machine('3D', seed=2)
+
+    # ---- V3.3: cell_capacity_foothold parity (regression) ----------------
+    # The compiled _capacity had no foothold argument, so with
+    # cell_capacity_foothold < 1 the two backends computed different
+    # capacities (64 vs 16 at r=40 um, 3D, foothold=0.25 -- the
+    # fibroblast_realistic default). Capacity sets the overcrowding and
+    # division thresholds, so the backends disagreed on cell fate.
+
+    def test_capacity_leaf_matches_reference_under_foothold(self):
+        from gels.engine import cells_from_surface_coverage
+        for foothold in (1.0, 0.5, 0.25, 0.1):
+            for R in (10.0, 20.0, 40.0):
+                for is_3d_like, mode in ((True, '3D'), (False, '2D')):
+                    want = cells_from_surface_coverage(
+                        R, 20.0, 5.0, 1.0, mode, foothold)
+                    got = cells._capacity(R, 1.0, 1.0, 20.0, 5.0, 1.0, 0.6,
+                                          is_3d_like, foothold)
+                    self.assertEqual(got, want,
+                                     f"foothold={foothold} R={R} mode={mode}")
+
+    def test_state_machine_3d_with_foothold(self):
+        self._check_state_machine('3D', seed=2, foothold=0.25)
 
     def _check_service(self, mode, periodic=False, seed=1):
         p_py = _params(mode, periodic, backend='python')

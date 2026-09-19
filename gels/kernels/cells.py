@@ -121,10 +121,21 @@ def _proj_area(spread_frac, cell_d, cell_h):
 
 
 @njit(cache=True)
-def _capacity(R, activity, spread_frac, cell_d, cell_h, cov_surface, cov, is_3d_like):
-    """``engine.cell_capacity``: monolayer capacity scaled by the coverage gain."""
+def _capacity(R, activity, spread_frac, cell_d, cell_h, cov_surface, cov, is_3d_like,
+              foothold):
+    """``engine.cell_capacity``: monolayer capacity scaled by the coverage gain.
+
+    ``foothold`` mirrors ``engine.cells_from_surface_coverage``: the fraction of
+    the fully-spread footprint a cell needs to hold a place, floored at the
+    ROUNDED cell's cross-section. V3.3 bug fix -- this argument was missing, so
+    with ``cell_capacity_foothold < 1`` the compiled path computed a different
+    capacity from the reference (4x at the ``fibroblast_realistic`` default of
+    0.25), and capacity sets the overcrowding and division thresholds.
+    """
     if cov_surface > 0:
         A_spread = _proj_area(1.0, cell_d, cell_h)
+        if foothold < 1.0:
+            A_spread = max(_proj_area(0.0, cell_d, cell_h), foothold * A_spread)
         if is_3d_like:
             A_surface = 4.0 * np.pi * R ** 2
         else:
@@ -195,7 +206,7 @@ def _min_image(d, L):
 def aggregates_k(t, adhesive, n_cells, E_gran, nu_gran, r, activity,
                  n_attached, spread, fa, n_over,
                  a_cell, k_opt, t_spread, t_onset, t_half, fa_rate, cell_d, cell_h,
-                 cov_surface, cov, is_3d_like, clock_offset):
+                 cov_surface, cov, is_3d_like, clock_offset, foothold):
     N = adhesive.shape[0]
     for i in prange(N):
         if not adhesive[i]:
@@ -229,7 +240,8 @@ def aggregates_k(t, adhesive, n_cells, E_gran, nu_gran, r, activity,
         else:
             fa[i] = 0.0
 
-        cap = _capacity(r[i], activity[i], spread[i], cell_d, cell_h, cov_surface, cov, is_3d_like)
+        cap = _capacity(r[i], activity[i], spread[i], cell_d, cell_h, cov_surface, cov, is_3d_like,
+                        foothold)
         n_over[i] = max(0.0, n_attached[i] - cap)
 
 
@@ -243,7 +255,7 @@ def cells_update_k(seed, do_walk, dt, is_3d, periodic, Lx, Ly, Lz,
                    activity,
                    cell_state, cell_target, cell_bridge_age, cell_align, cell_locked, cell_fx, cell_fy, cell_fz,
                    cell_area, cell_over_age, cell_theta, cell_eta, cell_omega,
-                   cell_d, cell_h, cov_surface, cov, is_3d_like, stacking_max, over_sen_time,
+                   cell_d, cell_h, cov_surface, cov, is_3d_like, foothold, stacking_max, over_sen_time,
                    align_rate, align_min, lock_thr0, lock_scales, law, rule, gamma, kappa,
                    sen_time, sense, commit_angle, mig_speed, directed_mult):
     N = adhesive.shape[0]
@@ -261,7 +273,8 @@ def cells_update_k(seed, do_walk, dt, is_3d, periodic, Lx, Ly, Lz,
         sf = spread[i]
         fa_i = fa[i]
         A_cell = _proj_area(sf, cell_d, cell_h)
-        cap = _capacity(r[i], activity[i], sf, cell_d, cell_h, cov_surface, cov, is_3d_like)
+        cap = _capacity(r[i], activity[i], sf, cell_d, cell_h, cov_surface, cov, is_3d_like,
+                        foothold)
         effective_cap = int(round(cap * stacking_max))
 
         for k in range(n_total):
@@ -783,12 +796,13 @@ def update_cell_state_k(gs, p, t, rng=None):
     a_cell = p.cell_diameter / 2.0
     k_opt = p.n_clutches * p.k_clutch
     is_3d_like = _is_3d_like(p)
+    foothold = float(getattr(p, 'cell_capacity_foothold', 1.0))
     aggregates_k(float(t), gs.adhesive_mask, gs.n_cells, gs.E_gran, gs.nu_gran, gs.r, gs.activity,
                  gs.n_attached, gs.spread_fraction, gs.fa_maturity, gs.n_overcrowded,
                  float(a_cell), float(k_opt), float(p.t_spread_duration), float(p.t_attach_onset),
                  float(p.t_attach_half), float(p.fa_maturation_rate), float(p.cell_diameter),
                  float(p.cell_height_spread), float(capacity_coverage(p)), float(p.cell_coverage),
-                 bool(is_3d_like), gs.cell_clock_offset)
+                 bool(is_3d_like), gs.cell_clock_offset, foothold)
     # V3.1: cell division (before the per-cell pass; the cell arrays may grow)
     # V3.2: the cycle clock has to be advanced first -- nothing did that before.
     from gels.division import age_cells, divide_cells
@@ -809,7 +823,7 @@ def update_cell_state_k(gs, p, t, rng=None):
                    gs.cell_bridge_locked, gs.cell_fx, gs.cell_fy, gs.cell_fz, gs.cell_contact_area,
                    gs.cell_overcrowd_age, gs.cell_theta_local, gs.cell_eta_local, gs.cell_omega_local,
                    float(p.cell_diameter), float(p.cell_height_spread), float(capacity_coverage(p)),
-                   float(p.cell_coverage), bool(is_3d_like), float(p.cell_stacking_max),
+                   float(p.cell_coverage), bool(is_3d_like), foothold, float(p.cell_stacking_max),
                    float(p.overcrowd_senescence_time), float(p.bridge_alignment_rate),
                    float(p.bridge_alignment_min), float(p.bridge_lock_force_threshold),
                    bool(p.bridge_lock_scales_with_ligand), law, rule, float(p.traction_exponent), float(kappa),
