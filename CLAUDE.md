@@ -395,6 +395,15 @@ percolation).
   the relaxation. `relax_force_tol` is below 1 on purpose — an unsupported granule has
   `|F|` equal to exactly its weight. Relaxing a no-gravity, no-cell bed lets it **expand**,
   because nothing loads it.
+- **The settle's overlap tolerance is not what stops it** (measured V3.5). Three negative
+  results, all pinned as tests: the directional-radius proxy is only 1.4× out (0.98 vs
+  1.40 µm), so measuring it better buys nothing; `0.05 × mean_r` is 28× looser than force
+  balance needs, which is 145× in force since `F ~ δ^1.5`, so a length tolerance cannot be
+  chosen without knowing `E*`, `R*` and the load; and in 2D the post-relax loop **exits on
+  its 1000-step cap**, never on the tolerance, so tightening it changes nothing
+  bit-identically. `packing.overlap_tol_model = 'elastic'` derives the length from the
+  force anyway and is worth having in 3D only (3.56× → 1.05× combined with FIRE). Both
+  twins now warn when the step budget, not the tolerance, ended the settle.
 - **The wall clamp is 0.5 µm off the wall** (pre-existing; measured V3.5).
   `apply_position_bounds` clips to `rb + 0.5`, so a granule resting on the floor is never
   in wall contact — the JKR wall force sees a positive gap — and its net force stays

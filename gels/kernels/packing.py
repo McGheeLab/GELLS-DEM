@@ -681,7 +681,12 @@ def _settle(gs, p, dim):
             print(f"    step {step}/{n_inflate}: α={alpha:.3f}, "
                   f"max_overlap={max_overlap:.1f} µm, Z={Z:.1f}")
 
-    overlap_tol = 0.05 * mean_r_target
+    # V3.5: `packing.overlap_tol_model: elastic` replaces this with the penetration at
+    # which the DYNAMICS' contact law carries the driving load. The 0.05*r rule is not a
+    # mismeasurement, it is the wrong dimension -- 28x too loose in length, 145x in force
+    # on a shaped gravity bed. Derived once in `settle_overlap_tolerance` and handed over
+    # on `gs`, so the two twins cannot disagree about it.
+    overlap_tol = float(getattr(gs, '_overlap_tol', 0.0)) or 0.05 * mean_r_target
     max_post_relax = 3000 if use_gravity else 1000
     max_rb = float(np.max(gs.r_bound[:N]))
     extra = 0
@@ -711,9 +716,13 @@ def _settle(gs, p, dim):
                                        periodic, Lx, Ly, Lz, 0.0, cx_dom, cy_dom, cz_dom, k_rep, dt_settle, v_cap,
                                        g_k, gx, gy, gz, gw, shape_code, R_cyl, cxc, cyc, mobile)
     else:
-        if dim == 3 or use_gravity:
-            print(f"    WARNING: post-relax hit {max_post_relax} steps, "
-                  f"max_overlap={max_overlap:.1f} µm (tol={overlap_tol:.1f})")
+        # V3.5: warn in EVERY geometry, not just 3D/gravity. A 2D box packing
+        # runs this loop to its cap and never meets its own tolerance -- and
+        # said nothing about it, so the tolerance looked like the thing that
+        # stopped the settle when the step budget was.
+        print(f"    WARNING: post-relax hit {max_post_relax} steps without reaching "
+              f"the tolerance: max_overlap={max_overlap:.3g} µm (tol={overlap_tol:.3g}). "
+              f"The step budget stopped the settle, not force balance.")
     if dim == 3 and extra > 0 and max_overlap < overlap_tol:
         print(f"    post-relax: {extra} extra steps, "
               f"max_overlap={max_overlap:.1f} µm (tol={overlap_tol:.1f})")

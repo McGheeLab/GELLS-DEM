@@ -182,6 +182,46 @@ the report says so rather than leaving it to be guessed.
 
 New file `tests/test_fire_relax.py` (16 tests). Suite: 459 green, 2 skipped.
 
+### Phase 3 - two negative results about the settle's tolerance
+
+The V3.3 plan's first item was "stop the settle on the **true** penetration instead of the
+directional-radius proxy". It was investigated and **it is not the fix**, for two separate
+reasons. Both are pinned as tests, because the reasons are what justify doing the work in
+FIRE instead.
+
+**1. The proxy is barely wrong.** On the 199-granule shaped gravity bed the settle's rule
+reports **0.975 um** where the true MTD penetration is **1.40 um** -- a factor of 1.4,
+against a handoff measured at 346x. Measuring it perfectly buys almost nothing.
+
+**2. The criterion is the wrong dimension.** Force balance for that bed needs a
+penetration of **0.035 um** while `0.05 * mean_r` asks for 0.975 um: **28x too loose in
+length**, and because `F ~ delta^1.5`, **145x in force**. A length tolerance cannot be
+picked correctly without knowing `E*`, `R*` and the load -- which is the argument for
+expressing it as a force, i.e. for Phase 2.
+
+`packing.overlap_tol_model = 'elastic'` does derive the length from the force, by inverting
+Hertz at `relax_force_tol * dynamics_load_scale` -- the same move
+`contact.overlap_model: elastic` makes for `max_overlap_frac` (V3.2). It is free (no force
+evaluation) and it is kept, but **only because of what it does in 3D**:
+
+| bed | tol `fixed` | tol `elastic` |
+|---|---|---|
+| 3D shaped gravity bed, relax `none` | 131x | 108x |
+| 3D shaped gravity bed, relax `fire` | 3.56x | **1.05x** |
+| 2D shaped gravity bed, either | 346x | 346x (bit-identical) |
+
+**3. The third negative result, and the most surprising: the 2D settle never stops on its
+tolerance at all.** Tightening it changes the bed *bit-identically* nothing, because the
+post-relax loop already runs to its 1000-step cap and exits on the **step budget**. It
+said nothing about that -- the warning was guarded by `if dim == 3 or use_gravity`, so a 2D
+box packing that never met its own tolerance was silent. Both twins now warn in every
+geometry and name which of the two stopped the settle. Diagnostic only; no behaviour
+changes.
+
+Derivation lives in `settle_overlap_tolerance` in `engine.py` and is handed to both twins
+on `gs._overlap_tol`, so there is exactly one implementation and the twins cannot disagree.
+Default stays `fixed`.
+
 #### Bug Fixes
 
 * **`dynamics.gradient_flow: off` in a YAML setup arrived as `False`.** YAML 1.1 reads

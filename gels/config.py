@@ -295,6 +295,7 @@ class Packing:
     consolidation: str = _P.packing_consolidation   # centre | gravity | none | auto
     shape_contact: bool = _P.packing_shape_contact   # V3.2: shape-aware settle (needs shape_enabled)
     shape_margin: float = _P.packing_shape_margin
+    overlap_tol_model: str = _P.packing_overlap_tol_model   # V3.5: fixed | elastic
     relax: str = _P.packing_relax                    # V3.5: none | fire
     relax_force_tol: float = _P.packing_relax_force_tol
 
@@ -513,6 +514,7 @@ FLAT_MAP = [
     ('packing.shape_enabled', 'shape_enabled'),
     ('packing.shape_contact', 'packing_shape_contact'),
     ('packing.shape_margin', 'packing_shape_margin'),
+    ('packing.overlap_tol_model', 'packing_overlap_tol_model'),
     ('packing.relax', 'packing_relax'),
     ('packing.relax_force_tol', 'packing_relax_force_tol'),
     ('packing.consolidation', 'packing_consolidation'),
@@ -1019,6 +1021,8 @@ def validate(setup: Setup) -> None:
         errs.append("contact.overlap_model must be 'fixed' or 'elastic'")
     if setup.dynamics.gradient_flow not in ('off', 'monitor', 'damped'):
         errs.append("dynamics.gradient_flow must be 'off', 'monitor' or 'damped'")
+    if setup.packing.overlap_tol_model not in ('fixed', 'elastic'):
+        errs.append("packing.overlap_tol_model must be 'fixed' or 'elastic'")
     if setup.packing.relax not in ('none', 'fire'):
         errs.append("packing.relax must be 'none' or 'fire'")
     if float(setup.packing.relax_force_tol) <= 0:
@@ -1352,6 +1356,7 @@ packing:
   shape_enabled: false             # true -> superellipse/superellipsoid granules from the species moments
   shape_contact: false             # shape-aware settle: true bounding radius, directional overlap, rotation to nest
   shape_margin: 0.0                # inflate every directional radius by (1+margin) (blunt; costs reachable phi)
+  overlap_tol_model: fixed         # fixed (0.05 x mean_r) | elastic (sized from the contact law, V3.5)
   relax: none                      # none | fire -- FIRE-relax the bed under the DYNAMICS' force law (V3.5)
   relax_force_tol: 0.5             # fire: stop at max|F| <= tol x (a granule weight / one cell's traction)
   consolidation: auto              # centre (V2.7 pull toward the box centre) | gravity | none | auto (gravity if enabled, else none)

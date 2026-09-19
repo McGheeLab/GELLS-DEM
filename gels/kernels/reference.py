@@ -615,7 +615,12 @@ def _settle_packing_2d(gs, p):
                   f"max_overlap={max_overlap:.1f} µm, Z={Z:.1f}")
 
     # ── Post-inflation relaxation: resolve remaining deep overlaps ──
-    overlap_tol = 0.05 * mean_r_target
+    # V3.5: `packing.overlap_tol_model: elastic` replaces this with the penetration at
+    # which the DYNAMICS' contact law carries the driving load. The 0.05*r rule is not a
+    # mismeasurement, it is the wrong dimension -- 28x too loose in length, 145x in force
+    # on a shaped gravity bed. Derived once in `settle_overlap_tolerance` and handed over
+    # on `gs`, so the two twins cannot disagree about it.
+    overlap_tol = float(getattr(gs, '_overlap_tol', 0.0)) or 0.05 * mean_r_target
     max_post_relax = 3000 if use_gravity else 1000
     max_rb = float(np.max(gs.r_bound[:N]))
     max_disp = np.inf
@@ -666,6 +671,13 @@ def _settle_packing_2d(gs, p):
 
         max_disp = _settle_move_2d(gs, N, fx, fy, dt_settle, v_cap, periodic, Lx, Ly,
                                    mobile, any_fixed)
+    else:
+        # V3.5: a 2D packing runs this loop to its cap and never meets its own
+        # tolerance -- and said nothing, so the tolerance looked like the thing
+        # that stopped the settle when the step budget was. Diagnostic only.
+        print(f"    WARNING: post-relax hit {max_post_relax} steps without reaching "
+              f"the tolerance: max_overlap={max_overlap:.3g} um (tol={overlap_tol:.3g}). "
+              f"The step budget stopped the settle, not force balance.")
 
     # Final contact count
     pos = gs.positions()
@@ -847,7 +859,12 @@ def _settle_packing_3d(gs, p):
     # After inflation reaches α=1.0, keep relaxing until max overlap is
     # below tolerance (5% of mean radius).  This prevents granules from
     # being trapped inside each other at high packing fractions.
-    overlap_tol = 0.05 * mean_r_target
+    # V3.5: `packing.overlap_tol_model: elastic` replaces this with the penetration at
+    # which the DYNAMICS' contact law carries the driving load. The 0.05*r rule is not a
+    # mismeasurement, it is the wrong dimension -- 28x too loose in length, 145x in force
+    # on a shaped gravity bed. Derived once in `settle_overlap_tolerance` and handed over
+    # on `gs`, so the two twins cannot disagree about it.
+    overlap_tol = float(getattr(gs, '_overlap_tol', 0.0)) or 0.05 * mean_r_target
     max_post_relax = 3000 if use_gravity else 1000  # safety cap on extra iterations
     max_rb = float(np.max(gs.r_bound[:N]))
     max_disp = np.inf
@@ -908,8 +925,9 @@ def _settle_packing_3d(gs, p):
         max_disp = _settle_move_3d(gs, N, fx, fy, fz, dt_settle, v_cap, periodic, Lx, Ly, Lz,
                                    shape_code, R_cyl, cxc, cyc, mobile, any_fixed)
     else:
-        print(f"    WARNING: post-relax hit {max_post_relax} steps, "
-              f"max_overlap={max_overlap:.1f} µm (tol={overlap_tol:.1f})")
+        print(f"    WARNING: post-relax hit {max_post_relax} steps without reaching "
+              f"the tolerance: max_overlap={max_overlap:.3g} µm (tol={overlap_tol:.3g}). "
+              f"The step budget stopped the settle, not force balance.")
     if use_gravity:
         _print_settled_bed(gs, p, extra)
 

@@ -41,7 +41,7 @@ from gels.engine import (  # noqa: E402
     Params, apply_position_bounds, compute_forces, compute_forces_3d,
     constraint_clamped, dynamics_load_scale, free_force_residual,
     generate_packing, generate_packing_3d, handoff_force_balance,
-    penetration_stats,
+    penetration_stats, settle_overlap_tolerance,
 )
 
 # A shaped, gravity-consolidated bed: the configuration the V3.4 finding was
@@ -188,6 +188,53 @@ class TestTheWallClampFloor(unittest.TestCase):
         p, gs, F, _c = bed('none', boundary_mode='periodic', boundary_top='wall',
                            gravity_enabled=False, packing_consolidation='none')
         self.assertFalse(np.any(constraint_clamped(gs, p, F)))
+
+
+class TestTheSettleToleranceIsNotTheProblem(unittest.TestCase):
+    """Two negative results, pinned because they are what justify FIRE.
+
+    The V3.3 plan's first item was "stop the settle on the TRUE penetration
+    instead of the directional-radius proxy". These tests are why that would
+    not have fixed anything, and why the fix had to be a force tolerance
+    applied after the settle instead of a better length applied inside it.
+    """
+
+    def test_the_proxy_is_barely_wrong(self):
+        """0.98 um reported vs 1.40 um true. Measuring it perfectly buys 1.4x,
+        against a handoff measured at 346x."""
+        p, gs, _F, c = bed('none')
+        reported = 0.05 * float(np.mean(gs.r[:gs.N]))     # the V2.7 settle rule
+        true_pen = penetration_stats(c)['penetration_max']
+        self.assertLess(true_pen / reported, 2.0,
+                        f"proxy {reported:.4g} vs true {true_pen:.4g} um")
+
+    def test_the_criterion_is_the_wrong_dimension(self):
+        """Force balance needs 0.035 um where the rule asks for 0.98 um: 28x in
+        LENGTH, and since F ~ delta^1.5 that is ~150x in FORCE."""
+        p, gs, _F, c = bed('none')
+        rule = 0.05 * float(np.mean(gs.r[:gs.N]))
+        balance = settle_overlap_tolerance(
+            gs, Params(**dict(SHAPED_BED, packing_overlap_tol_model='elastic')))
+        self.assertIsNotNone(balance)
+        self.assertGreater(rule / balance, 10.0,
+                           f"rule {rule:.4g} vs force balance {balance:.4g} um")
+
+    def test_the_settle_never_stops_on_its_tolerance_anyway(self):
+        """The second negative result, and the more surprising one.
+
+        Tightening the tolerance to the force-balance value changes the 2D bed
+        **not at all** -- bit-identical penetration -- because the post-relax
+        loop already runs to its step cap and exits on the budget. In 3D, where
+        the loop does sometimes stop on the tolerance, it helps (131x -> 108x
+        alone, 3.6x -> 1.1x combined with FIRE). V3.5 makes the settle say
+        which of the two stopped it.
+        """
+        _p0, _gs0, _F0, c0 = bed('none', packing_overlap_tol_model='fixed')
+        _p1, _gs1, _F1, c1 = bed('none', packing_overlap_tol_model='elastic')
+        self.assertAlmostEqual(penetration_stats(c0)['penetration_max'],
+                               penetration_stats(c1)['penetration_max'], places=9,
+                               msg="if these now differ, the 2D settle has started "
+                                   "stopping on its tolerance -- update the changelog")
 
 
 class TestItIsOffByDefault(unittest.TestCase):

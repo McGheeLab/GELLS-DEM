@@ -332,6 +332,11 @@ class Params:
                                                # ascending step -- the fixed point is untouched.
 
     # ── Packing ──
+    packing_overlap_tol_model: str = 'fixed'   # V3.5: fixed (0.05 * mean_r, the V2.7 rule) |
+                                    # elastic (the penetration at which the DYNAMICS' contact
+                                    # law carries the driving load). The V2.7 rule is 28x too
+                                    # loose in length and 145x in force on a shaped gravity
+                                    # bed. See `settle_overlap_tolerance`.
     packing_relax: str = 'none'     # V3.5: none | fire. FIRE-relax the packed bed under the
                                     # DYNAMICS' force law before handing it over, so the run
                                     # starts in force balance instead of spending its first
@@ -3741,10 +3746,14 @@ def generate_packing(p: Params, seed=42) -> GranuleSystem:
 
     # ── Inflate-and-relax settle: achieve jammed packing ──
     gs._H_place = H_place                 # placement height (gravity consolidation schedule)
+    _ov_tol = settle_overlap_tolerance(gs, p)          # V3.5; None keeps the V2.7 rule
+    if _ov_tol is not None:
+        gs._overlap_tol = _ov_tol
     if p.packing_settle_steps > 0 and gs.N > 1:
         _settle_packing_2d(gs, p)
-    if hasattr(gs, '_H_place'):
-        delattr(gs, '_H_place')
+    for attr in ('_H_place', '_overlap_tol'):
+        if hasattr(gs, attr):
+            delattr(gs, attr)
 
     # Report packing fractions per species (actual areas)
     if p.shape_enabled:
@@ -3950,11 +3959,14 @@ def generate_packing_3d(p: Params, seed=42) -> GranuleSystem:
 
     # ── Inflate-and-relax settle: achieve jammed packing ──
     gs._H_place = H_place                 # placement height (gravity consolidation schedule)
+    _ov_tol = settle_overlap_tolerance(gs, p)          # V3.5; None keeps the V2.7 rule
+    if _ov_tol is not None:
+        gs._overlap_tol = _ov_tol
     if p.packing_settle_steps > 0 and gs.N > 1:
         _settle_packing_3d(gs, p)
 
     # Clean up temporary target attributes
-    for attr in ('_target_a', '_target_b', '_target_c', '_target_r', '_H_place'):
+    for attr in ('_target_a', '_target_b', '_target_c', '_target_r', '_H_place', '_overlap_tol'):
         if hasattr(gs, attr):
             delattr(gs, attr)
 
@@ -5147,6 +5159,52 @@ def granule_weights(gs, p):
     if fixed is not None:
         w = np.where(fixed[:N], 0.0, w)
     return w
+
+
+def settle_overlap_tolerance(gs, p):
+    """The penetration the settle should stop at, in um, or ``None`` (V3.5).
+
+    ``None`` unless ``packing.overlap_tol_model == 'elastic'``, in which case
+    the settle keeps its V2.7 rule of ``0.05 * mean_r``.
+
+    **That rule is not a mismeasurement, it is the wrong dimension.** Measured
+    on a 199-granule shaped gravity bed: the settle's proxy reported 0.975 um
+    where the true MTD penetration was 1.40 um -- only 1.4x out. But force
+    balance for that bed needs **0.035 um**, so the criterion is 28x too loose
+    in LENGTH, and because ``F ~ delta^1.5`` that is 145x in FORCE. The handoff
+    was measured at 346x. Stopping on a better-measured length, which is what
+    the V3.3 plan proposed, would have bought the factor of 1.4.
+
+    So derive the length from the force instead, by inverting Hertz at the load
+    the run is actually driven by::
+
+        (4/3) E* sqrt(R*) delta^1.5 * 1e-3 = relax_force_tol * load_scale
+
+    This is the same move ``contact.overlap_model: elastic`` makes for
+    ``max_overlap_frac`` (V3.2): size the length from the contact law rather
+    than by hand. It costs no force evaluation, so unlike `relax_packing` it is
+    free -- but it is also only as good as the settle's own soft repulsion,
+    which equilibrates at 0.091 um on that bed. The two compose: this gets the
+    bed close, FIRE finishes it.
+
+    Returns ``None`` when nothing drives the run, since then there is no load
+    to size against.
+    """
+    if str(getattr(p, 'packing_overlap_tol_model', 'fixed')) != 'elastic':
+        return None
+    scale, _kind = dynamics_load_scale(gs, p)
+    if not scale:
+        return None
+    E_star = (float(p.E_modulus) * 1e3) / (2.0 * (1.0 - float(p.poisson_ratio) ** 2))
+    cap = float(getattr(p, 'contact_E_cap', 0.0) or 0.0)
+    if cap > 0.0:
+        E_star = min(E_star, (cap * 1e3) / (2.0 * (1.0 - float(p.poisson_ratio) ** 2)))
+    R_star = 0.5 * float(np.mean(gs.r[:gs.N])) if gs.N else 1.0
+    coeff = (4.0 / 3.0) * E_star * np.sqrt(max(R_star, 1e-9)) * 1e-3
+    if coeff <= 0.0:
+        return None
+    f_tol = float(getattr(p, 'packing_relax_force_tol', 0.5)) * scale
+    return float((f_tol / coeff) ** (2.0 / 3.0))
 
 
 def constraint_clamped(gs, p, F, eps=1e-6):
