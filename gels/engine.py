@@ -2275,6 +2275,115 @@ mtd_contact_2d = find_contact_superellipses
 mtd_contact_3d = find_contact_superellipsoids_3d
 
 
+# ══════════════════════════════════════════════════════════════════════
+# V3.4: wall contact from the support function
+# ══════════════════════════════════════════════════════════════════════
+# A wall is a half-space, so it is the EASY case of the same machinery: for a
+# plane through q with unit normal w pointing into the container,
+#
+#     penetration = h_i(-w) - (c_i - q).w        contact point = c_i + grad h_i(-w)
+#
+# exactly, in one support evaluation. No iteration -- the maximising direction is
+# handed to us by the wall.
+#
+# This replaces SIX brute-force surface samplers (a 64-point ring in 2D, four
+# 20 x 20 (eta, omega) grids in 3D). Those were wrong in two ways at once. The
+# grid is coarse: 20 x 20 on a superellipsoid puts ~9 degrees between samples, so
+# the deepest point is missed by O(R theta^2/2) ~ 0.15 um at R = 40 um, which is
+# the same size as the overlaps being resolved. And the reported curvature was
+# `ri_bound * 0.5` -- a hardcoded constant with no geometric content, feeding
+# `F ~ sqrt(R_local)`.
+#
+# Because the superellipsoid is centrally symmetric, h(-w) = h(w) and
+# grad h(-w) = -grad h(w), so one evaluation along +w serves both.
+
+@njit(cache=True)
+def _support_world_2d(nx, ny, a, b, n, theta):
+    """``(h, gx_world, gy_world, nx_body, ny_body)`` for a world direction."""
+    ct = np.cos(theta)
+    st = np.sin(theta)
+    bx = ct * nx + st * ny
+    by = -st * nx + ct * ny
+    h, gx, gy = se2d_support(bx, by, a, b, n)
+    return h, ct * gx - st * gy, st * gx + ct * gy, bx, by
+
+
+@njit(cache=True)
+def _support_world_3d(nx, ny, nz, a, b, c, n1, n2, qw, qx, qy, qz):
+    """``(h, grad_world (3), n_body (3))`` for a world direction."""
+    bx, by, bz = _qrot_inv_s(qw, qx, qy, qz, nx, ny, nz)
+    h, gx, gy, gz, _, _ = se3d_support(bx, by, bz, a, b, c, n1, n2)
+    wx, wy, wz = _qrot_s(qw, qx, qy, qz, gx, gy, gz)
+    return h, wx, wy, wz, bx, by, bz
+
+
+@njit(cache=True)
+def se2d_wall_core(xi, yi, ai, bi, ni, thetai, wall_pos, wall_axis, wall_sign):
+    """Superellipse vs an axis-aligned wall (V3.4).
+
+    Returns ``(hit, penetration, R_local, cx, cy)``. ``wall_axis`` 0 = x, 1 = y;
+    ``wall_sign`` +1 when the granule belongs on the high side of ``wall_pos``.
+    The contact point is the support point itself, so the lever arm for wall
+    torque costs nothing.
+    """
+    wx = 1.0 if wall_axis == 0 else 0.0
+    wy = 0.0 if wall_axis == 0 else 1.0
+    h, gx, gy, bnx, bny = _support_world_2d(wx, wy, ai, bi, ni, thetai)
+    centre = xi if wall_axis == 0 else yi
+    pen = h - wall_sign * (centre - wall_pos)
+    if pen <= 0.0:
+        return False, 0.0, 0.0, 0.0, 0.0
+    # support point along -sign*w, i.e. the surface point nearest the wall
+    cx = xi - wall_sign * gx
+    cy = yi - wall_sign * gy
+    R_local = support_R_eff_2d(bnx, bny, ai, bi, ni)
+    return True, pen, R_local, cx, cy
+
+
+@njit(cache=True)
+def se3d_wall_plane_core(xi, yi, zi, ai, bi, ci, n1i, n2i, qi,
+                         px, py, pz, nx, ny, nz):
+    """Superellipsoid vs an arbitrary plane (V3.4).
+
+    The plane passes through ``(px, py, pz)`` with unit normal ``(nx, ny, nz)``
+    pointing INTO the container. Returns ``(hit, penetration, R_local, cx, cy, cz)``.
+    An axis wall is the special case ``n = +-e_axis``; the cylinder side wall
+    uses the tangent plane at the granule's azimuth.
+    """
+    h, gx, gy, gz, bnx, bny, bnz = _support_world_3d(
+        nx, ny, nz, ai, bi, ci, n1i, n2i, qi[0], qi[1], qi[2], qi[3])
+    d = (xi - px) * nx + (yi - py) * ny + (zi - pz) * nz
+    pen = h - d
+    if pen <= 0.0:
+        return False, 0.0, 0.0, 0.0, 0.0, 0.0
+    R_local = support_R_eff_3d(bnx, bny, bnz, ai, bi, ci, n1i, n2i)
+    return True, pen, R_local, xi - gx, yi - gy, zi - gz
+
+
+@njit(cache=True)
+def se3d_wall_core(xi, yi, zi, ai, bi, ci, n1i, n2i, qi, wall_pos, wall_axis, wall_sign):
+    """Superellipsoid vs an axis-aligned wall (V3.4); see :func:`se3d_wall_plane_core`."""
+    nx = wall_sign if wall_axis == 0 else 0.0
+    ny = wall_sign if wall_axis == 1 else 0.0
+    nz = wall_sign if wall_axis == 2 else 0.0
+    px = wall_pos if wall_axis == 0 else xi
+    py = wall_pos if wall_axis == 1 else yi
+    pz = wall_pos if wall_axis == 2 else zi
+    return se3d_wall_plane_core(xi, yi, zi, ai, bi, ci, n1i, n2i, qi,
+                                px, py, pz, float(nx), float(ny), float(nz))
+
+
+def find_contact_superellipse_wall(xi, yi, ai, bi, ni, thetai,
+                                   wall_pos, wall_axis, wall_sign):
+    """Superellipse-wall contact: ``(penetration, R_local)`` or ``None`` (V3.4)."""
+    hit, pen, R_local, _cx, _cy = se2d_wall_core(
+        xi, yi, ai, bi, ni, thetai, wall_pos, wall_axis, wall_sign)
+    if not hit:
+        return None
+    return pen, R_local
+
+
+
 
 
 def shape_bound_radius(a, b, c=None, n1=2.0, n2=None):
@@ -3003,9 +3112,13 @@ def find_contact_superellipses_cn(xi, yi, ai, bi, ni, thetai,
 # ── Contact detection: superellipse–wall ──
 
 @njit(cache=True)
-def find_contact_superellipse_wall(xi, yi, ai, bi, ni, thetai,
-                                    wall_pos, wall_axis, wall_sign):
+def find_contact_superellipse_wall_cn(xi, yi, ai, bi, ni, thetai,
+                                      wall_pos, wall_axis, wall_sign):
     """
+    RETIRED (V3.4): the 64-point ring sampler. Evidence only -- nothing calls
+    this. ``find_contact_superellipse_wall`` is now one support evaluation, and
+    `tests/test_wall_contact.py` measures the two against each other.
+
     Contact detection between a superellipse and a flat wall.
 
     wall_axis: 0 = vertical wall (x = wall_pos), 1 = horizontal wall (y = wall_pos)
@@ -3963,13 +4076,26 @@ def find_contact_superellipsoids_3d_cn(
 
 def find_contact_wall_plane_3d(xi, yi, zi, ai, bi, ci, n1i, n2i, qi, ri_bound,
                                px, py, pz, nx, ny, nz):
-    """Contact between a 3D granule and an arbitrary plane (V3.1).
+    """Contact between a 3D granule and an arbitrary plane (V3.1; V3.4 exact).
 
     The plane passes through (px, py, pz) with unit normal (nx, ny, nz)
     pointing INTO the container; used for the tangent plane of a cylindrical
-    side wall at the granule's azimuth. Returns (penetration, R_local) or
-    None. Same sampling and R_local approximation as find_contact_wall_3d.
+    side wall at the granule's azimuth. Returns (penetration, R_local) or None.
+
+    ``ri_bound`` is now unused -- it was the argument of the hardcoded
+    ``R_local = 0.5 * ri_bound``. It is kept in the signature because five call
+    sites pass it and the value is free at each of them.
     """
+    hit, pen, R_local, _cx, _cy, _cz = se3d_wall_plane_core(
+        xi, yi, zi, ai, bi, ci, n1i, n2i, qi, px, py, pz, nx, ny, nz)
+    if not hit:
+        return None
+    return pen, R_local
+
+
+def find_contact_wall_plane_3d_cn(xi, yi, zi, ai, bi, ci, n1i, n2i, qi, ri_bound,
+                                  px, py, pz, nx, ny, nz):
+    """RETIRED (V3.4): the 20 x 20 plane sampler. Evidence only."""
     n_sample = 20
     eta = np.linspace(-np.pi/2, np.pi/2, n_sample)
     omega = np.linspace(-np.pi, np.pi, n_sample)
@@ -3992,10 +4118,22 @@ def find_contact_wall_plane_3d(xi, yi, zi, ai, bi, ci, n1i, n2i, qi, ri_bound,
 def find_contact_wall_3d(xi, yi, zi, ai, bi, ci, n1i, n2i, qi, ri_bound,
                          wall_pos, wall_axis, wall_sign):
     """
-    Contact between a 3D granule and a flat wall.
+    Contact between a 3D granule and a flat wall (V1.4; V3.4 exact).
     wall_axis: 0=x, 1=y, 2=z.  wall_sign: +1 if granule on positive side.
     Returns (penetration, R_local) or None.
+
+    ``ri_bound`` is unused since V3.4 -- see :func:`find_contact_wall_plane_3d`.
     """
+    hit, pen, R_local, _cx, _cy, _cz = se3d_wall_core(
+        xi, yi, zi, ai, bi, ci, n1i, n2i, qi, wall_pos, wall_axis, wall_sign)
+    if not hit:
+        return None
+    return pen, R_local
+
+
+def find_contact_wall_3d_cn(xi, yi, zi, ai, bi, ci, n1i, n2i, qi, ri_bound,
+                            wall_pos, wall_axis, wall_sign):
+    """RETIRED (V3.4): the 20 x 20 axis-wall sampler. Evidence only."""
     # Sample the superellipsoid surface and find extreme point
     n_sample = 20
     eta = np.linspace(-np.pi/2, np.pi/2, n_sample)
@@ -5724,7 +5862,7 @@ def _warmup_jit(is_3d=False):
     superellipse_normal_vec(0.5, a, b, n)
     superellipse_curvature_radius(0.5, a, b, n)
     se2d_mtd_core(0.0, 0.0, a, b, n, 0.0, 100.0, 0.0, a, b, n, 0.0)
-    find_contact_superellipse_wall(50.0, 50.0, a, b, n, 0.1, 0.0, 0, 1)
+    se2d_wall_core(50.0, 50.0, a, b, n, 0.1, 0.0, 0, 1)
     hertz_contact_force(5000.0, 20.0, 1.0)
     se2d_support(0.6, 0.8, a, b, n)          # V3.4 support leaves
     support_R_eff_2d(0.6, 0.8, a, b, n)
@@ -5738,6 +5876,7 @@ def _warmup_jit(is_3d=False):
                       100.0, 0.0, 0.0, a, b, a, n, n, q)
         se3d_support(0.6, 0.0, 0.8, a, b, a, n, n)   # V3.4 support leaves
         support_R_eff_3d(0.6, 0.0, 0.8, a, b, a, n, n)
+        se3d_wall_core(0.0, 0.0, 0.0, a, b, a, n, n, q, -100.0, 2, 1)
 
 
 def _snapshot_dict(gs, F, pf, pi, pv, contacts):

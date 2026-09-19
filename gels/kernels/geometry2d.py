@@ -17,7 +17,7 @@ called by nothing; see ``gels.engine.find_contact_superellipses_cn``.
 import numpy as np
 
 from gels.engine import (
-    _body_to_world, se2d_mtd_core, superellipse_curvature_radius,
+    _body_to_world, se2d_mtd_core, se2d_wall_core, superellipse_curvature_radius,
     superellipse_implicit, superellipse_normal_vec, superellipse_point,
 )
 from gels.kernels import njit
@@ -136,35 +136,22 @@ def se2d_contact_k(xi, yi, ai, bi, ni, thetai, xj, yj, aj, bj, nj, thetaj):
 
 @njit(cache=True)
 def se2d_wall_k(xi, yi, ai, bi, ni, thetai, wall_pos, wall_axis, wall_sign):
-    """Superellipse–wall contact: (hit, penetration, R_local)."""
-    n_sample = 64
-    t_vals = np.arange(n_sample) * (2.0 * np.pi / n_sample)
-    e = 2.0 / ni
-    ct, st = np.cos(t_vals), np.sin(t_vals)
-    bx = ai * np.sign(ct) * np.abs(ct)**e
-    by = bi * np.sign(st) * np.abs(st)**e
-    cos_th, sin_th = np.cos(thetai), np.sin(thetai)
-    wx = xi + cos_th * bx - sin_th * by
-    wy = yi + sin_th * bx + cos_th * by
+    """Superellipse-wall contact: (hit, penetration, R_local) (V3.4).
 
-    if wall_axis == 0:
-        coords = wx
-    else:
-        coords = wy
-
-    if wall_sign > 0:
-        idx = np.argmin(coords)
-        pen = wall_pos - coords[idx]
-    else:
-        idx = np.argmax(coords)
-        pen = coords[idx] - wall_pos
-
-    if pen <= 0:
-        return False, 0.0, 0.0
-
-    t_contact = t_vals[idx]
-    R_local = superellipse_curvature_radius(t_contact, ai, bi, ni)
-    return True, pen, R_local
+    One support evaluation, wrapping ``gels.engine.se2d_wall_core``, in place of
+    the 64-point boundary ring this used to sample. The contact point the core
+    also returns is dropped here; ``se2d_wall_point_k`` exposes it for torque.
+    """
+    hit, pen, R_local, _cx, _cy = se2d_wall_core(
+        xi, yi, ai, bi, ni, thetai, wall_pos, wall_axis, wall_sign)
+    return hit, pen, R_local
 
 
-__all__ = ['se2d_contact_k', 'se2d_contact_cn_k', 'se2d_wall_k']
+@njit(cache=True)
+def se2d_wall_point_k(xi, yi, ai, bi, ni, thetai, wall_pos, wall_axis, wall_sign):
+    """As ``se2d_wall_k`` but also the contact point: (hit, pen, R_local, cx, cy)."""
+    return se2d_wall_core(xi, yi, ai, bi, ni, thetai, wall_pos, wall_axis, wall_sign)
+
+
+__all__ = ['se2d_contact_k', 'se2d_contact_cn_k', 'se2d_wall_k',
+           'se2d_wall_point_k']

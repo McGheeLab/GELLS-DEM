@@ -208,6 +208,43 @@ presence of the drift does not. With the contacts actually detected, the bed hol
 The guidance at the end of the V3.2 blocker -- *"do not draw physical conclusions from any
 run with `shape_enabled` and n > 2"* -- is withdrawn.
 
+### Phase 3.5 -- walls, exactly
+
+A wall is a half-space, so it is the *easy* case of the same machinery: the maximising
+direction is handed to us by the wall, and
+
+    penetration = h(-w) - (c - q).w        contact point = c + grad h(-w)
+
+is exact in **one support evaluation**, no iteration. Because the superellipsoid is
+centrally symmetric, `h(-w) = h(w)` and `grad h(-w) = -grad h(w)`, so one call serves both.
+
+This replaces **six brute-force surface samplers** -- a 64-point boundary ring in 2D and
+four 20 x 20 `(eta, omega)` grids in 3D -- which were wrong in two independent ways:
+
+- **The grid was coarse.** 20 x 20 leaves ~9 degrees between samples, so the deepest point
+  is missed by `O(R theta^2 / 2)`. Measured over 377 random tumbled granules at preset
+  blockiness, the sampler under-reports penetration by **median 0.118 um, p90 0.342, max
+  0.504** -- the same size as the overlaps being resolved (the granule-granule contacts in
+  `run2d_shapes` are 0.19-1.17 um deep). The 2D ring is better but not clean: median 0.011,
+  max 0.045 um. A sampler maximises over a subset, so the error is always one-signed, and
+  the tests assert that the exact value dominates every sampled one.
+- **`R_local` was `0.5 * r_bound`**, a hardcoded constant with no geometric content, feeding
+  `F ~ sqrt(R_local)`. For a sphere against a flat wall the true radius is `R`, so it was
+  exactly **2x low** -- every sphere-wall contact 1.41x too soft before any shape effect.
+  Against the exact curvature it is off by a median 1.41x and by **0.51x to 11.24x** across
+  blocky orientations, i.e. an order of magnitude in either direction.
+
+**No stored fixture exercises the shaped wall path** -- checked, and `run2d_shapes` has zero
+wall contacts at every frame, because `packing_consolidation = 'centre'` pulls the bed off
+the walls. The suite passing was therefore *not* evidence for this rewrite;
+`tests/test_wall_contact.py` (17 tests) is, against a boundary mesh 400x finer than the grid
+it replaces. It also pins the property that makes a wall exact rather than merely accurate:
+`d(pen)/d(c) = -w` **to nine places** -- moving a granule 1 um toward a wall adds exactly
+1 um of penetration, whatever its shape or orientation.
+
+The retired samplers survive as `*_cn`, called by nothing, so both measurements above stay
+reproducible from the suite.
+
 ---
 
 ## [V3.3] - 2026-09-19

@@ -19,8 +19,8 @@ import numpy as np
 
 from gels.engine import (
     quat_rotate, quat_rotate_inv, quat_to_rotation_matrix, se3d_mtd_core,
-    superellipsoid_curvature_radii, superellipsoid_implicit, superellipsoid_normal,
-    superellipsoid_point,
+    se3d_wall_core, se3d_wall_plane_core, superellipsoid_curvature_radii,
+    superellipsoid_implicit, superellipsoid_normal, superellipsoid_point,
 )
 from gels.kernels import njit
 
@@ -165,106 +165,41 @@ def se3d_contact_k(xi, yi, zi, ai, bi, ci, n1i, n2i, qi,
 
 
 @njit(cache=True)
-def _sgnpow_s(v, e):
-    return np.sign(v) * np.abs(v + 1e-30)**e
-
-
-@njit(cache=True)
 def wall3d_plane_k(xi, yi, zi, ai, bi, ci, n1i, n2i, qi, ri_bound, px, py, pz, nx, ny, nz):
-    """Superellipsoid vs an arbitrary plane: (hit, penetration, R_local).
+    """Superellipsoid vs an arbitrary plane: (hit, penetration, R_local) (V3.4).
 
-    The plane passes through (px, py, pz) with unit normal (nx, ny, nz)
-    pointing INTO the container. Penetration is the deepest excursion of the
-    sampled surface past the plane. Same 20 x 20 (eta, omega) sample and the
-    same ``R_local = 0.5 r_bound`` approximation as ``wall3d_k``; an axis
-    wall is the special case n = +-e_axis (V3.1, used for the tangent plane
-    of a cylindrical side wall at the granule's azimuth).
+    One support evaluation, wrapping ``gels.engine.se3d_wall_plane_core``, in
+    place of the 20 x 20 (eta, omega) surface grid this used to sample -- and in
+    place of ``R_local = 0.5 * ri_bound``, which had no geometric content at all
+    (for a sphere against a flat wall it is a factor of 2 low, and `F ~ sqrt(R)`).
+    ``ri_bound`` is retained in the signature only because the call sites have it.
     """
-    n_sample = 20
-    eta = np.linspace(-np.pi/2, np.pi/2, n_sample)
-    omega = np.linspace(-np.pi, np.pi, n_sample)
-    e2 = 2.0 / n2i
-    e1 = 2.0 / n1i
-    R = quat_to_rotation_matrix(qi)
-    # body-axis components of the plane normal (world normal rotated into the body frame)
-    d0 = R[0, 0] * nx + R[1, 0] * ny + R[2, 0] * nz
-    d1 = R[0, 1] * nx + R[1, 1] * ny + R[2, 1] * nz
-    d2 = R[0, 2] * nx + R[1, 2] * ny + R[2, 2] * nz
-    centre = (xi - px) * nx + (yi - py) * ny + (zi - pz) * nz
-    best = 0.0
-    first = True
-    for ie in range(n_sample):
-        ce = np.cos(eta[ie])
-        se = np.sin(eta[ie])
-        for io in range(n_sample):
-            co = np.cos(omega[io])
-            so = np.sin(omega[io])
-            bx = ai * _sgnpow_s(ce, e2) * _sgnpow_s(co, e1)
-            by = bi * _sgnpow_s(ce, e2) * _sgnpow_s(so, e1)
-            bz = ci * _sgnpow_s(se, e2)
-            w = d0 * bx + d1 * by + d2 * bz + centre
-            if first:
-                best = w
-                first = False
-            elif w < best:
-                best = w
-    if best >= 0.0:
-        return False, 0.0, 0.0
-    return True, -best, ri_bound * 0.5
+    hit, pen, R_local, _cx, _cy, _cz = se3d_wall_plane_core(
+        xi, yi, zi, ai, bi, ci, n1i, n2i, qi, px, py, pz, nx, ny, nz)
+    return hit, pen, R_local
 
 
 @njit(cache=True)
 def wall3d_k(xi, yi, zi, ai, bi, ci, n1i, n2i, qi, ri_bound, wall_pos, wall_axis, wall_sign):
-    """Superellipsoid–wall contact by surface sampling: (hit, penetration, R_local).
+    """Superellipsoid-wall contact: (hit, penetration, R_local) (V3.4)."""
+    hit, pen, R_local, _cx, _cy, _cz = se3d_wall_core(
+        xi, yi, zi, ai, bi, ci, n1i, n2i, qi, wall_pos, wall_axis, wall_sign)
+    return hit, pen, R_local
 
-    Same 20 × 20 (eta, omega) sample as the reference; the world coordinate
-    along ``wall_axis`` is R[axis, :] · body + centre.
-    """
-    n_sample = 20
-    eta = np.linspace(-np.pi/2, np.pi/2, n_sample)
-    omega = np.linspace(-np.pi, np.pi, n_sample)
-    e2 = 2.0 / n2i
-    e1 = 2.0 / n1i
-    R = quat_to_rotation_matrix(qi)
-    if wall_axis == 0:
-        centre = xi
-    elif wall_axis == 1:
-        centre = yi
-    else:
-        centre = zi
-    r0 = R[wall_axis, 0]
-    r1 = R[wall_axis, 1]
-    r2 = R[wall_axis, 2]
-    best = 0.0
-    first = True
-    for ie in range(n_sample):
-        ce = np.cos(eta[ie])
-        se = np.sin(eta[ie])
-        for io in range(n_sample):
-            co = np.cos(omega[io])
-            so = np.sin(omega[io])
-            bx = ai * _sgnpow_s(ce, e2) * _sgnpow_s(co, e1)
-            by = bi * _sgnpow_s(ce, e2) * _sgnpow_s(so, e1)
-            bz = ci * _sgnpow_s(se, e2)
-            w = r0 * bx + r1 * by + r2 * bz + centre
-            if first:
-                best = w
-                first = False
-            elif wall_sign > 0:
-                if w < best:
-                    best = w
-            else:
-                if w > best:
-                    best = w
-    if wall_sign > 0:
-        pen = wall_pos - best
-    else:
-        pen = best - wall_pos
-    if pen <= 0:
-        return False, 0.0, 0.0
-    R_local = ri_bound * 0.5
-    return True, pen, R_local
+
+@njit(cache=True)
+def wall3d_point_k(xi, yi, zi, ai, bi, ci, n1i, n2i, qi, wall_pos, wall_axis, wall_sign):
+    """As ``wall3d_k`` but also the contact point: (hit, pen, R_local, cx, cy, cz)."""
+    return se3d_wall_core(xi, yi, zi, ai, bi, ci, n1i, n2i, qi,
+                          wall_pos, wall_axis, wall_sign)
+
+
+@njit(cache=True)
+def wall3d_plane_point_k(xi, yi, zi, ai, bi, ci, n1i, n2i, qi, px, py, pz, nx, ny, nz):
+    """As ``wall3d_plane_k`` but also the contact point."""
+    return se3d_wall_plane_core(xi, yi, zi, ai, bi, ci, n1i, n2i, qi,
+                                px, py, pz, nx, ny, nz)
 
 
 __all__ = ['sph3d_contact_k', 'se3d_contact_k', 'se3d_contact_cn_k',
-           'wall3d_k', 'wall3d_plane_k']
+           'wall3d_k', 'wall3d_plane_k', 'wall3d_point_k', 'wall3d_plane_point_k']
