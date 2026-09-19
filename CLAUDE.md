@@ -118,12 +118,99 @@ GELS/
 │   ├── test_hertz_clipping.py   # LS-DEM/JKR contact clipping demo
 │   ├── HPC_NOTES.md             # Former UArizona HPC section of this file
 │   └── README.md                # What was archived and why
+├── robotsim/                    # SEPARATE REPO, gitignored — robot-ball framework (see below)
 ├── results/                     # Simulation output (gitignored)
 └── CLAUDE.md                    # THIS FILE
 ```
 
 **No `.py` files live at the repository root.** Anything there in an older
 checkout has moved to `gels/`, `pipeline/`, or `old code/`.
+
+## `robotsim/` — the robot-ball framework (separate repo, gitignored)
+
+`robotsim/` is a **self-contained sibling project with its own git history**, moved here
+from `~/robot-ball-framework` on 2026-09-18 so it lives next to the engine it borrows from.
+It is listed in `.gitignore`: GELLS-DEM does not track it, and commits made here never touch
+it. `cd robotsim` first, then use its own git.
+
+**What it models.** Explicit **robots living on the shells of granular balls** — the
+"physically real" tier of the granular-agent phase-space exploration, and the discrete
+counterpart to the continuum cell agents in `gels/kernels/cells.py`. Robots are stored as
+body-frame surface directions, so forces accumulate at the true surface anchor and generate
+torque, and the abstraction survives the superellipsoid generalization (only
+`surface_point(u)` changes).
+
+- **State machine**: SEARCH → ANCHOR → BRIDGE, plus RIDE (robots crawl on robots when the
+  first layer jams), SLEEP (activity decayed, contact-triggered reactivation), and FROZEN
+  (battery dead, grip locked, bond becomes a passive latch). SLEEP/FROZEN bonds are
+  non-backdrivable latches; only BRIDGE is an active force-controlled actuator.
+- **Grip law**: `f_max = sigma_g * A_r * zeta1*zeta2/(zeta1+zeta2)`. With `zeta_I = 0`,
+  robots can neither crawl on nor grip inert balls, so F-I bridges die on their own and
+  **the inert balls ARE the barriers** — nothing is hard-coded.
+- **Reach**: bridges span surface gaps up to `h_r` through a capture annulus, so
+  near-contact pairs are bridgeable and anchors sit at the rim, not the contact point.
+  This is the discrete form of the Aim-2 bridging question (do agents reach across voids,
+  or only reinforce existing contacts?).
+- **Emergent agitation**: crawling robots exert propulsion reaction forces on their hosts,
+  the physical origin of `E_agit ~ a^2`. **No thermostat.**
+- **Zero-pressure barostat**: the box carries no wall load, so bonded-network tension
+  contracts the volume until Hertzian back-pressure balances it. Volume is an observable
+  (`V/V0` and `Phi` per frame); soft contacts (`k_n = 0.05`) keep post-jamming compaction
+  visible.
+- **Initial condition**: verified jamming by the O'Hern protocol, shared with `gel3d`.
+- **Battery is work-based, not a timer**: `e_clamp` per clamp-on, `p_bridge` per unit time
+  holding a bridge, small `p_search` while crawling. Bridging robots die first.
+- **Sizes**: ball diameters 30–250 (log-uniform, both species); robots are always
+  two-lobe Ø10 crawlers. Code unit = 50 phys.
+
+**Layout.**
+
+```
+robotsim/
+├── code/                        # All simulators — start at code/README.md
+│   ├── robotsim.py              # L3 shell-dwelling robots on balls (the main model)
+│   ├── robotsim_sq.py           # Superellipsoid generalization
+│   ├── superquadric.py          # Support-function MTD contact solver
+│   ├── gel2d.py, gel3d.py       # Prototypes: gelation (Lu 2008 mapping); quasi-2D slab + O'Hern jamming
+│   ├── run_experiment.py        # Named presets: baseline, deep_battery, short_battery,
+│   │                            #   low_coverage, crowded, boulders, pore_hiders, grip_limited
+│   ├── run_factorial.py         # Full-factorial coarsening study (144 cells)
+│   ├── run_phase_diagram.py, run_reach_sweep.py, run_quench.py, run_quench3d.py, run_sq.py
+│   ├── run_cell.py              # Headless per-cell runner (HPC entry point)
+│   ├── build_landscape.py, analyze_landscape.py, compare_shapes.py, convergence.py
+│   ├── collect_summary.py, enrich_summary.py, add_voronoi.py, shadow_check.py
+│   └── export_viewer.py, serve.py, *_template.html   # Self-contained HTML gallery viewer
+├── sections/                    # 00-07: the theory the code implements (notation,
+│                                #   mean-field compaction, energy landscape, phase
+│                                #   separation, simulation framework, experiments,
+│                                #   literature, gelation concept)
+├── docs/gells-dem-adoption.md   # WHAT THIS REPO WANTS FROM GELLS-DEM — feature-adoption
+│                                #   report with file:line refs into new_dem_0.py, lsdem.py,
+│                                #   run_all_trials.py, hpc/, analysis/. Read before porting
+│                                #   anything in either direction.
+├── hpc/                         # hpckit (adopted from VSClaude/hpc; validated on UA Puma)
+├── proposal_scaffold/, sections/, Proposal_v5.md, PROPOSAL_TEMPLATE.md, tools/
+│                                # Proposal drafting built on top of the simulation results
+├── trials/, trials_regen/, trials_test/   # Factorial trial configs
+└── results, figures, old, "granular flow channels"   # SYMLINKS — see below
+```
+
+**The data did not move.** `results/` (49 GB) and `figures/` (8.4 GB), plus `old/` and
+`granular flow channels/` (275 MB), were left in `~/robot-ball-framework/` and are
+**symlinked** back into `robotsim/`. Scripts that build paths relative to the repo root
+therefore still resolve, but nothing large lives under GELLS-DEM. Both the symlinks and
+their targets are gitignored on each side. Do not `rm -rf ~/robot-ball-framework` — that
+is where the trial output actually is.
+
+**Relationship to GELLS-DEM.** The two are independent codebases attacking the same
+physics from opposite ends: GELLS-DEM treats cells as a contact-level kernel inside a
+mature 2D/3D engine; robotsim treats them as explicit surface agents with batteries and
+a state machine. `robotsim/docs/gells-dem-adoption.md` is the standing account of which
+GELLS-DEM machinery robotsim should borrow (HPC, per-frame restart-complete npz,
+params/metadata provenance, checkpoint-restart, walltime estimator) and which robotsim
+pieces are already better and must not be regressed (support-function MTD superquadric
+solver, O'Hern FIRE jamming, Laguerre-Voronoi, Katz-Thompson permeability, Newman-Ziff
+percolation).
 
 ## Key Technical Decisions
 

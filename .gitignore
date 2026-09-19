@@ -63,3 +63,7 @@ Experimental Results/
 *.pdf
 *.xlsx
 *.docx
+
+# robotsim/ is a SEPARATE repository with its own git history (moved from
+# ~/robot-ball-framework, 2026-09-18). GELLS-DEM must not track it. See CLAUDE.md.
+robotsim/
