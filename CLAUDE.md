@@ -380,6 +380,28 @@ percolation).
   `phi_bed`: the latter double-counts overlap, which is 1-4 % once a soft bed compacts through
   interpenetration. `n_overlap_clipped` / `overlap_clip_fraction` / `frac_velocity_clipped`
   say whether a run is reporting the contact law or the numerical rails.
+- **Packer handoff** (V3.5): `packing.relax` = `none` (default) | `fire`. The settle stops
+  on a LENGTH tolerance that knows nothing about the contact law the dynamics will apply,
+  so it hands over a bed pre-loaded far above the driving load and the run's first hours
+  are that unwinding. `relax_packing` runs **after** the settle, in `generate_packing`
+  (not in `gels/kernels/packing.py`, which cannot reach `compute_forces`), and FIRE-relaxes
+  the bed under the **exact** force law the dynamics will use, stopping at
+  `max|F| < packing.relax_force_tol × dynamics_load_scale` — the same scale
+  `handoff_force_balance` reports, so detector and fix cannot disagree. Measured: a shaped
+  gravity bed goes **346× → 1.0×** the granule weight and 1.40 → 0.032 µm max penetration;
+  3D **131× → 3.6×**. Three things are load-bearing: the velocity projection at wall clamps
+  (without it FIRE pumps against the wall), the stall test on the **energy** rather than on
+  `max|F|` (which is not monotone under FIRE), and switching the active noise off during
+  the relaxation. `relax_force_tol` is below 1 on purpose — an unsupported granule has
+  `|F|` equal to exactly its weight. Relaxing a no-gravity, no-cell bed lets it **expand**,
+  because nothing loads it.
+- **The wall clamp is 0.5 µm off the wall** (pre-existing; measured V3.5).
+  `apply_position_bounds` clips to `rb + 0.5`, so a granule resting on the floor is never
+  in wall contact — the JKR wall force sees a positive gap — and its net force stays
+  exactly its own weight, carried by the clamp. Every residual-force measure therefore has
+  an irreducible floor of one granule weight per gravity bed; on a sphere bed that artefact
+  was over half the handoff ratio V3.4 reported. Use `constraint_clamped` /
+  `free_force_residual`, never the raw `max|F|`.
 - **Gradient flow** (V3.5): `dynamics.gradient_flow` = `off` (default) | `monitor` |
   `damped`. Overdamped dynamics is gradient flow, so the energy must fall every step and
   the work the forces do must account for the fall. `monitor` computes the potential

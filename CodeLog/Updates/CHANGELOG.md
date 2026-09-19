@@ -102,6 +102,86 @@ the mode is `off`, so Gate B only sees added keys holding a constant.
 
 New file `tests/test_gradient_flow.py` (21 tests). Suite: 443 green, 2 skipped.
 
+### Phase 2 - `packing.relax` (none | fire): the handoff fix
+
+V3.4 measured the disease and shipped the detector. This is the fix.
+
+**The V3.3 plan's design would not have worked**, and the correction is the reason this
+phase was re-planned rather than executed. That plan had FIRE reuse the *settle's* own
+`k_rep ov^1.5` law and stop on `max|F| < f_tol` in that law's units, to dodge a circular
+import (`gels/kernels/packing.py` cannot reach `compute_forces`). But the handoff error is
+a mismatch **between two force laws** -- force balance under the settle's law says nothing
+about `max|F|` under the dynamics' JKR. The tolerance has to be in the units of the law
+that runs next.
+
+So the relaxation moved up a level instead of changing its force law. `relax_packing` runs
+in `generate_packing`, **after** the settle returns, where `compute_forces` is an ordinary
+local call and no import is circular. It relaxes under the exact law the dynamics will
+apply -- JKR, walls, gravity, MC-DEM and all -- and stops at
+`max|F| < relax_force_tol * dynamics_load_scale`, the same scale `handoff_force_balance`
+reports, so **the detector and the fix cannot disagree about what "in balance" means**.
+
+| bed | handoff before -> after | max penetration | contacts |
+|---|---|---|---|
+| 2D shaped gravity bed, N=199 | **346x -> 1.00x** | 1.40 -> 0.032 um | 43 -> 48 |
+| 2D spheres gravity bed, N=199 | 4.78x -> 1.31x | 0.138 -> 0.101 um | 218 -> 299 |
+| 3D shaped gravity bed, N=190 | **131x -> 3.56x** | 1.20 -> 0.080 um | 105 -> 247 |
+| 2D spheres, walls, no gravity | (no load scale) | 0.965 -> 0.020 um | 202 -> 19 |
+
+Cost is 5-11 s on these beds, once, before a run that lasts hours.
+
+**Details that had to be got right:**
+
+* **Velocity projection at wall clamps.** Without it `P = F.v` counts motion the clamp
+  deleted, FIRE's sign test misfires and the bed pumps against the wall. Skipped under
+  periodic boundaries, where a wrap is a relabelling rather than a clamp.
+* **The stall test is on the ENERGY, not on `max|F|`.** `max|F|` is not monotone under
+  FIRE -- the minimiser is free to load one granule while unloading ten -- and keying on
+  it stopped a relaxation at 400 steps that was still descending, at a *worse* residual
+  than it reached at 3400. The energy is the objective, and Phase 1 is what makes it
+  available here. `FIRE_MAX_STEPS` is a ceiling, not the terminator.
+* **Translations and rotations relax together** as one generalised coordinate, so
+  `P = sum F.v + sum tau.omega` and a bed in force balance but not torque balance does
+  not report success.
+* **The active noise is switched off during the relaxation.** It would make the "force"
+  a random variable and FIRE would chase it forever. The noise belongs to the dynamics,
+  not to the initial condition.
+* **`packing.relax_force_tol` defaults to 0.5, below 1 on purpose.** An unsupported
+  granule has `|F|` equal to exactly its own weight, so any tolerance at or above 1 is
+  satisfied by a bed in free fall.
+* Relaxing a **no-gravity, no-cell** bed lets it expand (202 -> 19 contacts on a
+  `consolidation: centre` packing): nothing loads it, so its equilibrium is loose. That
+  is correct, and it is a reason not to turn `relax: fire` on for such a run without
+  looking at the result.
+
+#### The wall clamp puts an irreducible floor under the residual
+
+Found while calibrating the tolerance, and **pre-existing** -- V3.5 only stops
+misreporting it. `apply_position_bounds` holds every granule **0.5 um clear of every
+wall** (`np.clip(x, rb + 0.5, L - rb - 0.5)`), so a granule resting on the floor is never
+in wall contact: the JKR wall force sees a positive gap and does nothing, and the
+granule's net force stays exactly its own weight -- carried by the clamp, which is a rigid
+constraint whose reaction is not in `F`. On a 199-granule sedimented bed, **all five**
+worst-balanced granules sat at exactly `y - r_bound = 0.500` with their full weight
+unbalanced.
+
+Any residual-force measure that ignores this has a floor of one granule weight per gravity
+bed, and no relaxation can get under it. New `constraint_clamped(gs, p, F)` detects it by
+nudging along `F` and asking who cannot move -- geometry-agnostic, so box, cylinder, free
+top and the legacy lid all work without duplicating `apply_position_bounds`'s branches --
+and `free_force_residual` is what `handoff_force_balance` and `relax_packing` now both
+judge on. On a sphere bed the clamp artefact was **over half** the ratio V3.4 reported
+(10.33x -> 4.78x for the same packing).
+
+New keys in `metadata['handoff']`: `handoff_F_max_free`, `handoff_n_clamped`. New
+`metadata['relax']` with `fire_steps`, `fire_stop_reason`, `ratio_before` / `ratio_after`,
+`penetration_before` / `penetration_after`, `n_rattlers`, `n_unbalanced`,
+`n_wall_clamped`. A bed that stalls at ~1x the gravity load with a few rattlers is as
+relaxed as it can be -- a rattler has no contacts, so its `|F|` *is* its own weight -- and
+the report says so rather than leaving it to be guessed.
+
+New file `tests/test_fire_relax.py` (16 tests). Suite: 459 green, 2 skipped.
+
 #### Bug Fixes
 
 * **`dynamics.gradient_flow: off` in a YAML setup arrived as `False`.** YAML 1.1 reads
