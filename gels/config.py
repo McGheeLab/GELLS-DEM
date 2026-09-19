@@ -322,7 +322,6 @@ class Performance:
     use_numba: bool = _P.use_numba
     neighbor_backend: str = _P.perf_neighbor_backend
     cells_backend: str = _P.perf_cells_backend
-    neighbor_skin_um: float = _P.perf_neighbor_skin
     max_clips: int = _P.perf_max_clips
     field_dtype: str = _P.perf_field_dtype
     field_res_um: float = _P.perf_field_res_um
@@ -524,7 +523,6 @@ FLAT_MAP = [
     ('performance.use_numba', 'use_numba'),
     ('performance.neighbor_backend', 'perf_neighbor_backend'),
     ('performance.cells_backend', 'perf_cells_backend'),
-    ('performance.neighbor_skin_um', 'perf_neighbor_skin'),
     ('performance.max_clips', 'perf_max_clips'),
     ('performance.field_dtype', 'perf_field_dtype'),
     ('performance.field_res_um', 'perf_field_res_um'),
@@ -559,7 +557,11 @@ SPECIES_DERIVED = {
     'blockiness_n2_func_mean', 'blockiness_n2_func_std',
     'blockiness_n2_inert_mean', 'blockiness_n2_inert_std',
 }
-DEPRECATED = {'F_bond', 'L_rest', 'eta'}          # declared in Params, never read
+# Declared in Params, never read. `perf_neighbor_skin` promised a Verlet list
+# ("list rebuilt when 2*max_disp >= skin") that was never implemented; V3.3
+# measured what it would buy and found it NEGATIVE, so it stays unimplemented
+# and is no longer reachable from a setup file. See CHANGELOG V3.3.
+DEPRECATED = {'F_bond', 'L_rest', 'eta', 'perf_neighbor_skin'}
 PIPELINE_MANAGED = {'resume_from'}                # set by step 3, never by a setup file
 
 
@@ -1337,7 +1339,6 @@ performance:
   cells_backend: kernels           # kernels (compiled cell state machine + bridging, hashed RNG) | python (exact V2.7 cell code)
   use_numba: true
   neighbor_backend: cells          # cells | ckdtree | reference
-  neighbor_skin_um: 20.0
   max_clips: 16
   field_dtype: float32
   field_res_um: 0.0                # 0 -> 2 x interface_width

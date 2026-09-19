@@ -325,7 +325,16 @@ class Params:
     perf_threading_layer: str = "omp"   # omp | tbb | workqueue | default
     perf_neighbor_backend: str = "cells"  # cells | ckdtree | reference
     perf_cells_backend: str = "kernels"   # kernels (compiled state machine + bridging, hashed RNG) | python (exact V2.7 cell code)
-    perf_neighbor_skin: float = 20.0    # µm Verlet skin; list rebuilt when 2·max_disp ≥ skin
+    # DEPRECATED (V3.3): there is no Verlet list and there will not be one.
+    # half_pairs() is rebuilt every force evaluation. Measured at N=3841 in 3D:
+    # a 20 µm skin grows the pair list 1.46× and a step 19.1 → 33.3 ms, while
+    # the rebuild it would eliminate is only ~12 % of a step -- so even free
+    # rebuilds would be ~53 % slower, and no positive skin breaks even. The
+    # cutoff is dominated by L_max (cell sensing), not contact range, so the
+    # candidate list is already ~50 neighbours per granule. The field is kept
+    # ONLY so stored fixtures' params.json still loads; it is in
+    # config.DEPRECATED and is not reachable from a setup file.
+    perf_neighbor_skin: float = 20.0
     perf_max_clips: int = 16            # contact clip planes stored per granule (2D; 3D uses 24)
     perf_field_dtype: str = "float32"   # phase-field grid dtype for compiled rendering
     perf_field_res_um: float = 0.0      # grid spacing (µm); 0 → 2·interface_width
