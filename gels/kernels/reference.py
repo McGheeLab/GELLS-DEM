@@ -29,6 +29,7 @@ from gels.engine import *  # noqa: F401,F403  (public helpers, leaf njit functio
 from gels.materials import traction_gain, blocker_factor, law_code, rule_code  # noqa: E402
 from gels.kernels.percolation import graph_percolation_metrics  # noqa: E402
 from gels.laguerre import laguerre_metrics  # noqa: E402
+from gels.pore import pore_metrics  # noqa: E402
 from gels.engine import (  # noqa: E402  private helpers used by the moved loops
     _angular_distance_to_target_2d,
     _angular_distance_to_target_3d,
@@ -2969,6 +2970,7 @@ def compute_metrics(gs, p, phi_f, phi_i, phi_v, t, forces, phi_s=None):
     m['phi_RCP'] = phi_rcp
     m['compaction_ratio'] = phi_solid / phi_rcp if phi_rcp > 0 else 0.0
     m.update(laguerre_metrics(gs, p, pos, phi_rcp))
+    m.update(pore_metrics(gs, p, phi_f.shape, periodic))
 
     # Darcy number
     if gs.is_3d:

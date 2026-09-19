@@ -311,6 +311,9 @@ class Params:
     # default because Qhull cannot be compiled and it costs ~0.3-1 s/frame at
     # N = 1000; the same numbers are available post-hoc from viz2/step5.
     metrics_laguerre: bool = False
+    # V3.3: Katz-Thompson critical-pore permeability + geodesic tortuosity.
+    # Off by default: 16 ndimage labellings of the FULL grid plus a BFS.
+    metrics_pore_field: bool = False
     packing_settle_steps: int = 400  # inflation steps to reach target radii (jammed packing)
     packing_relax_substeps: int = 15  # overlap relaxation sub-steps per inflation step
     packing_inflate_phi_safe: float = 0.20  # initial deflated packing fraction for RSA

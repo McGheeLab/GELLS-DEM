@@ -25,6 +25,7 @@ from gels.kernels import njit
 from gels.kernels.geometry2d import se2d_contact_k
 from gels.kernels.percolation import graph_percolation_metrics
 from gels.laguerre import laguerre_metrics
+from gels.pore import pore_metrics
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -454,6 +455,7 @@ def compute_metrics(gs, p, phi_f, phi_i, phi_v, t, forces, phi_s=None):
     m['phi_RCP'] = phi_rcp
     m['compaction_ratio'] = phi_solid / phi_rcp if phi_rcp > 0 else 0.0
     m.update(laguerre_metrics(gs, p, pos, phi_rcp))
+    m.update(pore_metrics(gs, p, phi_f.shape, periodic))
 
     if gs.is_3d:
         L_char = domain_volume(p, '3D') ** (1.0/3.0)
