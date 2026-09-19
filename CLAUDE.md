@@ -380,7 +380,14 @@ percolation).
   `phi_bed`: the latter double-counts overlap, which is 1-4 % once a soft bed compacts through
   interpenetration. `n_overlap_clipped` / `overlap_clip_fraction` / `frac_velocity_clipped`
   say whether a run is reporting the contact law or the numerical rails.
-- **Packer handoff** (V3.5): `packing.relax` = `none` (default) | `fire`. The settle stops
+- **Packer handoff** (V3.5): `packing.relax` = `auto` (default) | `none` | `fire`.
+  `auto` is `fire` exactly when something drives the run (gravity on, or cells seeded) and
+  `none` otherwise — a bed with no load has a genuinely loose equilibrium under JKR (a
+  `consolidation: centre` packing drops 202 → 19 contacts when relaxed) and no force scale
+  to stop on. `auto` also **declines a shaped bed when `contact.shape_dynamics` is off**,
+  because the bounding-sphere overlap projection then undoes the relaxation — 15–17 % of
+  pairs clipped, and the gradient-flow monitor reports energy ascents of 4e3–9e3× the work
+  against 7–27 with it on. The settle stops
   on a LENGTH tolerance that knows nothing about the contact law the dynamics will apply,
   so it hands over a bed pre-loaded far above the driving load and the run's first hours
   are that unwinding. `relax_packing` runs **after** the settle, in `generate_packing`
@@ -404,13 +411,30 @@ percolation).
   bit-identically. `packing.overlap_tol_model = 'elastic'` derives the length from the
   force anyway and is worth having in 3D only (3.56× → 1.05× combined with FIRE). Both
   twins now warn when the step budget, not the tolerance, ended the settle.
-- **The wall clamp is 0.5 µm off the wall** (pre-existing; measured V3.5).
-  `apply_position_bounds` clips to `rb + 0.5`, so a granule resting on the floor is never
-  in wall contact — the JKR wall force sees a positive gap — and its net force stays
-  exactly its own weight, carried by the clamp. Every residual-force measure therefore has
-  an irreducible floor of one granule weight per gravity bed; on a sphere bed that artefact
-  was over half the handoff ratio V3.4 reported. Use `constraint_clamped` /
-  `free_force_residual`, never the raw `max|F|`.
+- **`boundary.wall_clamp`** (V3.5) = `contact` (default) | `force` | `legacy`. Until V3.5
+  the position clip was a hardcoded `rb + 0.5`, so a granule resting on the floor was
+  **never in wall contact** — the JKR wall force saw a positive gap — and its whole weight
+  was carried by the clip. The bed rested on a numerical shelf, wall contact forces read
+  zero, and every residual-force measure had an irreducible floor of one granule weight
+  (on a sphere bed that artefact was over half the handoff ratio V3.4 reported). `contact`
+  clips at `reach − max_overlap_frac·reach` so the contact carries the load; `force` clips
+  only at the wall plane; `legacy` restores the V2.7 standoff and is pinned in the fixtures.
+  **Contract change: a granule's SURFACE may now cross a wall** by up to the allowance —
+  its CENTRE may not, and that is now the only thing the clip guarantees.
+  It also exposed that **the packed bed was never inside the dynamics' clip**: under
+  `legacy` the first step teleports every wall granule the full 0.5 µm and injects 65 nN·µm;
+  under `contact` that shift is exactly zero. `relax_packing` applies the clip once on entry
+  and reports `entry_clip_shift`.
+- **Judge force balance on `free_force_percentile`, not `max|F|`** (V3.5). `max|F|` is a max
+  over a heavy tail: one wedged granule read 132× the gravity load on a loose shaped bed
+  while the second-worst read 0.97×. Every clamp mode relaxes a bed to ~0.8× one granule
+  weight at the p95. Use `constraint_clamped` / `free_force_residual` /
+  `free_force_percentile`, never the raw `max|F|`.
+- **FIRE is not monotone unless you make it so** (V3.5). Plain FIRE drove a 3D shaped bed's
+  energy from 2378 to 4753 nN·µm and its handoff from 264× to 5178× — it returned a worse
+  bed than the settle gave it. `relax_packing` now rejects any step that raises the energy
+  by more than `FIRE_UPHILL_TOL` of the start and restores the best configuration seen. A
+  strict no-uphill rule is wrong: FIRE is inertial and needs small uphill moves.
 - **Gradient flow** (V3.5): `dynamics.gradient_flow` = `off` (default) | `monitor` |
   `damped`. Overdamped dynamics is gradient flow, so the energy must fall every step and
   the work the forces do must account for the fall. `monitor` computes the potential

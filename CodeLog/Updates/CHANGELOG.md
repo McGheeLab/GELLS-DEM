@@ -222,6 +222,84 @@ Derivation lives in `settle_overlap_tolerance` in `engine.py` and is handed to b
 on `gs._overlap_tol`, so there is exactly one implementation and the twins cannot disagree.
 Default stays `fixed`.
 
+### Phase 4 - two default changes, and what they exposed
+
+Both were the user's call, since both change default physics for every run.
+
+#### `packing.relax` now defaults to `auto`
+
+`auto` is `fire` exactly when :func:`dynamics_load_scale` finds something driving the run
+(gravity enabled, or cells seeded) and `none` otherwise. That is the right discriminator
+rather than a guess: a bed with no gravity and no cells has a genuinely **loose**
+equilibrium under JKR -- a `consolidation: centre` packing drops from 202 contacts to 19
+when relaxed -- and there is no force scale to stop on either, so FIRE would be aiming at
+a relative target with no physical meaning.
+
+`auto` also **declines a shaped bed when `contact.shape_dynamics` is off**, because the
+overlap projection then measures overlap between BOUNDING SPHERES, which touch long before
+the shapes do. On a FIRE-relaxed shaped bed it fires on 15-17 % of pairs and does work no
+energy accounts for; the Phase 1 gradient-flow monitor reports ascents of **4e3-9e3 times
+the work**, against 7-27 with `shape_dynamics` on. An explicit `relax: fire` is still
+honoured, with the reason printed. **The energy audit found this, which is what it was
+built for.**
+
+#### `boundary.wall_clamp`: contact (default) | force | legacy
+
+The 0.5 um standoff is gone by default. `contact` clips at
+`reach - max_overlap_frac * reach`, so a granule may sink into the wall by the same
+allowance the engine already permits between two granules and **the wall contact carries
+the load**; `force` clips only at the wall plane and lets the contact do all of it;
+`legacy` is the V2.7 `+0.5` um, pinned in the fixtures.
+
+A contract change worth stating plainly: **a granule's SURFACE may now cross a wall** by
+up to the allowance. Its CENTRE may not -- the neighbour and render grids need positions
+inside the box, and that is now the only thing the clip guarantees. Four geometry tests
+were updated to the new contract.
+
+#### What the change exposed
+
+**The packed bed was never inside the dynamics' own clip.** The settle has its own wall
+handling, so under the legacy standoff the first dynamics step **teleports every wall
+granule the full 0.5 um** and injects **65 nN um** of energy in one step. Measured
+directly. Under `wall_clamp: contact` that displacement is exactly **zero**. V3.5 applies
+the clip once on entry to `relax_packing` and reports the shift as `entry_clip_shift`, so
+the projection is attributed to the clip rather than to FIRE.
+
+**FIRE could return a worse bed than it was given.** Plain FIRE is not monotone, and on a
+3D shaped bed with `wall_clamp: force` it drove the energy from 2378 to **4753** nN um and
+the handoff from 264x to **5178x**. Stiff wall contacts do it -- the MD step goes unstable
+well before the uphill test notices. Now every step is checked against the energy and
+rejected if it rises by more than `FIRE_UPHILL_TOL` of the starting energy (positions
+restored, dt halved, velocities zeroed), and the best configuration seen is restored at the
+end. A strict no-uphill rule was tried first and is wrong: FIRE is inertial and needs small
+uphill moves, and rejecting all of them stopped it dead in 15 steps.
+
+**`max|F|` is a max over a heavy tail.** On a loose shaped bed **one** wedged granule read
+132x the gravity load while the second-worst read 0.97x. `free_force_percentile` is now
+reported beside it, and the p95 is the number that describes the bed:
+
+| bed | entry shift | max, before -> after | **p95, before -> after** |
+|---|---|---|---|
+| 2D shaped, `legacy` | 0.5 um | 559x -> 4.9x | 163x -> **0.79x** |
+| 2D shaped, `contact` | **0** | 346x -> 133x | 182x -> **0.78x** |
+| 2D shaped, `force` | **0** | 346x -> 125x | 182x -> **0.79x** |
+| 3D shaped, `legacy` | 0.5 um | 264x -> 2.2x | 16.7x -> **0.87x** |
+| 3D shaped, `contact` | **0** | 264x -> **1.1x** | 100x -> **0.85x** |
+| 3D shaped, `force` | **0** | 264x -> 84x | 100x -> **0.86x** |
+
+Every mode relaxes the bed to about **0.8 of one granule weight** at the p95. The spread in
+the `max` column is single wedged granules, not a difference in the beds.
+
+The V2.7 values are pinned in `make_fixtures.COMMON` (`boundary_wall_clamp='legacy'`,
+`packing_relax='none'`, `dynamics_gradient_flow='off'`), so Gate B is untouched. The
+platform-local baseline was re-blessed, deliberately, for the two runs the defaults change.
+`tests/test_packing_vs_reference` pins `packing_relax='none'`: that gate is about the
+SETTLE being bit-identical between the twins, and `relax_packing` is a later stage that
+calls `compute_forces`, so it agrees to rounding rather than bit-for-bit and has its own
+gate.
+
+Suite: 471 green, 2 skipped.
+
 #### Bug Fixes
 
 * **`dynamics.gradient_flow: off` in a YAML setup arrived as `False`.** YAML 1.1 reads

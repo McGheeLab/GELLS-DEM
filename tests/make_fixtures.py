@@ -87,6 +87,9 @@ COMMON = dict(
     # would retire it wholesale. The shipping defaults are covered instead by
     # LOCAL_ONLY_RUNS below, so neither configuration goes unguarded.
     contact_semi_implicit=False,             # V3.4 flipped this to True
+    boundary_wall_clamp='legacy',            # V3.5 moved the clip inside the wall
+    packing_relax='none',                    # V3.5 made this 'auto' (= fire under a load)
+    dynamics_gradient_flow='off',            # V3.5 added it; 'off' is also its default
 )
 REFERENCE_RUNS = {
     'run2d_walls': dict(mode='2D', Lx=400.0, Ly=400.0, boundary_mode='walls'),

@@ -314,9 +314,7 @@ class TestProxyTracksTheTruePenetration(unittest.TestCase):
                         float(np.percentile(mild, 10)),
                         "the tail must worsen with shape severity")
 
-    def test_a_packed_bed_really_is_left_over_penetrated(self):
-        """The consequence, end to end: the settle's own report against the
-        truth on the bed it produces."""
+    def _packed_bed(self, relax):
         import contextlib
         import io as _io
         from gels.engine import Params, generate_packing, se2d_mtd_core
@@ -327,7 +325,7 @@ class TestProxyTracksTheTruePenetration(unittest.TestCase):
                    boundary_top='free', gravity_enabled=True, granule_density=1180.0,
                    packing_consolidation='gravity', phi_solid_target=0.35,
                    bed_phi_assumed=0.8, cell_surface_coverage=0.0,
-                   n_cells_per_granule=0, save_data=False)
+                   n_cells_per_granule=0, save_data=False, packing_relax=relax)
         with contextlib.redirect_stdout(_io.StringIO()):
             gs = generate_packing(p, seed=3)
         true = []
@@ -338,11 +336,26 @@ class TestProxyTracksTheTruePenetration(unittest.TestCase):
                                   gs.n_shape[j], gs.theta[j])
                 if o[0]:
                     true.append(o[1])
+        return p, gs, true
+
+    def test_the_settle_alone_leaves_the_bed_over_penetrated(self):
+        """The V3.4 finding, end to end: the settle's own report against the
+        truth on the bed it produces. `relax='none'` is the settle alone."""
+        p, _gs, true = self._packed_bed('none')
         self.assertGreater(len(true), 5)
         tol = float(getattr(p, 'packing_overlap_tol', 1.0))
         self.assertGreater(max(true), 5.0 * tol,
                            "the settle stops at ~tol on its proxy; the true "
                            "penetration it leaves is far larger")
+
+    def test_and_v35_relaxation_removes_it(self):
+        """`packing.relax` (auto, i.e. fire under a load) is the fix -- it stops
+        on a FORCE tolerance in the dynamics' own units instead."""
+        _p0, _gs0, before = self._packed_bed('none')
+        _p1, _gs1, after = self._packed_bed('auto')
+        self.assertGreater(len(after), 5)
+        self.assertLess(max(after), max(before) / 3.0,
+                        f"{max(before):.4g} -> {max(after):.4g} um")
 
 
 class TestBoundingRadius(unittest.TestCase):

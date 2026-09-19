@@ -74,6 +74,7 @@ class Boundary:
     shape: str = _P.boundary_shape                # box | cylinder (3D only)
     top: str = _P.boundary_top                    # wall | free
     functionalization: float = _P.boundary_functionalization   # collagen coverage of the wall (0 = inert)
+    wall_clamp: str = _P.boundary_wall_clamp      # V3.5: contact | force | legacy
     layer: BoundaryLayer = field(default_factory=BoundaryLayer)
 
 
@@ -296,7 +297,7 @@ class Packing:
     shape_contact: bool = _P.packing_shape_contact   # V3.2: shape-aware settle (needs shape_enabled)
     shape_margin: float = _P.packing_shape_margin
     overlap_tol_model: str = _P.packing_overlap_tol_model   # V3.5: fixed | elastic
-    relax: str = _P.packing_relax                    # V3.5: none | fire
+    relax: str = _P.packing_relax                    # V3.5: auto | none | fire
     relax_force_tol: float = _P.packing_relax_force_tol
 
 
@@ -403,6 +404,7 @@ FLAT_MAP = [
     ('domain.size_um[1]', 'Ly'),
     ('domain.size_um[2]', 'Lz'),
     ('boundary.mode', 'boundary_mode'),
+    ('boundary.wall_clamp', 'boundary_wall_clamp'),
     ('boundary.shape', 'boundary_shape'),
     ('boundary.top', 'boundary_top'),
     ('boundary.functionalization', 'boundary_functionalization'),
@@ -1023,8 +1025,10 @@ def validate(setup: Setup) -> None:
         errs.append("dynamics.gradient_flow must be 'off', 'monitor' or 'damped'")
     if setup.packing.overlap_tol_model not in ('fixed', 'elastic'):
         errs.append("packing.overlap_tol_model must be 'fixed' or 'elastic'")
-    if setup.packing.relax not in ('none', 'fire'):
-        errs.append("packing.relax must be 'none' or 'fire'")
+    if setup.packing.relax not in ('auto', 'none', 'fire'):
+        errs.append("packing.relax must be 'auto', 'none' or 'fire'")
+    if setup.boundary.wall_clamp not in ('contact', 'force', 'legacy'):
+        errs.append("boundary.wall_clamp must be 'contact', 'force' or 'legacy'")
     if float(setup.packing.relax_force_tol) <= 0:
         errs.append("packing.relax_force_tol must be > 0")
     if float(setup.contact.overlap_safety) <= 0:
@@ -1205,6 +1209,8 @@ boundary:
   shape: box                       # box | cylinder (3D only: axis z, R = min(Lx,Ly)/2, centre (Lx/2, Ly/2))
   top: wall                        # wall | free (open top: z is up in 3D, y is up in a 2D "dish slice")
   functionalization: 0.0           # collagen coverage f of the container wall: 0 = inert, 1 = fully coated
+  wall_clamp: contact              # contact (clip inside the wall so the contact carries the load) |
+                                   #   force (clip only at the wall plane) | legacy (V2.7 +0.5 um standoff)
   layer:                           # optional lattice of immobile granules lining floor and wall (cells bridge to it)
     enabled: false
     radius_um: 0.0                 # 0 -> mean radius of the smallest mobile species
@@ -1357,7 +1363,7 @@ packing:
   shape_contact: false             # shape-aware settle: true bounding radius, directional overlap, rotation to nest
   shape_margin: 0.0                # inflate every directional radius by (1+margin) (blunt; costs reachable phi)
   overlap_tol_model: fixed         # fixed (0.05 x mean_r) | elastic (sized from the contact law, V3.5)
-  relax: none                      # none | fire -- FIRE-relax the bed under the DYNAMICS' force law (V3.5)
+  relax: auto                      # auto (on when gravity or cells drive the run) | none | fire -- FIRE-relax the bed under the DYNAMICS' force law (V3.5)
   relax_force_tol: 0.5             # fire: stop at max|F| <= tol x (a granule weight / one cell's traction)
   consolidation: auto              # centre (V2.7 pull toward the box centre) | gravity | none | auto (gravity if enabled, else none)
 

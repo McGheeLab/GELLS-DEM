@@ -38,7 +38,13 @@ ARRAYS = ('x', 'y', 'z', 'r', 'a', 'b', 'c', 'n1', 'n2', 'theta', 'r_bound', 'sp
 def _params(mode='2D', shape=False, periodic=False, **kw):
     base = dict(mode=mode, Lx=500.0, Ly=500.0, Lz=800.0, phi_solid_target=0.6, func_ratio=0.6,
                 cell_surface_coverage=1.0, packing_settle_steps=60, save_data=False,
-                boundary_mode='periodic' if periodic else 'walls')
+                boundary_mode='periodic' if periodic else 'walls',
+                # V3.5: this gate is about the SETTLE being bit-identical between the
+                # twins. `relax_packing` is a separate, later stage that calls
+                # `compute_forces`, so under `use_numba=False` it would run the reference
+                # force path and under True the compiled one -- agreement to rounding, not
+                # bit-for-bit. It has its own gate in tests/test_fire_relax.py.
+                packing_relax='none')
     if mode == '3D':
         base.update(Lx=300.0, Ly=300.0, Lz=300.0, phi_solid_target=0.5)
     if shape:

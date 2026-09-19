@@ -332,15 +332,24 @@ class Params:
                                                # ascending step -- the fixed point is untouched.
 
     # ── Packing ──
+    boundary_wall_clamp: str = 'contact'   # V3.5: contact | force | legacy. Where the position
+                                    # clip sits relative to the wall. 'legacy' is the V2.7
+                                    # +0.5 um standoff, which held every granule clear of
+                                    # every wall so the wall contact NEVER engaged and the
+                                    # clip carried the bed. See `wall_clamp_margin`.
     packing_overlap_tol_model: str = 'fixed'   # V3.5: fixed (0.05 * mean_r, the V2.7 rule) |
                                     # elastic (the penetration at which the DYNAMICS' contact
                                     # law carries the driving load). The V2.7 rule is 28x too
                                     # loose in length and 145x in force on a shaped gravity
                                     # bed. See `settle_overlap_tolerance`.
-    packing_relax: str = 'none'     # V3.5: none | fire. FIRE-relax the packed bed under the
-                                    # DYNAMICS' force law before handing it over, so the run
+    packing_relax: str = 'auto'     # V3.5: auto | none | fire. FIRE-relax the packed bed under
+                                    # the DYNAMICS' force law before handing it over, so the run
                                     # starts in force balance instead of spending its first
-                                    # hours unwinding the packer. See `relax_packing`.
+                                    # hours unwinding the packer. `auto` = on whenever the run
+                                    # HAS a driving load (gravity or cells) and off otherwise,
+                                    # because a bed with no load has a genuinely loose
+                                    # equilibrium and relaxing it just lets it expand.
+                                    # See `relax_packing` and `relax_mode`.
     packing_relax_force_tol: float = 0.5   # V3.5: stop when max|F| < tol * dynamics_load_scale.
                                            # (a granule's weight, or one cell's traction).
                                            # BELOW 1 on purpose: an unsupported granule has
@@ -5272,6 +5281,24 @@ def free_force_residual(gs, p, F):
     return (float(mag[free].max()) if np.any(free) else 0.0), int(np.sum(held))
 
 
+def free_force_percentile(gs, p, F, q=95.0):
+    """The q-th percentile of the clamp-free residual, nN (V3.5).
+
+    The max is a max over a heavy tail: on a loose shaped bed a SINGLE wedged
+    granule read 132x the gravity load while the second-worst read 0.97x. Quote
+    both, or the verdict is decided by one granule.
+    """
+    N = gs.N
+    if N == 0:
+        return 0.0
+    held = constraint_clamped(gs, p, F)
+    fixed = getattr(gs, 'fixed', None)
+    if fixed is not None:
+        held = held | np.asarray(fixed[:N], dtype=bool)
+    mag = np.linalg.norm(np.asarray(F)[:N], axis=1)[~held]
+    return float(np.percentile(mag, q)) if mag.size else 0.0
+
+
 def dynamics_load_scale(gs, p):
     """The largest force the run is SUPPOSED to be driven by, in nN (V3.4).
 
@@ -5410,6 +5437,11 @@ def handoff_force_balance(gs, p, F0):
 # exactly where the V3.4 packer-handoff finding lives.
 
 ENERGY_ASCENT_TOL = 0.1        # a step is flagged when dE > tol * |work done on it|
+# ...but only once dE is bigger than the float resolution of E itself. A bed that FIRE has
+# already relaxed does almost no work per step, so `dE / |W|` is 0/0 and explodes: measured
+# at 9.3e3 on a relaxed bed whose dE and W were both at rounding. Below this the SIGN of dE
+# is not information.
+ENERGY_NOISE_REL = 1e-9
 ENERGY_MAX_BACKTRACK = 6       # 'damped': halvings of the step scale before it floors
 ENERGY_SCALE_RELAX = 1.1       # 'damped': per-descending-step relaxation back toward 1
 
@@ -5675,7 +5707,10 @@ def _energy_audit(gs, p, mode, E0, parts, work):
         gs.energy_delta = dE
         gs.energy_work = w_prev
         gs.energy_residual = dE + w_prev
-        frac = dE / max(abs(w_prev), 1e-30)
+        if abs(dE) <= ENERGY_NOISE_REL * max(abs(E0), 1.0):
+            frac = 0.0            # both dE and the work are at rounding; 0/0 is not an ascent
+        else:
+            frac = dE / max(abs(w_prev), 1e-30)
         gs.energy_ascent_frac = frac
         ascending = frac > ENERGY_ASCENT_TOL
         if ascending:
@@ -5764,6 +5799,16 @@ def energy_metrics(gs):
 # clamps is not optional -- without it `P = F.v` counts motion the clamp
 # deleted, FIRE's sign test misfires, and the bed pumps against the wall.
 #
+# Plain FIRE is NOT monotone, and that is not academic: on a 3D shaped bed with
+# `boundary.wall_clamp = force` it drove the energy from 2378 to 4753 nN um and
+# the handoff from 264x to 5178x -- it returned a WORSE bed than the settle gave
+# it. Stiff wall contacts are what does it; the MD step goes unstable long
+# before the uphill test notices. So every step is checked against the energy
+# and rejected if it rises (positions restored, dt halved, velocities zeroed),
+# and the best configuration seen is restored at the end. `relax_packing` can
+# then only improve the bed it was handed -- which is the one property a
+# packer-handoff fix must not lack.
+#
 # Adhesion: JKR pulls, so relaxing under it can draw the bed together rather
 # than only apart. That is correct and is the point. If the dynamics' own law
 # wants the bed closer, the run would have done it in the first hour anyway;
@@ -5790,6 +5835,11 @@ FIRE_FALLBACK_REDUCTION = 1e-3   # with no load scale, relax this far below the 
 # total drop so far has reached the minimum; further steps cannot help.
 FIRE_STALL_WINDOW = 200
 FIRE_STALL_GAIN = 0.01
+# How far uphill a single step may go before it is rejected, as a fraction of the energy
+# FIRE started from. FIRE is inertial and SHOULD be allowed small uphill moves -- rejecting
+# every one of them stops it dead on the legacy wall clamp, where the clip fights the first
+# step. What must be caught is divergence, which is orders of magnitude, not percent.
+FIRE_UPHILL_TOL = 0.01
 
 
 def _fire_masses(gs, p):
@@ -5827,6 +5877,41 @@ def penetration_stats(contacts):
             'n_contacts': int(len(contacts))}
 
 
+def relax_mode(p, gs=None):
+    """Resolve ``packing.relax``: ``'fire'`` or ``'none'`` (V3.5).
+
+    ``auto`` -- the default -- is ``fire`` exactly when
+    :func:`dynamics_load_scale` finds something driving the run, and ``none``
+    otherwise. That is the right discriminator rather than a guess: a bed with
+    no gravity and no cells has a genuinely LOOSE equilibrium under JKR (a
+    `consolidation: centre` packing drops from 202 contacts to 19 when
+    relaxed), because nothing is holding it together. There is also no force
+    scale to stop on, so FIRE would be aiming at a relative target with no
+    physical meaning. Beds that do have a load get the fix; beds that do not
+    are left alone.
+    """
+    mode = str(getattr(p, 'packing_relax', 'auto'))
+    if mode != 'auto':
+        return mode
+    if gs is None:
+        return 'none'
+    # V3.5: do not relax a shaped bed into a projection that will undo it.
+    # With `contact.shape_dynamics` off the overlap projection measures overlap
+    # between BOUNDING SPHERES, which touch long before the shapes do. On a
+    # FIRE-relaxed shaped bed it then fires on 15-17 % of pairs and does work
+    # no energy accounts for -- the gradient-flow monitor reports ascents of
+    # 4e3-9e3 times the work, against 7-27 with `shape_dynamics` on. `auto`
+    # declines; an explicit `relax: fire` is still honoured, with this warning.
+    if bool(getattr(p, 'shape_enabled', False)) and not bool(
+            getattr(p, 'contact_shape_dynamics', False)):
+        print("  packing.relax=auto declined: shaped granules need "
+              "contact.shape_dynamics=true, or the bounding-sphere overlap "
+              "projection undoes the relaxation (15-17 % of pairs clipped).")
+        return 'none'
+    scale, _kind = dynamics_load_scale(gs, p)
+    return 'fire' if scale else 'none'
+
+
 def relax_packing(gs, p, rng=None):
     """FIRE-relax the packed bed under the DYNAMICS' force law (V3.5).
 
@@ -5843,7 +5928,7 @@ def relax_packing(gs, p, rng=None):
     coordinate: the FIRE power test is ``P = sum F.v + sum tau.omega``, so a bed
     that is in force balance but not torque balance does not report success.
     """
-    if str(getattr(p, 'packing_relax', 'none')) != 'fire' or gs.N < 2:
+    if relax_mode(p, gs) != 'fire' or gs.N < 2:
         return {}
     rng = rng if rng is not None else np.random.default_rng(0)
     N = gs.N
@@ -5869,8 +5954,19 @@ def relax_packing(gs, p, rng=None):
     T_save = float(getattr(p, 'T_active', 0.0))
     p.T_active = 0.0
     try:
+        # The settle has its own wall handling, so the bed it hands over need not
+        # be inside the DYNAMICS' clip. Under the legacy +0.5 um standoff the
+        # first step teleports every wall granule by the full 0.5 um and injects
+        # 65 nN um -- measured. Pay that projection up front, so it is attributed
+        # to the clip rather than to FIRE, and so FIRE starts from a state it can
+        # descend from. Under `wall_clamp: contact` the displacement is exactly
+        # zero, which is one more argument for it.
+        _pos_in = gs.pos[:N].copy()
+        apply_position_bounds(gs, p)
+        entry_shift = float(np.abs(gs.pos[:N] - _pos_in).max())
         F, tq, contacts = evaluate()
         f_max0, n_held0 = free_force_residual(gs, p, F)
+        f_p95_0 = free_force_percentile(gs, p, F)
         scale, kind = dynamics_load_scale(gs, p)
         tol_mult = float(getattr(p, 'packing_relax_force_tol', 1.0))
         if scale is None:
@@ -5886,23 +5982,27 @@ def relax_packing(gs, p, rng=None):
         alpha = FIRE_ALPHA0
         n_pos = 0
         steps = 0
+        rejected = 0
         converged = False
         stalled = False
         E0, _parts = system_energy(gs, p, contacts)
         E_window = E0
+        E_cur = E0
+        E_best = E0
+        best = (gs.pos[:N].copy(), gs.theta[:N].copy(),
+                gs.quat[:N].copy() if gs.quat is not None else None)
         for _ in range(FIRE_MAX_STEPS):
             f_max, _n_held = free_force_residual(gs, p, F)
             if f_max < f_tol:
                 converged = True
                 break
             if steps and steps % FIRE_STALL_WINDOW == 0:
-                E_now, _parts = system_energy(gs, p, contacts)
-                drop = E_window - E_now
-                total = E0 - E_now
+                drop = E_window - E_cur
+                total = E0 - E_cur
                 if drop <= FIRE_STALL_GAIN * max(total, 1e-30):
                     stalled = True
                     break
-                E_window = E_now
+                E_window = E_cur
             P = float(np.sum(F * v))
             if w is not None:
                 P += float(np.sum(tq * w))
@@ -5927,6 +6027,8 @@ def relax_packing(gs, p, rng=None):
                 if dt < 1e-9 * FIRE_DT0:
                     break
 
+            prev = (gs.pos[:N].copy(), gs.theta[:N].copy(),
+                    gs.quat[:N].copy() if gs.quat is not None else None)
             v += (F / m[:, None]) * dt
             intended = gs.pos[:N, :dim] + v * dt
             gs.pos[:N, :dim] = intended
@@ -5949,8 +6051,41 @@ def relax_packing(gs, p, rng=None):
                 if np.any(clamped):
                     v[clamped] = 0.0
             F, tq, contacts = evaluate()
+            E_new, _parts = system_energy(gs, p, contacts)
+            if E_new > E_cur + FIRE_UPHILL_TOL * abs(E0):
+                # Too far uphill for an inertial minimiser: restore, shorten the
+                # step and drop the velocity -- the same response FIRE already
+                # makes to P < 0, applied to the quantity that actually matters.
+                gs.pos[:N] = prev[0]
+                gs.theta[:N] = prev[1]
+                if prev[2] is not None:
+                    gs.quat[:N] = prev[2]
+                v[:] = 0.0
+                if w is not None:
+                    w[:] = 0.0
+                dt *= FIRE_F_DEC
+                alpha = FIRE_ALPHA0
+                n_pos = 0
+                rejected += 1
+                F, tq, contacts = evaluate()
+                if dt < 1e-9 * FIRE_DT0:
+                    break
+                continue
+            E_cur = E_new
+            if E_new < E_best:
+                E_best = E_new
+                best = (gs.pos[:N].copy(), gs.theta[:N].copy(),
+                        gs.quat[:N].copy() if gs.quat is not None else None)
 
+        # Hand back the best configuration seen, never the last one.
+        if E_best < E_cur:
+            gs.pos[:N] = best[0]
+            gs.theta[:N] = best[1]
+            if best[2] is not None:
+                gs.quat[:N] = best[2]
+            F, tq, contacts = evaluate()
         f_max, n_held = free_force_residual(gs, p, F)
+        f_p95 = free_force_percentile(gs, p, F)
         E_end, _parts = system_energy(gs, p, contacts)
         pen = penetration_stats(contacts)
         # Why it stalled, if it did. A RATTLER has no contacts at all, so its
@@ -5979,16 +6114,21 @@ def relax_packing(gs, p, rng=None):
               'fire_f_tol': f_tol, 'fire_load_kind': kind or 'relative',
               'f_max_before': f_max0, 'f_max_after': f_max,
               'energy_before': E0, 'energy_after': E_end,
+              'fire_rejected': rejected, 'entry_clip_shift': entry_shift,
               'n_rattlers': n_rattlers, 'n_unbalanced': n_unbalanced,
               'n_wall_clamped': n_held, 'n_wall_clamped_before': n_held0,
+              'f_p95_before': f_p95_0, 'f_p95_after': f_p95,
               'ratio_before': (f_max0 / scale) if scale else float('nan'),
               'ratio_after': (f_max / scale) if scale else float('nan'),
+              'ratio_p95_before': (f_p95_0 / scale) if scale else float('nan'),
+              'ratio_p95_after': (f_p95 / scale) if scale else float('nan'),
               'penetration_before': pen0, 'penetration_after': pen}
     gs.relax_report = report
     print(f"  FIRE relax ({why}, {steps} steps): max|F| {f_max0:.3g} -> {f_max:.3g} nN "
           f"(tol {f_tol:.3g})")
     if scale:
-        print(f"    handoff {f_max0 / scale:.3g}x -> {f_max / scale:.3g}x the {kind} load")
+        print(f"    handoff {f_max0 / scale:.3g}x -> {f_max / scale:.3g}x the {kind} load "
+              f"(p95 {f_p95_0 / scale:.3g}x -> {f_p95 / scale:.3g}x)")
     print(f"    max penetration {pen0['penetration_max']:.3g} -> "
           f"{pen['penetration_max']:.3g} um, contacts "
           f"{pen0['n_contacts']} -> {pen['n_contacts']}")
@@ -6008,6 +6148,48 @@ def apply_gravity(gs, p, F):
     F[:N, axis] -= granule_weights(gs, p)
 
 
+WALL_CLAMP_LEGACY_MARGIN = 0.5      # um, the V2.7 standoff
+
+
+def wall_clamp_margin(gs, p, reach):
+    """Signed margin added to a granule's reach when clipping it inside a wall (V3.5).
+
+    Until V3.5 this was a hardcoded ``+0.5`` um: every granule was held half a
+    micron clear of every wall, so a granule resting on the floor was **never
+    in wall contact** -- the JKR wall force saw a positive gap and did nothing,
+    and the granule's whole weight was carried by the clip. The bed rested on a
+    numerical shelf, every wall contact force read zero, and every
+    residual-force measure had an irreducible floor of one granule weight. See
+    :func:`constraint_clamped`, which exists only to report around it.
+
+    ``boundary.wall_clamp`` picks what the clip is for:
+
+    ``contact`` (default)
+        Clip at ``reach - max_overlap_frac * reach``, so a granule may sink
+        into the wall by the same fraction the engine already allows between
+        two granules. The wall contact engages, carries the load, and the clip
+        goes back to being a backstop against escape rather than the thing
+        holding the bed up.
+    ``force``
+        Clip only at the wall plane itself (centre inside the box), so the
+        contact force does all the work. The neighbour and render grids still
+        need positions inside the box, which is the one thing this guarantees.
+    ``legacy``
+        The V2.7 ``+0.5`` um standoff, bit-for-bit. Pinned in the fixtures.
+
+    Note the SETTLE still uses its own wall handling and its own force law, so
+    this changes the dynamics and `relax_packing`, not the packer.
+    """
+    reach = np.asarray(reach, dtype=float)
+    mode = str(getattr(p, 'boundary_wall_clamp', 'contact'))
+    if mode == 'legacy':
+        return np.full(reach.shape, WALL_CLAMP_LEGACY_MARGIN)
+    if mode == 'force':
+        return -reach
+    frac = float(getattr(p, 'max_overlap_frac', 0.0) or 0.0)
+    return -np.minimum(np.maximum(frac, 0.0) * reach, reach)
+
+
 def apply_position_bounds(gs, p):
     """Keep every granule inside the container after a position update.
 
@@ -6022,30 +6204,31 @@ def apply_position_bounds(gs, p):
         wrap_positions(gs, p)
         return
     rb = gs.r_bound[:N]
+    m_rb = wall_clamp_margin(gs, p, rb)          # V3.5, was a hardcoded +0.5
     geom = boundary_geometry(p)
     fixed = getattr(gs, 'fixed', None)
     has_fixed = fixed is not None and bool(np.any(fixed[:N]))
     if geom.shape_code == 0 and not geom.top_free and not has_fixed:
-        gs.x[:N] = np.clip(gs.x[:N], rb + 0.5, p.Lx - rb - 0.5)
-        gs.y[:N] = np.clip(gs.y[:N], rb + 0.5, p.Ly - rb - 0.5)
+        gs.x[:N] = np.clip(gs.x[:N], rb + m_rb, p.Lx - rb - m_rb)
+        gs.y[:N] = np.clip(gs.y[:N], rb + m_rb, p.Ly - rb - m_rb)
         if gs.is_3d:
-            gs.z[:N] = np.clip(gs.z[:N], rb + 0.5, p.Lz - rb - 0.5)
+            gs.z[:N] = np.clip(gs.z[:N], rb + m_rb, p.Lz - rb - m_rb)
         return
     saved = gs.pos[:N][fixed[:N]].copy() if has_fixed else None
     if geom.shape_code == 1:
         dx = gs.x[:N] - geom.cx
         dy = gs.y[:N] - geom.cy
         rho = np.sqrt(dx * dx + dy * dy)
-        rho_max = geom.R_cyl - rb - 0.5
+        rho_max = geom.R_cyl - rb - m_rb
         over = rho > rho_max
         if np.any(over):
             scale = rho_max[over] / rho[over]
             gs.x[:N][over] = geom.cx + dx[over] * scale
             gs.y[:N][over] = geom.cy + dy[over] * scale
     else:
-        gs.x[:N] = np.clip(gs.x[:N], rb + 0.5, p.Lx - rb - 0.5)
+        gs.x[:N] = np.clip(gs.x[:N], rb + m_rb, p.Lx - rb - m_rb)
         if gs.is_3d or not geom.top_free:
-            gs.y[:N] = np.clip(gs.y[:N], rb + 0.5, p.Ly - rb - 0.5)
+            gs.y[:N] = np.clip(gs.y[:N], rb + m_rb, p.Ly - rb - m_rb)
     if gs.is_3d:
         up, L_up = gs.z, p.Lz
     else:
@@ -6058,8 +6241,8 @@ def apply_position_bounds(gs, p):
     else:
         _down = granule_reach(gs, p, N, 0.0, -1.0)
         _up = granule_reach(gs, p, N, 0.0, 1.0)
-    lo = _down + 0.5
-    hi = L_up - _up - 0.5
+    lo = _down + wall_clamp_margin(gs, p, _down)
+    hi = L_up - _up - wall_clamp_margin(gs, p, _up)
     if geom.top_free:
         n_over = int(np.count_nonzero(up[:N] > hi))
         if n_over:

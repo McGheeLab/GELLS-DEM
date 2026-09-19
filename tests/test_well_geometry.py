@@ -143,17 +143,47 @@ class TestFreeTop(unittest.TestCase):
         self.assertLess(float(F[0, 2]), 0.0)
 
     def test_position_bounds_clamp_at_the_container_height_and_count(self):
+        # V3.5: the clip sits INSIDE the wall by `max_overlap_frac * reach` so the
+        # wall contact can engage and carry the load -- see `wall_clamp_margin`.
         p = Params(mode='3D', Lx=400.0, Ly=400.0, Lz=400.0, save_data=False, boundary_top='free')
         gs = _single(p, 200.0, 200.0, 300.0)
+        margin = -p.max_overlap_frac * R_GRAN
         gs.n_top_clamped = 0
-        gs.z[0] = 350.0                            # still inside: z + r + 0.5 < Lz
+        gs.z[0] = 350.0                            # still inside
         apply_position_bounds(gs, p)
         self.assertAlmostEqual(float(gs.z[0]), 350.0, places=12)
         self.assertEqual(gs.n_top_clamped, 0)
-        gs.z[0] = 395.0                            # past Lz - r - 0.5
+        gs.z[0] = 399.5                            # past Lz - r - margin
+        apply_position_bounds(gs, p)
+        self.assertAlmostEqual(float(gs.z[0]), p.Lz - R_GRAN - margin, places=12)
+        self.assertEqual(gs.n_top_clamped, 1)
+
+    def test_the_legacy_clamp_still_holds_granules_clear_of_the_wall(self):
+        """`boundary.wall_clamp = legacy` reproduces the V2.7 +0.5 um standoff."""
+        p = Params(mode='3D', Lx=400.0, Ly=400.0, Lz=400.0, save_data=False,
+                   boundary_top='free', boundary_wall_clamp='legacy')
+        gs = _single(p, 200.0, 200.0, 300.0)
+        gs.z[0] = 395.0
         apply_position_bounds(gs, p)
         self.assertAlmostEqual(float(gs.z[0]), p.Lz - R_GRAN - 0.5, places=12)
-        self.assertEqual(gs.n_top_clamped, 1)
+
+    def test_the_centre_stays_inside_the_box_in_every_mode(self):
+        """The one thing the clip must guarantee: the neighbour and render grids
+        need positions inside the box. Surfaces may now cross a wall; centres
+        may not."""
+        for mode in ('contact', 'force', 'legacy'):
+            p = Params(mode='3D', Lx=400.0, Ly=400.0, Lz=400.0, save_data=False,
+                       boundary_top='free', boundary_wall_clamp=mode)
+            gs = _single(p, 200.0, 200.0, 300.0)
+            for probe in (-500.0, -1.0, 0.0, 399.0, 900.0):
+                gs.z[0] = probe
+                gs.x[0] = probe
+                apply_position_bounds(gs, p)
+                with self.subTest(clamp=mode, probe=probe):
+                    self.assertGreaterEqual(float(gs.z[0]), 0.0)
+                    self.assertLessEqual(float(gs.z[0]), p.Lz)
+                    self.assertGreaterEqual(float(gs.x[0]), 0.0)
+                    self.assertLessEqual(float(gs.x[0]), p.Lx)
 
     def test_cylinder_bounds_project_radially(self):
         p = _well()
@@ -161,7 +191,8 @@ class TestFreeTop(unittest.TestCase):
         gs = _single(p, geom.cx + geom.R_cyl - 5.0, geom.cy, 200.0)
         apply_position_bounds(gs, p)
         rho = float(np.hypot(gs.x[0] - geom.cx, gs.y[0] - geom.cy))
-        self.assertAlmostEqual(rho, geom.R_cyl - R_GRAN - 0.5, places=9)
+        margin = -p.max_overlap_frac * R_GRAN          # V3.5: the clip sits inside the wall
+        self.assertAlmostEqual(rho, geom.R_cyl - R_GRAN - margin, places=9)
         self.assertAlmostEqual(float(gs.y[0]), geom.cy, places=12)
 
 
@@ -214,9 +245,16 @@ class TestRSAPlacement(unittest.TestCase):
         gs = generate_packing_3d(p, seed=3)
         geom = boundary_geometry(p)
         rho = np.hypot(gs.x - geom.cx, gs.y - geom.cy)
-        self.assertLessEqual(float(np.max(rho + gs.r_bound)), geom.R_cyl + 1e-9)
-        self.assertGreaterEqual(float(np.min(gs.z - gs.r_bound)), -1e-9)
-        self.assertLess(float(np.max(gs.z + gs.r_bound)), p.Lz)
+        # V3.5: a granule's SURFACE may cross a wall by up to the clip allowance
+        # (`max_overlap_frac * reach`), which is what lets the wall contact carry
+        # its load instead of the clip. Its CENTRE may not -- the neighbour and
+        # render grids need positions inside the box.
+        slack = p.max_overlap_frac * float(np.max(gs.r_bound[:gs.N])) + 1e-9
+        self.assertLessEqual(float(np.max(rho + gs.r_bound)), geom.R_cyl + slack)
+        self.assertLessEqual(float(np.max(rho)), geom.R_cyl + 1e-9)
+        self.assertGreaterEqual(float(np.min(gs.z - gs.r_bound)), -slack)
+        self.assertGreaterEqual(float(np.min(gs.z)), -1e-9)
+        self.assertLess(float(np.max(gs.z + gs.r_bound)), p.Lz + slack)
         self.assertGreater(gs.N, 50)
 
 

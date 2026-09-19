@@ -102,9 +102,14 @@ class TestGravityBed(unittest.TestCase):
         self.assertLess(phi_bed, phi_hi, msg)
         self.assertGreater(bed['bed_height_mean'], 0.75 * H_est, msg)
         self.assertLess(bed['bed_height_mean'], 1.3 * H_est, msg)
-        # inside the container: on the floor, below the container height
-        self.assertGreaterEqual(float(np.min(up - gs.r_bound)), -1e-9)
-        self.assertLessEqual(float(np.max(up + gs.r_bound)), L_up + 1e-9)
+        # Inside the container. V3.5: a surface may cross a wall by up to the
+        # clip allowance -- that is what lets the wall contact carry the load
+        # instead of the clip (`wall_clamp_margin`) -- but a CENTRE may not.
+        slack = p.max_overlap_frac * float(np.max(gs.r_bound[:gs.N])) + 1e-9
+        self.assertGreaterEqual(float(np.min(up - gs.r_bound)), -slack)
+        self.assertLessEqual(float(np.max(up + gs.r_bound)), L_up + slack)
+        self.assertGreaterEqual(float(np.min(up[:gs.N])), -1e-9)
+        self.assertLessEqual(float(np.max(up[:gs.N])), L_up + 1e-9)
         # converged: no deep overlaps, (almost) no floating granules
         nc, max_ov = _contacts(gs)
         self.assertLess(max_ov, 0.06 * mean_r, msg)
@@ -124,7 +129,10 @@ class TestGravityBed(unittest.TestCase):
         gs = generate_packing_3d(p, seed=6)
         geom = boundary_geometry(p)
         rho = np.hypot(gs.x - geom.cx, gs.y - geom.cy)
-        self.assertLessEqual(float(np.max(rho + gs.r_bound)), geom.R_cyl + 1e-9)
+        # V3.5: surfaces may cross the wall by the clip allowance; centres may not
+        slack = p.max_overlap_frac * float(np.max(gs.r_bound[:gs.N])) + 1e-9
+        self.assertLessEqual(float(np.max(rho + gs.r_bound)), geom.R_cyl + slack)
+        self.assertLessEqual(float(np.max(rho[:gs.N])), geom.R_cyl + 1e-9)
         self._check_bed(gs, p, 0.45, 0.68)
 
     def test_2d_dish(self):
