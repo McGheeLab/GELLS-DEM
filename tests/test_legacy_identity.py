@@ -15,11 +15,25 @@ This is the hard gate for Phases 0-4 of the V3.0 plan (the Python path).
 The compiled kernels (Phase 6) are covered by the ``*_vs_reference`` tests
 instead, with documented tolerances.
 
+PLATFORM GATING (V3.3). Exact equality of a RUN is only meaningful on the
+machine the fixture was blessed on. The stored fixtures were generated on
+Windows / CPython 3.14 / numpy 2.5; elsewhere the packing differs by ~1e-13
+(different libm, different numpy reduction order) and in ``run3d_spheres``
+that flips a discrete bridge-formation decision at t = 1.0, after which the
+trajectories bifurcate to O(1). No tolerance can bridge that, so
+``test_reference_runs_bit_identical`` SKIPS when the fingerprint does not
+match. ``tests/test_local_identity.py`` provides the same guarantee against
+a baseline blessed on the current machine.
+
+``params.json`` is pure config resolution with no float dynamics, so
+``test_step1_params_json_identical`` is NOT platform-gated and always runs.
+
 Run:  python -m unittest tests.test_legacy_identity -v
 """
 
 import json
 import os
+import platform
 import shutil
 import sys
 import tempfile
@@ -37,6 +51,49 @@ import make_fixtures as mf  # noqa: E402
 
 FIXTURES = mf.FIXTURES
 EXCLUDED_PARAM_KEYS = {'output_dir', 'resume_from'}
+
+
+def fingerprint_mismatch(fixtures_dir):
+    """Reason string if `fixtures_dir` was blessed on a different platform, else ''."""
+    path = os.path.join(fixtures_dir, 'manifest.json')
+    try:
+        with open(path) as fh:
+            stored = json.load(fh).get('fingerprint')
+    except (OSError, ValueError):
+        return ''                      # no manifest / unreadable: let the test run
+    if not stored:
+        # Pre-V3.3 manifest: no 'fingerprint' block. Derive what we can from
+        # 'generated_with' (python/numpy minor + the OS name that leads
+        # platform.platform(), e.g. 'Windows-11-...' / 'macOS-15...').
+        try:
+            with open(path) as fh:
+                gen = json.load(fh).get('generated_with') or {}
+        except (OSError, ValueError):
+            return ''
+        if not gen:
+            return ''
+        import numpy as _np
+        stored = {
+            'system': str(gen.get('platform', '')).split('-')[0],
+            'python': '.'.join(str(gen.get('python', '')).split('.')[:2]),
+            'numpy': '.'.join(str(gen.get('numpy', '')).split('.')[:2]),
+        }
+        here = {
+            'system': platform.platform().split('-')[0],
+            'python': '.'.join(platform.python_version_tuple()[:2]),
+            'numpy': '.'.join(_np.__version__.split('.')[:2]),
+        }
+        diff = {k: f"{stored[k]} != {here[k]}" for k in here if stored[k] and stored[k] != here[k]}
+        if not diff:
+            return ''
+        return (f"fixtures in {os.path.basename(fixtures_dir)} were blessed on a different "
+                f"platform ({diff}); exact-equality run comparison is not meaningful there")
+    here = mf.platform_fingerprint()
+    if stored == here:
+        return ''
+    diff = {k: f"{stored.get(k)} != {here.get(k)}" for k in here if stored.get(k) != here.get(k)}
+    return (f"fixtures in {os.path.basename(fixtures_dir)} were blessed on a different "
+            f"platform ({diff}); exact-equality run comparison is not meaningful there")
 
 
 def _snapshot_files(run_dir, sub='snapshots', prefix='snap_'):
@@ -106,6 +163,9 @@ class TestLegacyIdentity(unittest.TestCase):
     # ── tests ───────────────────────────────────────────────────────────
 
     def test_reference_runs_bit_identical(self):
+        why = fingerprint_mismatch(FIXTURES)
+        if why:
+            self.skipTest(why + " - see tests/test_local_identity.py")
         for name in mf.REFERENCE_RUNS:
             with self.subTest(run=name):
                 ref_dir = os.path.join(FIXTURES, name)

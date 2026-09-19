@@ -14,9 +14,24 @@ Contents written:
     tests/fixtures/<run_name>/                   5-step reference run: params.json, metadata.json,
                                                  history.json, snapshots/snap_0000..0005.npz, fields/
 
+A SECOND, PLATFORM-LOCAL baseline lives under ``tests/fixtures_local/``.
+The V2.7 fixtures above were generated on Windows / CPython 3.14.7 / numpy
+2.5.3 and are NOT reproducible bit-for-bit on another platform: packing
+positions differ by ~1e-13 (ARM vs x86 libm, different numpy reduction
+order), and in ``run3d_spheres`` that flips a discrete bridge-formation
+decision at t = 1.0, after which the trajectories bifurcate to O(1). No
+tolerance can bridge that, so ``test_legacy_identity`` skips when the
+platform fingerprint does not match, and ``test_local_identity`` pins
+behaviour against a baseline blessed on THIS machine instead.
+
 Usage:
-    python tests/make_fixtures.py             # refuses to overwrite existing fixtures
-    python tests/make_fixtures.py --force     # regenerate (only do this deliberately!)
+    python tests/make_fixtures.py                       # refuses to overwrite
+    python tests/make_fixtures.py --local               # write tests/fixtures_local/
+    python tests/make_fixtures.py --force --i-really-mean-it
+                                # regenerate the V2.7 oracle. This DESTROYS an
+                                # irreplaceable record: the V2.7 code is no
+                                # longer in the tree, so the fixtures ARE the
+                                # only copy of its behaviour. Almost never right.
 """
 
 import argparse
@@ -40,7 +55,24 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 FIXTURES = os.path.join(REPO, 'tests', 'fixtures')
+FIXTURES_LOCAL = os.path.join(REPO, 'tests', 'fixtures_local')
 SEED = 7
+
+
+def platform_fingerprint():
+    """What has to match for an exact-equality fixture comparison to be meaningful.
+
+    Deliberately coarse: the machine/ABI, the CPython minor version and the
+    numpy minor version. Those are what change float reduction order and libm
+    results; the patch levels do not.
+    """
+    import numpy
+    return {
+        'machine': platform.machine(),
+        'system': platform.system(),
+        'python': '.'.join(platform.python_version_tuple()[:2]),
+        'numpy': '.'.join(numpy.__version__.split('.')[:2]),
+    }
 
 # Small, fast configurations that still exercise every code path the refactor
 # touches: walls vs periodic, circles vs superellipses, 2D vs 3D, and both
@@ -101,14 +133,27 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     ap.add_argument('--force', action='store_true',
                     help='overwrite existing fixtures')
+    ap.add_argument('--i-really-mean-it', dest='confirm', action='store_true',
+                    help='required with --force on the V2.7 oracle (see the module docstring)')
+    ap.add_argument('--local', action='store_true',
+                    help='write the platform-local baseline to tests/fixtures_local/ instead')
     args = ap.parse_args()
 
-    if os.path.isdir(FIXTURES) and os.listdir(FIXTURES) and not args.force:
-        print(f"Fixtures already exist in {FIXTURES}; use --force to regenerate.")
+    target = FIXTURES_LOCAL if args.local else FIXTURES
+
+    if args.force and not args.local and not args.confirm:
+        print("Refusing to regenerate the V2.7 oracle in tests/fixtures/.\n"
+              "The V2.7 code is no longer in the tree, so these files are the ONLY\n"
+              "record of its behaviour, and --force deletes them. If you are certain,\n"
+              "pass --i-really-mean-it as well. To refresh the platform-local\n"
+              "baseline instead, use:  --local --force")
         return 1
-    if args.force and os.path.isdir(FIXTURES):
-        shutil.rmtree(FIXTURES)
-    os.makedirs(FIXTURES, exist_ok=True)
+    if os.path.isdir(target) and os.listdir(target) and not args.force:
+        print(f"Fixtures already exist in {target}; use --force to regenerate.")
+        return 1
+    if args.force and os.path.isdir(target):
+        shutil.rmtree(target)
+    os.makedirs(target, exist_ok=True)
 
     import numpy
     try:
@@ -119,12 +164,12 @@ def main():
         git_hash = 'unknown'
 
     for trial in PARAMS_TRIALS:
-        out = os.path.join(FIXTURES, params_fixture_name(trial))
+        out = os.path.join(target, params_fixture_name(trial))
         print(f"params fixture: {trial} -> {os.path.relpath(out, REPO)}")
         make_params_fixture(trial, out)
 
     for name in REFERENCE_RUNS:
-        out_dir = os.path.join(FIXTURES, name)
+        out_dir = os.path.join(target, name)
         print(f"\nreference run: {name} -> {os.path.relpath(out_dir, REPO)}")
         make_run(name, out_dir)
 
@@ -139,10 +184,12 @@ def main():
             'numpy': numpy.__version__,
             'platform': platform.platform(),
         },
+        'fingerprint': platform_fingerprint(),
+        'kind': 'platform_local' if args.local else 'v27_oracle',
     }
-    with open(os.path.join(FIXTURES, 'manifest.json'), 'w') as f:
+    with open(os.path.join(target, 'manifest.json'), 'w') as f:
         json.dump(manifest, f, indent=2)
-    print(f"\nWrote {os.path.relpath(FIXTURES, REPO)}")
+    print(f"\nWrote {os.path.relpath(target, REPO)}")
     return 0
 
 

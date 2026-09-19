@@ -56,6 +56,13 @@ CodeLog/Paper/tectonic/
 !tests/fixtures/**/*.npz
 !tests/fixtures/**/*.npy
 
+# tests/fixtures_local/ is the PLATFORM-LOCAL baseline (V3.3). Unlike the V2.7
+# oracle above it is machine-specific -- it only means anything on the box that
+# blessed it -- and it regenerates in a few seconds with
+#   python tests/make_fixtures.py --local
+# so it stays out of the repo. See tests/test_local_identity.py.
+tests/fixtures_local/
+
 # Literature, lab data and build tools: large, not part of the model, and
 # permanent once committed. Keep them local (V3.2).
 Research/
