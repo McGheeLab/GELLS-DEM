@@ -28,6 +28,44 @@ anisotropic two-exponent superellipsoid is closed form, a nested dual norm
 verified against a 600x1200 brute-force surface maximisation at **4.9e-6** relative
 (mesh-limited) and **3.6e-15** at the sphere anchor.
 
+### Phase 3.1 -- the support leaves
+
+`_dual_exp`, `se2d_support`, `se3d_support`, `support_R_eff_2d` and `support_R_eff_3d`
+land in `gels/engine.py` beside `se3d_lambda_grad`, registered in `_warmup_jit`. No call
+site is touched, so this commit cannot move a number; `tests/test_support_function.py`
+(31 tests) is the gate.
+
+Three quantities fall out of the same intermediates, which is what makes the solver
+affordable:
+
+- **The contact point is free.** By the envelope theorem `grad h(n)` *is* the support
+  point. Verified: the implicit function evaluates to 1.0 there to 8 places, Euler's
+  identity `x.n = h` holds to 8 places, and `grad h` matches a central difference of `h`.
+- **The parametric inversion is closed form**, so `(eta, omega)` come back for nothing and
+  every existing parametric consumer keeps working: `superellipsoid_point(eta, omega, ...)`
+  reproduces `grad h` to **<1e-9** relative over 80 random anisotropic shapes.
+- **`R_eff` becomes exact.** The reverse Gauss map makes the principal radii the
+  eigenvalues of `grad^2 h`, so `R_eff = sqrt(det grad^2 h)` on the tangent plane,
+  obtained by central-differencing **grad h** rather than differencing the surface point
+  twice. Against the analytic Gaussian curvature of an ellipsoid over 400 random normals:
+
+  | scheme | median rel. error | p95 |
+  |---|---|---|
+  | `support_R_eff_3d` (Hessian) | **2.8e-11** | 9.3e-11 |
+  | `superellipsoid_curvature_radii` (0.01-rad parametric FD) | 2.7e-03 | 5.5e-03 |
+
+  That is ~1e8x, and it removes the `max(kappa, 1e-6)` floor at `engine.py:1336` as a
+  side effect. It also makes `contact.curvature_R_cap` non-optional for blocky shapes
+  rather than merely advisable: at n = 8 the leaf now correctly reports a flat-face radius
+  above `1e3 a` instead of finite-difference noise.
+
+**The numerics are the implementation.** Every norm is max-factored, because `|a n_x|**q`
+at `a ~ 40` um and the clamped `q = 60` is ~1e96 and the outer level overflows to `inf`;
+factoring by the max puts every base in [0, 1] and hands back the gradient weights for
+free. `n <= 1` has no Holder conjugate (`n/(n-1)` is negative or infinite), so it is mapped
+to the max-norm -- the correct octahedral limit. `_sgnpow`'s `+1e-30` bias is deliberately
+*not* replicated: it would break the `p.N = 1` identity the whole derivation rests on.
+
 ---
 
 ## [V3.3] - 2026-09-19

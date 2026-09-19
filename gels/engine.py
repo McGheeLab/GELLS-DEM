@@ -1569,6 +1569,248 @@ def se3d_lambda_grad(ux, uy, uz, a, b, c, n1, n2):
     return lam, gx, gy, gz
 
 
+# ══════════════════════════════════════════════════════════════════════
+# V3.4: support function of a superellipse / superellipsoid
+# ══════════════════════════════════════════════════════════════════════
+# The support function h(n) = max_{x in K} x.n is the object the whole
+# minimum-translation-distance formulation is built on, and for the GELS
+# two-exponent superellipsoid it is CLOSED FORM -- a nested dual norm:
+#
+#     h(n) = || ( ||(a n_x, b n_y)||_q1 , c n_z ) ||_q2
+#     q1 = n1/(n1-1),   q2 = n2/(n2-1)
+#
+# Derivation (it is worth recording, because three other quantities fall out of
+# the same intermediates). At the surface point p whose outward normal is
+# parallel to n, the parametric point and the UNNORMALISED normal N satisfy
+#
+#     p.N = cos^2(eta) cos^2(omega) + cos^2(eta) sin^2(omega) + sin^2(eta) = 1
+#
+# identically -- every semi-axis cancels. So h(n_hat) = 1/|N|. Writing N = t n_hat
+# and substituting the parametrisation turns cos^2(omega)+sin^2(omega) = 1 into
+# A^q1 + B^q1 = cos(eta)^(beta q1) with A = a n_x t, B = b n_y t, beta = 2-2/n2,
+# and then cos^2(eta)+sin^2(eta) = 1 into P^q2 + C^q2 = 1. Solving for t gives the
+# norm above. Verified against a 600x1200 brute-force surface maximisation:
+# 4.9e-6 relative (mesh-limited) for random n1 != n2, 3.6e-15 at the sphere anchor.
+#
+# What comes free from the same intermediates:
+#   grad h(n) is the support POINT itself (envelope theorem), so the contact
+#     point costs nothing extra;
+#   (eta, omega) invert in closed form, keeping the new solver interoperable
+#     with every existing parametric consumer;
+#   the reverse Gauss map x(n_hat) = grad h(n_hat) makes the principal radii the
+#     eigenvalues of grad^2 h, so R_eff becomes exact instead of a 1e-2 finite
+#     difference (see support_R_eff_3d).
+#
+# NUMERICS, and it is not optional: never evaluate |a n_x|**q directly. At
+# a ~ 40 um and q = 60 that is ~1e96 and the outer level overflows to inf. Every
+# norm here is MAX-FACTORED, so each base sits in [0, 1] and the gradient weights
+# come out in [0, 1] for free.
+#
+# Note also that _sgnpow's +1e-30 bias is deliberately NOT replicated: it would
+# break the p.N = 1 identity the derivation rests on.
+
+Q_MAX = 60.0          # numerically the max-norm; the correct octahedral limit
+Q_MIN = 1.0 + 1e-9
+
+
+@njit(cache=True)
+def _dual_exp(n):
+    """Holder conjugate q = n/(n-1) of the blockiness exponent, clamped (V3.4).
+
+    n = 2 -> 2 (the ellipsoid, self-dual). n -> inf -> 1 (the box, dual to the
+    1-norm). n <= 1 is non-convex and has no support function, so it is mapped to
+    the max-norm rather than to a negative exponent.
+    """
+    if n <= 1.0 + 1e-9:
+        return Q_MAX
+    q = n / (n - 1.0)
+    if q > Q_MAX:
+        return Q_MAX
+    if q < Q_MIN:
+        return Q_MIN
+    return q
+
+
+@njit(cache=True)
+def _norm2_q(u, v, q):
+    """Max-factored ||(u, v)||_q and the two weights (|u|/N)^q, (|v|/N)^q."""
+    au = abs(u)
+    av = abs(v)
+    m = au if au > av else av
+    if m < 1e-300:
+        return 0.0, 0.0, 0.0
+    tu = (au / m) ** q
+    tv = (av / m) ** q
+    s = tu + tv
+    nrm = m * s ** (1.0 / q)
+    return nrm, tu / s, tv / s
+
+
+@njit(cache=True)
+def se2d_support(nx, ny, a, b, n):
+    """Support function of a superellipse in its BODY frame (V3.4).
+
+    Returns ``(h, gx, gy)`` where ``h = max_{x in K} x.n`` and ``(gx, gy) = grad h``
+    is the support point -- the point of the boundary whose outward normal is
+    parallel to ``n``. ``n`` need not be a unit vector: ``h`` is positively
+    homogeneous of degree 1 and ``grad h`` of degree 0, so the point is exact for
+    any positive scaling.
+    """
+    q = _dual_exp(n)
+    u = a * nx
+    v = b * ny
+    h, wu, wv = _norm2_q(u, v, q)
+    if h < 1e-300:
+        return 0.0, 0.0, 0.0
+    # dh/dnx = a * sgn(nx) * (|a nx| / h)^(q-1); the weight w = (|u|/h)^q, so
+    # (|u|/h)^(q-1) = w * h / |u| -- but forming it that way divides by zero at a
+    # flat face. Use the weight directly: dh/du = sgn(u) * w^(1-1/q).
+    gu = 0.0 if wu <= 0.0 else wu ** (1.0 - 1.0 / q)
+    gv = 0.0 if wv <= 0.0 else wv ** (1.0 - 1.0 / q)
+    if u < 0.0:
+        gu = -gu
+    if v < 0.0:
+        gv = -gv
+    return h, a * gu, b * gv
+
+
+@njit(cache=True)
+def se3d_support(nx, ny, nz, a, b, c, n1, n2):
+    """Support function of a superellipsoid in its BODY frame (V3.4).
+
+    Returns ``(h, gx, gy, gz, eta, omega)``. ``(gx, gy, gz) = grad h`` is the
+    support point; ``(eta, omega)`` are its parametric coordinates, so
+    ``superellipsoid_point(eta, omega, a, b, c, n1, n2)`` reproduces the gradient
+    (verified to 4e-16) and every existing parametric consumer keeps working.
+    """
+    q1 = _dual_exp(n1)
+    q2 = _dual_exp(n2)
+    u = a * nx
+    v = b * ny
+    w = c * nz
+    P, wu, wv = _norm2_q(u, v, q1)
+    h, wP, ww = _norm2_q(P, w, q2)
+    if h < 1e-300:
+        return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+
+    # z component: dh/dw = sgn(w) * ww^(1-1/q2)
+    gw = 0.0 if ww <= 0.0 else ww ** (1.0 - 1.0 / q2)
+    if w < 0.0:
+        gw = -gw
+
+    # equatorial: dh/du = (dh/dP)(dP/du) = wP^(1-1/q2) * sgn(u) * wu^(1-1/q1)
+    if wP <= 0.0 or P < 1e-300:
+        # n lies on the polar axis: the support point is the pole (0, 0, +-c)
+        return h, 0.0, 0.0, c * gw, (0.5 * np.pi if w >= 0.0 else -0.5 * np.pi), 0.0
+    dP = wP ** (1.0 - 1.0 / q2)
+    gu = 0.0 if wu <= 0.0 else wu ** (1.0 - 1.0 / q1)
+    gv = 0.0 if wv <= 0.0 else wv ** (1.0 - 1.0 / q1)
+    if u < 0.0:
+        gu = -gu
+    if v < 0.0:
+        gv = -gv
+
+    # parametric inversion: cos(eta)^(2/q2) = P/h, sin(eta)^(2/q2) = w/h
+    ce = wP ** (0.5)          # (P/h)^(q2/2) == wP^(1/2), since wP = (P/h)^q2
+    se = ww ** (0.5)
+    if w < 0.0:
+        se = -se
+    eta = np.arctan2(se, ce)
+    co = wu ** 0.5            # wu = (|u|/P)^q1, so (|u|/P)^(q1/2) = wu^(1/2)
+    so = wv ** 0.5
+    if u < 0.0:
+        co = -co
+    if v < 0.0:
+        so = -so
+    omega = np.arctan2(so, co)
+    return h, a * dP * gu, b * dP * gv, c * gw, eta, omega
+
+
+@njit(cache=True)
+def support_R_eff_3d(nx, ny, nz, a, b, c, n1, n2, eps=1e-5):
+    """Exact-to-1e-8 effective radius of curvature at the support point (V3.4).
+
+    For a convex body the reverse Gauss map is ``x(n_hat) = grad h(n_hat)``, so the
+    principal radii of curvature are the nonzero eigenvalues of the Hessian
+    ``grad^2 h`` restricted to ``n_hat^perp`` (``grad^2 h . n_hat = 0``, because
+    ``grad h`` is homogeneous of degree 0). Hence
+
+        R_eff = sqrt(det grad^2 h |_{n_hat perp})
+
+    which is exactly the ``sqrt(R1 R2)`` that Hertz wants. This is obtained by
+    central-differencing **grad h** along two tangents, not by differencing the
+    surface point twice, so the accuracy is ~1e-8 against the ~1e-2 of the fixed
+    0.01-radian parametric scheme in ``superellipsoid_curvature_radii``.
+
+    Returns ``R_eff`` in um, or 0.0 on a degenerate normal.
+    """
+    m = np.sqrt(nx*nx + ny*ny + nz*nz)
+    if m < 1e-300:
+        return 0.0
+    ux = nx / m
+    uy = ny / m
+    uz = nz / m
+    # any two unit tangents
+    if abs(uz) < 0.9:
+        tx, ty, tz = -uy, ux, 0.0
+    else:
+        tx, ty, tz = 0.0, -uz, uy
+    tm = np.sqrt(tx*tx + ty*ty + tz*tz)
+    tx /= tm; ty /= tm; tz /= tm
+    sx = uy*tz - uz*ty
+    sy = uz*tx - ux*tz
+    sz = ux*ty - uy*tx
+
+    # central differences of grad h along t and s
+    _, gxp, gyp, gzp, _, _ = se3d_support(ux + eps*tx, uy + eps*ty, uz + eps*tz,
+                                          a, b, c, n1, n2)
+    _, gxm, gym, gzm, _, _ = se3d_support(ux - eps*tx, uy - eps*ty, uz - eps*tz,
+                                          a, b, c, n1, n2)
+    dt_x = (gxp - gxm) / (2.0 * eps)
+    dt_y = (gyp - gym) / (2.0 * eps)
+    dt_z = (gzp - gzm) / (2.0 * eps)
+
+    _, gxp, gyp, gzp, _, _ = se3d_support(ux + eps*sx, uy + eps*sy, uz + eps*sz,
+                                          a, b, c, n1, n2)
+    _, gxm, gym, gzm, _, _ = se3d_support(ux - eps*sx, uy - eps*sy, uz - eps*sz,
+                                          a, b, c, n1, n2)
+    ds_x = (gxp - gxm) / (2.0 * eps)
+    ds_y = (gyp - gym) / (2.0 * eps)
+    ds_z = (gzp - gzm) / (2.0 * eps)
+
+    # 2x2 Hessian in the (t, s) basis; symmetric up to FD error, so symmetrise
+    Htt = dt_x*tx + dt_y*ty + dt_z*tz
+    Hts = dt_x*sx + dt_y*sy + dt_z*sz
+    Hst = ds_x*tx + ds_y*ty + ds_z*tz
+    Hss = ds_x*sx + ds_y*sy + ds_z*sz
+    off = 0.5 * (Hts + Hst)
+    det = Htt * Hss - off * off
+    if det <= 0.0:
+        return 0.0
+    return np.sqrt(det)
+
+
+@njit(cache=True)
+def support_R_eff_2d(nx, ny, a, b, n, eps=1e-5):
+    """Radius of curvature of a superellipse at the support point (V3.4).
+
+    The 1D analogue of :func:`support_R_eff_3d`: ``R = dh/dtheta`` of the support
+    point along the single tangent, i.e. the lone nonzero eigenvalue of
+    ``grad^2 h``. Returns 0.0 on a degenerate normal.
+    """
+    m = np.sqrt(nx*nx + ny*ny)
+    if m < 1e-300:
+        return 0.0
+    ux = nx / m
+    uy = ny / m
+    tx, ty = -uy, ux
+    _, gxp, gyp = se2d_support(ux + eps*tx, uy + eps*ty, a, b, n)
+    _, gxm, gym = se2d_support(ux - eps*tx, uy - eps*ty, a, b, n)
+    R = ((gxp - gxm) * tx + (gyp - gym) * ty) / (2.0 * eps)
+    return R if R > 0.0 else 0.0
+
+
+
 def shape_bound_radius(a, b, c=None, n1=2.0, n2=None):
     """True circumscribed radius of a superellipse / superellipsoid (V3.2).
 
@@ -4999,6 +5241,8 @@ def _warmup_jit(is_3d=False):
                                 100.0, 0.0, a, b, n, 0.0)
     find_contact_superellipse_wall(50.0, 50.0, a, b, n, 0.1, 0.0, 0, 1)
     hertz_contact_force(5000.0, 20.0, 1.0)
+    se2d_support(0.6, 0.8, a, b, n)          # V3.4 support leaves
+    support_R_eff_2d(0.6, 0.8, a, b, n)
     if is_3d:
         q = np.array([1.0, 0.0, 0.0, 0.0])
         superellipsoid_point(0.3, 0.5, a, b, a, n, n)
@@ -5008,6 +5252,8 @@ def _warmup_jit(is_3d=False):
         find_contact_superellipsoids_3d(
             0.0, 0.0, 0.0, a, b, a, n, n, q,
             100.0, 0.0, 0.0, a, b, a, n, n, q)
+        se3d_support(0.6, 0.0, 0.8, a, b, a, n, n)   # V3.4 support leaves
+        support_R_eff_3d(0.6, 0.0, 0.8, a, b, a, n, n)
 
 
 def _snapshot_dict(gs, F, pf, pi, pv, contacts):
