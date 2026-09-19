@@ -282,6 +282,7 @@ class Dynamics:
     v_max_um_per_h: float = _P.v_max
     omega_max_rad_per_h: float = _P.omega_max
     omega_max_3d_rad_per_h: float = _P.omega_max_3d
+    gradient_flow: str = _P.dynamics_gradient_flow   # V3.5: off | monitor | damped
 
 
 @dataclass
@@ -502,6 +503,7 @@ FLAT_MAP = [
     ('dynamics.v_max_um_per_h', 'v_max'),
     ('dynamics.omega_max_rad_per_h', 'omega_max'),
     ('dynamics.omega_max_3d_rad_per_h', 'omega_max_3d'),
+    ('dynamics.gradient_flow', 'dynamics_gradient_flow'),
     ('packing.gap_um', 'packing_gap'),
     ('packing.settle_steps', 'packing_settle_steps'),
     ('packing.relax_substeps', 'packing_relax_substeps'),
@@ -826,6 +828,11 @@ def load_setup(path: str) -> Setup:
     else:
         raise ValueError(f"setup file must be .yaml, .yml or .json, got {path!r}")
     setup = setup_from_dict(data)
+    # YAML 1.1 reads bare `off` / `on` / `no` / `yes` as booleans, so
+    # `gradient_flow: off` arrives as False. Normalise rather than reject: the
+    # spelling is the natural one and the trap is PyYAML's, not the user's.
+    if isinstance(setup.dynamics.gradient_flow, bool):
+        setup.dynamics.gradient_flow = 'off' if not setup.dynamics.gradient_flow else 'monitor'
     validate(setup)
     return setup
 
@@ -1006,6 +1013,8 @@ def validate(setup: Setup) -> None:
                     "F ~ sqrt(R_eff), so the contact is millions of times too stiff")
     if setup.contact.overlap_model not in ('fixed', 'elastic'):
         errs.append("contact.overlap_model must be 'fixed' or 'elastic'")
+    if setup.dynamics.gradient_flow not in ('off', 'monitor', 'damped'):
+        errs.append("dynamics.gradient_flow must be 'off', 'monitor' or 'damped'")
     if float(setup.contact.overlap_safety) <= 0:
         errs.append("contact.overlap_safety must be > 0")
     if not isinstance(setup.meta.presets, list) or not all(isinstance(n, str) for n in setup.meta.presets):
@@ -1325,6 +1334,7 @@ dynamics:
   v_max_um_per_h: 20.0
   omega_max_rad_per_h: 1.0
   omega_max_3d_rad_per_h: 1.0
+  gradient_flow: "off"             # off | monitor | damped -- audit dE/dt <= 0 (V3.5)
 
 packing:
   gap_um: 0.0

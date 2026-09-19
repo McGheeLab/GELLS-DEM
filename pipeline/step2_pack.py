@@ -59,6 +59,7 @@ def main():
         generate_packing_2d_slice, generate_packing_3d, group_species_fields,
         render_fields_species,
         save_history_to_disk, save_params_metadata, save_snapshot_to_disk,
+        system_energy, _energy_audit,                     # V3.5 gradient-flow audit
         update_cell_state,
     )
 
@@ -103,6 +104,9 @@ def main():
     else:
         F0, _, contacts0 = compute_forces(gs, p, rng)
     handoff_force_balance(gs, p, F0)     # V3.4: warn if the packer over-loaded the bed
+    if getattr(p, 'dynamics_gradient_flow', 'off') != 'off':   # V3.5
+        _energy_audit(gs, p, p.dynamics_gradient_flow,
+                      *system_energy(gs, p, contacts0), 0.0)
     phi_s = render_fields_species(gs, p)
     phi_f, phi_i, phi_v = group_species_fields(gs, phi_s)
 

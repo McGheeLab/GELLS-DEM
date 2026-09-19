@@ -8,6 +8,110 @@ MINOR tracks feature additions and improvements.
 
 ---
 
+## [V3.5] - in progress (started 2026-09-19)
+
+Plan: `CodeLog/ClaudesPlan/3.5.md`. Two halves of one subject -- energy descent.
+Phase 1 is the gradient-flow audit; Phase 2 is the packer->dynamics handoff fix
+that V3.4 detected and deferred.
+
+### Phase 1 - `dynamics.gradient_flow` (off | monitor | damped)
+
+Overdamped dynamics is gradient flow: if every force is `-grad E` then
+`gamma x_dot = -grad E`, so `dE/dt = -gamma |x_dot|^2 <= 0` and the energy must fall
+every step with the work the forces do accounting for the whole of the fall.
+
+V3.4 proved the MTD contact solver conservative **pointwise** (`d(delta)/d(c2) = -n*`
+to nine places, by the envelope theorem). It never proved it for the **assembled**
+force law -- JKR on top of the solver, walls, gravity, MC-DEM, friction, noise -- on a
+real run. This does.
+
+**The energy.** Three terms, no kernel change:
+
+* **Contacts.** `ContactSoA` already carries `a_contact`, `R_eff`, `E_star`, `W`, so
+  integrating the JKR force along the equilibrium branch parameterised by contact
+  radius is one vectorised pass (the trick `contact_stiffness_per_granule` uses):
+
+      U(a) = (8/15) E* a^5/R*^2  -  (4/3) sqrt(2 pi W E*) a^(7/2)/R*  +  pi W a^2
+
+  At `W = 0`, `a = sqrt(R* delta)` this collapses to the Hertz energy
+  `(2/5) k delta^(5/2)` to 1e-12, and `dU/d(delta) = F` to **1e-10** across the JKR
+  range including strong adhesion.
+* **Walls.** Not on the contact list (both gathers apply them inline), so recomputed
+  from positions -- cheap and exact since V3.4 made a wall one support evaluation.
+* **Gravity.** `sum_i w_i h_i` on the identical `granule_weights` array the force path
+  uses.
+
+**The headline measurement.** Central-differencing the total energy against the force
+`compute_forces` actually returns, on a packed 13-granule bed:
+
+| configuration | `max abs(-grad E - F)` / `max abs(F)` |
+|---|---|
+| spheres, periodic, quiet | **3.9e-9** |
+| spheres + walls, quiet | **3.9e-9** |
+| spheres + walls + gravity, quiet | **3.3e-9** |
+| 3D spheres + walls, quiet | machine |
+| shaped granules (MTD) | 2.6e-3 |
+| MC-DEM on | 1.3e-1 |
+| **active noise at the default `T_active = 5`** | **1.0** |
+
+So the V3.4 force law **is** the gradient of an energy, end to end. The wall row is
+also the only guard that `wall_potential_energy` enumerates the same faces as
+`gather_2d` / `gather_3d`, which it mirrors rather than shares.
+
+**Four things break the equality, all of them on purpose:**
+
+1. **Active noise is the whole force at the default.** `T_active` defaults to 5 nN um
+   and `add_active_noise` adds `N(0, 2 gamma T / dt)` per axis to every adhesive
+   granule. Its expected contribution to the work is `2 d T act` per granule per step
+   -- **20 nN um in 2D**, the same size as the work the contact law does. A default
+   run is a *noisy* gradient flow, and the audit is uninterpretable without
+   `T_active = 0`. Reported as `energy_noise_expected` so the residual can be read
+   against its own floor. This was not previously visible anywhere.
+2. **Tangential friction drives a two-step limit cycle.** The friction force opposes
+   the relative surface velocity and is applied explicitly, so a sliding contact gets
+   a kick that reverses its tangential velocity and then a kick back. **Every other
+   step ascends.** It dissipates on net, and the amplitude falls linearly in dt -- but
+   the ascent *relative to the work* does not: 0.0357 at dt = 1e-3 and 0.0353 at
+   dt = 1e-4. Structural, not truncation. It accounts for ~99 % of the per-step
+   residual in a passive bed, and it is why `ENERGY_ASCENT_TOL` is 0.1 and not
+   something tighter.
+3. **MC-DEM** -- `kappa` multiplies the force without being a term in any energy.
+4. **Shaped granules, 0.26 %** -- `R_eff` depends on the contact normal and therefore
+   on configuration, while the force law treats it as a parameter. The neglected
+   `dU/dR . grad R` is exactly what is left.
+
+With friction, noise and cells all off the residual converges as **O(dt)**: 0.2 % at
+dt = 1e-3 h, 0.02 % at dt = 1e-4 h, and a passive bed then descends on **every** step.
+
+**`damped` mode** divides `gamma` by a controller that halves on an ascending step and
+relaxes back toward 1 on a descending one. It does not stop the first ascending step;
+it stops a run from sustaining ascent. Built this way rather than as a backtracking
+line search because a line search needs a second force evaluation every step (2x the
+run), because dividing `gamma` exactly preserves the fixed point -- at `F = 0` the step
+is zero for any drag, the identical argument `contact_semi_implicit` rests on, and the
+two compose -- and because **with cells seeded monotone descent is false**: bridges are
+actuators, so a mode promising to enforce it would be promising something the model
+does not claim.
+
+New metric keys, in both twins via a shared `energy_metrics(gs)` (the
+`projection_metrics` precedent): `energy_total`, `energy_contact`, `energy_wall`,
+`energy_gravity`, `energy_delta`, `energy_work`, `energy_residual`,
+`energy_noise_expected`, `energy_ascent_frac`, `energy_ascent_steps`,
+`energy_max_ascent_frac`, `energy_backtracks`. All plain finite floats; all zero when
+the mode is `off`, so Gate B only sees added keys holding a constant.
+
+New file `tests/test_gradient_flow.py` (21 tests). Suite: 443 green, 2 skipped.
+
+#### Bug Fixes
+
+* **`dynamics.gradient_flow: off` in a YAML setup arrived as `False`.** YAML 1.1 reads
+  bare `off` / `on` / `no` / `yes` as booleans, so PyYAML turned the natural spelling
+  into the wrong type and `validate()` rejected the shipped template. The template now
+  quotes it, and `load_setup` normalises a bool back to the string -- rejecting the
+  user's file for PyYAML's trap would have been the wrong fix.
+
+---
+
 ## [V3.4] - in progress (started 2026-09-19)
 
 **Support-function minimum-translation-distance contact solver.** Phase 3 of the

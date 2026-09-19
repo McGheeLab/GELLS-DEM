@@ -321,6 +321,15 @@ class Params:
     blockiness_n2_inert_mean: float = 2.0
     blockiness_n2_inert_std: float = 0.0
     omega_max_3d: float = 1.0                  # rad/h, angular velocity cap per axis (3D)
+    dynamics_gradient_flow: str = 'off'        # V3.5: off | monitor | damped. Overdamped
+                                               # dynamics is gradient flow, so the energy must
+                                               # fall every step and the work must account for
+                                               # the fall. `monitor` records both (and the
+                                               # residual, which is every non-conservative
+                                               # force: MC-DEM, cell bridges, the overlap
+                                               # projection). `damped` additionally divides
+                                               # gamma by a controller that halves on an
+                                               # ascending step -- the fixed point is untouched.
 
     # ── Packing ──
     packing_gap: float = 0.0        # µm, min gap between granule surfaces at placement
@@ -567,6 +576,23 @@ class GranuleSystem:
         self.n_overlap_clipped = 0
         self.n_overlap_pairs = 0
         self.frac_velocity_clipped = 0.0
+
+        # V3.5 gradient-flow audit (set by `step` when dynamics.gradient_flow
+        # is on; `energy_metrics` reads them and they stay zero when it is off)
+        self.energy_total = 0.0
+        self.energy_contact = 0.0
+        self.energy_wall = 0.0
+        self.energy_gravity = 0.0
+        self.energy_noise_expected = 0.0
+        self.energy_delta = 0.0
+        self.energy_work = 0.0
+        self.energy_residual = 0.0
+        self.energy_ascent_frac = 0.0
+        self.energy_ascent_steps = 0
+        self.energy_max_ascent_frac = 0.0
+        self.energy_backtracks = 0
+        self.energy_prev = None          # None until the first audited step
+        self.energy_step_scale = 1.0     # 'damped' mode: gamma is divided by this
 
         # ── Velocity state (N,3); vx/vy/vz are column properties ──
         self.vel = np.zeros((self.N, 3), dtype=np.float64)
@@ -5176,6 +5202,379 @@ def handoff_force_balance(gs, p, F0):
     return out
 
 
+# ══════════════════════════════════════════════════════════════════════
+# V3.5 — gradient flow: the energy whose gradient the dynamics follow
+# ══════════════════════════════════════════════════════════════════════
+#
+# Overdamped dynamics is gradient flow. If every force is -grad E then
+# gamma x_dot = -grad E, so
+#
+#     dE/dt = grad E . x_dot = -gamma |x_dot|^2 <= 0
+#
+# and the energy must fall every step, with the work the forces do on the step
+# accounting for the whole of the fall. Two things are readable from that:
+#
+#   * an ASCENT (`energy_delta > 0`) is an integrator failure -- and it
+#     survives friction, which only ever removes energy;
+#   * the RESIDUAL `energy_delta + energy_work` is the non-conservative
+#     throughput: every watt that went somewhere other than the potential.
+#
+# The second is why this exists. V3.4 proved the MTD contact solver
+# conservative POINTWISE -- d(delta)/d(c2) = -n* to nine places, by the
+# envelope theorem -- but never for the ASSEMBLED force law on a real run.
+# Checking `-grad E == F` by central differences on a packed 13-granule bed
+# (tests/test_gradient_flow.py) turns that into an end-to-end statement, and
+# the measured decomposition of what is left is:
+#
+#   | term                          | relative size of `-grad E - F`      |
+#   |-------------------------------|-------------------------------------|
+#   | active noise, T_active = 5    | 1.0        (the whole force)        |
+#   | active noise, T_active = 0    | 3.9e-9     (machine, spheres)       |
+#   | MC-DEM on                     | 1.3e-1                              |
+#   | shaped granules (MTD)         | 2.6e-3                              |
+#   | tangential friction           | 99 % of the per-step residual       |
+#
+# None of those is a bug. Friction is dissipative and SHOULD break the
+# equality; the noise is an athermal driving term; MC-DEM's kappa is a
+# state-dependent multiplier on the force rather than a term in any energy;
+# and for shaped granules `R_eff` depends on configuration while the force law
+# treats it as a parameter, so the neglected `dU/dR . grad R` costs 0.26 %.
+# Cell bridges are actuators and inject work by design. What the audit buys is
+# telling "this force law is WRONG" apart from "this force law is ACTIVE" --
+# and the numbers above are the calibration for doing so.
+#
+# With friction, noise and cells all off, the residual converges as O(dt):
+# 0.2 % at dt = 1e-3 h, 0.02 % at dt = 1e-4 h.
+#
+# The system is NOT a gradient flow when cells are seeded. That is physics, not
+# a defect, and V3.5 does not try to remove it. The invariant is exact for the
+# PASSIVE problem -- packing, sedimentation, settling, relaxation -- which is
+# exactly where the V3.4 packer-handoff finding lives.
+
+ENERGY_ASCENT_TOL = 0.1        # a step is flagged when dE > tol * |work done on it|
+ENERGY_MAX_BACKTRACK = 6       # 'damped': halvings of the step scale before it floors
+ENERGY_SCALE_RELAX = 1.1       # 'damped': per-descending-step relaxation back toward 1
+
+
+def jkr_contact_energy(a_um, R_eff_um, E_star_Pa, W_Jm2):
+    """Energy stored in a JKR contact of radius ``a``, in nN um (V3.5).
+
+    The JKR equilibrium branch is single-valued in the contact radius a::
+
+        delta(a) = a^2/R* - sqrt(2 pi W a / E*)
+        F(a)     = (4/3) E* a^3/R* - sqrt(8 pi W E* a^3)
+
+    so ``U = int_0^delta F d(delta')  =  int_0^a F(a') delta''(a') da'`` is
+    closed form::
+
+        U(a) = (8/15) E* a^5 / R*^2
+             - (4/3) sqrt(2 pi W E*) a^(7/2) / R*
+             + pi W a^2
+
+    At ``W = 0``, ``a = sqrt(R* delta)`` this reduces to the Hertz energy
+    ``(2/5) k delta^(5/2)`` with ``k = (4/3) E* sqrt(R*)`` -- the identity that
+    pins the algebra, and the first test in ``tests/test_gradient_flow.py``.
+
+    Vectorised: a, R_eff, E_star and W may be arrays. Units are the engine's
+    (um, Pa, J/m^2 = nN/um) and the result is in nN um.
+    """
+    a = np.asarray(a_um, dtype=float)
+    R = np.asarray(R_eff_um, dtype=float)
+    E_s = np.asarray(E_star_Pa, dtype=float) * 1e-3      # Pa -> nN/um^2
+    W_s = np.maximum(np.asarray(W_Jm2, dtype=float), 0.0)  # J/m^2 == nN/um
+    ok = (a > 0.0) & (R > 0.0)
+    a = np.where(ok, a, 0.0)
+    Rs = np.where(ok, R, 1.0)
+    U = (8.0 / 15.0) * E_s * a ** 5 / Rs ** 2
+    U = U - (4.0 / 3.0) * np.sqrt(2.0 * np.pi * W_s * E_s) * a ** 3.5 / Rs
+    U = U + np.pi * W_s * a ** 2
+    return np.where(ok, U, 0.0)
+
+
+def contact_potential_energy(contacts):
+    """Total JKR energy on the granule-granule contact list, nN um (V3.5).
+
+    One vectorised pass over columns the contact record already carries
+    (``a_contact``, ``R_eff``, ``E_star``, ``W``) -- the same trick
+    :func:`contact_stiffness_per_granule` uses, so no kernel changes and the
+    two twins cannot disagree about it.
+
+    **Not** included: the MC-DEM factor ``kappa``. It multiplies the force
+    without being the gradient of anything, so there is no energy to add for
+    it; its effect is precisely the residual this audit reports.
+    """
+    if contacts is None or len(contacts) == 0:
+        return 0.0
+    col = getattr(contacts, 'column', None)
+    if col is not None:
+        a = np.asarray(col('a_contact'), dtype=float)
+        R = np.asarray(col('R_eff'), dtype=float)
+        E = np.asarray(col('E_star'), dtype=float)
+        W = np.asarray(col('W'), dtype=float)
+    else:                                   # reference list-of-dicts path
+        a = np.array([c.get('a_contact', 0.0) for c in contacts], dtype=float)
+        R = np.array([c.get('R_eff', 0.0) for c in contacts], dtype=float)
+        E = np.array([c.get('E_star', 0.0) for c in contacts], dtype=float)
+        W = np.array([c.get('W', 0.0) for c in contacts], dtype=float)
+    return float(np.sum(jkr_contact_energy(a, R, E, W)))
+
+
+def gravity_potential_energy(gs, p):
+    """Total gravitational potential of the mobile granules, nN um (V3.5).
+
+    ``sum_i w_i h_i`` with ``w_i`` the identical :func:`granule_weights` array
+    the force path uses, so the two cannot disagree about the sign or about
+    which granules are immobile. Up is +z in 3D and +y in 2D, matching
+    :func:`apply_gravity`.
+    """
+    N = gs.N
+    w = granule_weights(gs, p)
+    if not np.any(w):
+        return 0.0
+    h = gs.z[:N] if gs.is_3d else gs.y[:N]
+    return float(np.dot(w, h))
+
+
+def wall_potential_energy(gs, p):
+    """Total JKR energy in the granule-wall contacts, nN um (V3.5).
+
+    Wall contacts are not on the contact list -- both gathers apply them inline
+    -- so this recomputes them from positions. V3.4 made that exact and cheap:
+    a wall is a half-space, so ``penetration = h(-w_hat) - (c - q).w_hat`` is a
+    single support evaluation.
+
+    This MIRRORS the face enumeration of ``gather_2d`` / ``gather_3d`` rather
+    than sharing it, and that duplication is the risk. It is converted into a
+    tested invariant by ``tests/test_gradient_flow.py``, which central-
+    differences the TOTAL energy against the force the gather actually returns
+    -- if the two enumerations ever disagree, that test fails.
+
+    Cost is one njit call per granule per face, from Python. At N = 1000 in 3D
+    that is ~6000 calls per step, so ``gradient_flow`` is opt-in.
+    """
+    if p.boundary_mode == 'periodic':
+        return 0.0
+    N = gs.N
+    if N == 0:
+        return 0.0
+    geom = boundary_geometry(p)
+    sid = gs.species_id
+    Wt = gs.wall_W
+    Et = gs.wall_Estar
+    U = 0.0
+    if gs.is_3d:
+        L = (float(p.Lx), float(p.Ly), float(p.Lz))
+        for i in range(N):
+            Ww = float(Wt[sid[i]])
+            Ew = float(Et[sid[i]])
+            xi, yi, zi = float(gs.x[i]), float(gs.y[i]), float(gs.z[i])
+            crd = (xi, yi, zi)
+            for w in range(6):
+                axis = w // 2
+                if geom.top_free and w == 5:
+                    continue                       # V3.1 open top
+                if geom.shape_code == 1 and axis < 2:
+                    continue                       # V3.1 cylinder replaces the x/y faces
+                if w % 2 == 0:
+                    wall_pos, sign = 0.0, 1
+                else:
+                    wall_pos, sign = L[axis], -1
+                if gs.is_circle:
+                    ri = float(gs.r[i])
+                    pen = (ri - (crd[axis] - wall_pos)) if sign > 0 else ((crd[axis] + ri) - wall_pos)
+                    ok, R_local = pen > 0.0, ri
+                else:
+                    ok, pen, R_local, _a, _b, _c = se3d_wall_core(
+                        xi, yi, zi, gs.a[i], gs.b[i], gs.c[i], gs.n1[i], gs.n2[i],
+                        gs.quat[i], wall_pos, axis, sign)
+                if ok:
+                    _F, a_w = jkr_force_from_overlap(pen, R_local, Ew, Ww)
+                    U += float(jkr_contact_energy(a_w, R_local, Ew, Ww))
+            if geom.shape_code == 1:               # V3.1 cylindrical side wall
+                dxc, dyc = xi - geom.cx, yi - geom.cy
+                rho = float(np.hypot(dxc, dyc))
+                if rho > 1e-12:
+                    ux, uy = dxc / rho, dyc / rho
+                    if gs.is_circle:
+                        pen = float(gs.r[i]) + rho - geom.R_cyl
+                        ok, R_local = pen > 0.0, float(gs.r[i])
+                    else:
+                        ok, pen, R_local, _a, _b, _c = se3d_wall_plane_core(
+                            xi, yi, zi, gs.a[i], gs.b[i], gs.c[i], gs.n1[i], gs.n2[i], gs.quat[i],
+                            geom.cx + geom.R_cyl * ux, geom.cy + geom.R_cyl * uy, zi,
+                            -ux, -uy, 0.0)
+                    if ok:
+                        _F, a_w = jkr_force_from_overlap(pen, R_local, Ew, Ww)
+                        U += float(jkr_contact_energy(a_w, R_local, Ew, Ww))
+    else:
+        Lx, Ly = float(p.Lx), float(p.Ly)
+        for i in range(N):
+            Ww = float(Wt[sid[i]])
+            Ew = float(Et[sid[i]])
+            xi, yi = float(gs.x[i]), float(gs.y[i])
+            for w in range(4):
+                if geom.top_free and w == 3:
+                    continue                       # V3.1 open top: y = Ly is a free surface
+                if gs.is_circle:
+                    ri = float(gs.r[i])
+                    pen = (ri - xi, xi - (Lx - ri), ri - yi, yi - (Ly - ri))[w]
+                    ok, R_local = pen > 0.0, ri
+                else:
+                    wall_pos, axis, sign = ((0.0, 0, 1), (Lx, 0, -1), (0.0, 1, 1), (Ly, 1, -1))[w]
+                    ok, pen, R_local, _a, _b = se2d_wall_core(
+                        xi, yi, gs.a[i], gs.b[i], gs.n_shape[i], gs.theta[i],
+                        wall_pos, axis, sign)
+                if ok:
+                    _F, a_w = jkr_force_from_overlap(pen, R_local, Ew, Ww)
+                    U += float(jkr_contact_energy(a_w, R_local, Ew, Ww))
+    return U
+
+
+def active_noise_power(gs, p):
+    """Expected work the ACTIVE NOISE injects per step, nN um (V3.5).
+
+    :func:`gels.kernels.contacts.add_active_noise` adds an independent
+    ``F ~ N(0, 2 gamma T act / dt)`` per axis to every adhesive granule, so the
+    noise's contribution to its own work ``F . v dt = F^2/gamma dt`` has
+    expectation ``2 d T act`` per granule per step -- independent of both dt and
+    gamma.
+
+    This matters more than it looks. ``T_active`` defaults to 5 nN um, which in
+    2D is **20 nN um per functional granule per step**, the same size as the
+    work the contact law does. A run at the default is therefore a NOISY
+    gradient flow, not a gradient flow, and ``energy_residual`` is dominated by
+    the noise rather than by anything wrong with the contact law. Measured
+    against a 13-granule bed the force check goes from 100 % error at
+    ``T_active = 5`` to 3.9e-9 at ``T_active = 0``.
+
+    Reported so the residual can be read against its own noise floor. Set
+    ``T_active = 0`` to audit the contact law alone.
+    """
+    T = float(getattr(p, 'T_active', 0.0))
+    if T <= 0.0:
+        return 0.0
+    N = gs.N
+    m = np.asarray(gs.adhesive_mask[:N], dtype=bool)
+    fixed = getattr(gs, 'fixed', None)
+    if fixed is not None:
+        m = m & ~np.asarray(fixed[:N], dtype=bool)
+    if not np.any(m):
+        return 0.0
+    dim = 3 if gs.is_3d else 2
+    return float(2.0 * dim * T * np.sum(gs.activity[:N][m]))
+
+
+def system_energy(gs, p, contacts):
+    """The potential the dynamics is supposed to be descending, nN um (V3.5).
+
+    Returns ``(total, parts)``. ``contacts`` is the list from the force
+    evaluation at the CURRENT configuration -- pass the one you already have,
+    never recompute it for this.
+    """
+    e_c = contact_potential_energy(contacts)
+    e_w = wall_potential_energy(gs, p)
+    e_g = gravity_potential_energy(gs, p)
+    return e_c + e_w + e_g, {'contact': e_c, 'wall': e_w, 'gravity': e_g}
+
+
+def _energy_audit(gs, p, mode, E0, parts, work):
+    """Close out one step of the gradient-flow audit (V3.5).
+
+    The audit is uniformly ONE STEP BEHIND, and deliberately so: closing it
+    would need the energy at the post-step configuration, which costs a second
+    force evaluation per step. ``energy_total`` is therefore E at the
+    configuration this step started from, and ``energy_delta`` / ``energy_work``
+    describe the step BEFORE it. The lag costs one row and no accuracy.
+
+    ``damped`` mode is a feedback controller on the effective drag, not a
+    guarantee. It does not stop the first ascending step; it stops a run from
+    SUSTAINING ascent. Three reasons it is built this way rather than as a
+    backtracking line search:
+
+      * a line search needs a second force evaluation every step (2x the run);
+      * dividing gamma exactly preserves the fixed point -- at F = 0 the step
+        is zero for any drag -- so it changes the transient, never the physics.
+        That is the identical argument `contact_semi_implicit` rests on, and
+        the two compose;
+      * with cells seeded, monotone descent is FALSE (bridges are actuators),
+        so a mode that promised to enforce it would be promising something the
+        model does not claim.
+    """
+    gs.energy_total = E0
+    gs.energy_contact = parts['contact']
+    gs.energy_wall = parts['wall']
+    gs.energy_gravity = parts['gravity']
+    gs.energy_noise_expected = active_noise_power(gs, p)
+    prev = gs.energy_prev
+    if prev is None:
+        gs.energy_delta = 0.0
+        gs.energy_work = 0.0
+        gs.energy_residual = 0.0
+        gs.energy_ascent_frac = 0.0
+    else:
+        E_prev, w_prev = prev
+        dE = E0 - E_prev
+        gs.energy_delta = dE
+        gs.energy_work = w_prev
+        gs.energy_residual = dE + w_prev
+        frac = dE / max(abs(w_prev), 1e-30)
+        gs.energy_ascent_frac = frac
+        ascending = frac > ENERGY_ASCENT_TOL
+        if ascending:
+            gs.energy_ascent_steps += 1
+            if frac > gs.energy_max_ascent_frac:
+                gs.energy_max_ascent_frac = frac
+        if mode == 'damped':
+            if ascending:
+                gs.energy_step_scale = max(gs.energy_step_scale * 0.5,
+                                           2.0 ** -ENERGY_MAX_BACKTRACK)
+                gs.energy_backtracks += 1
+            else:
+                gs.energy_step_scale = min(1.0, gs.energy_step_scale * ENERGY_SCALE_RELAX)
+    gs.energy_prev = (E0, work)
+
+
+def energy_metrics(gs):
+    """The gradient-flow audit as flat metric keys (V3.5).
+
+    Shared by both metric twins, like :func:`projection_metrics`, so the key
+    sets cannot diverge. Every value is a plain float and never NaN; all zero
+    when ``dynamics.gradient_flow`` is ``off``, so Gate B only ever sees added
+    keys holding a constant.
+
+    ``energy_work`` is ``sum F . dx + sum tau . dtheta`` over the step, i.e.
+    the work the force field did. For a conservative force law
+    ``energy_delta = -energy_work`` to O(dt), so ``energy_residual`` is the
+    non-conservative throughput -- the work that went somewhere other than the
+    potential. In a passive bed that is almost entirely FRICTION HEAT (99 % of
+    it at the default ``tau_0``); the rest is the active noise, MC-DEM, cell
+    bridges, the overlap-resolution projection and the velocity cap.
+
+    Read it against ``energy_noise_expected``, the floor the active noise alone
+    puts under it. At the default ``T_active = 5`` that floor is the same size
+    as the work the contact law does, so a residual below it says nothing at
+    all -- set ``T_active = 0`` to audit the contact law.
+
+    ``energy_delta <= 0`` is the sharper statement and the one to watch: it
+    survives friction, which only ever removes energy. It does NOT survive
+    active noise or cell traction, both of which inject.
+    """
+    return {
+        'energy_total': float(getattr(gs, 'energy_total', 0.0)),
+        'energy_contact': float(getattr(gs, 'energy_contact', 0.0)),
+        'energy_wall': float(getattr(gs, 'energy_wall', 0.0)),
+        'energy_gravity': float(getattr(gs, 'energy_gravity', 0.0)),
+        'energy_delta': float(getattr(gs, 'energy_delta', 0.0)),
+        'energy_work': float(getattr(gs, 'energy_work', 0.0)),
+        'energy_residual': float(getattr(gs, 'energy_residual', 0.0)),
+        'energy_noise_expected': float(getattr(gs, 'energy_noise_expected', 0.0)),
+        'energy_ascent_frac': float(getattr(gs, 'energy_ascent_frac', 0.0)),
+        'energy_ascent_steps': int(getattr(gs, 'energy_ascent_steps', 0)),
+        'energy_max_ascent_frac': float(getattr(gs, 'energy_max_ascent_frac', 0.0)),
+        'energy_backtracks': int(getattr(gs, 'energy_backtracks', 0)),
+    }
+
+
 def apply_gravity(gs, p, F):
     """Add the buoyant weight to the force array (-z in 3D, -y in 2D). No-op unless enabled."""
     if not getattr(p, 'gravity_enabled', False):
@@ -5270,6 +5669,16 @@ def step(gs: GranuleSystem, p: Params, rng, t: float):
     else:
         F, torques, contacts = compute_forces(gs, p, rng)
 
+    # V3.5 gradient flow: the energy of the configuration this step starts from.
+    # `contacts` is the one the force evaluation just produced -- never recompute
+    # it for this. Off by default and then costs nothing.
+    _gf = getattr(p, 'dynamics_gradient_flow', 'off')
+    _E0 = 0.0
+    _parts = None
+    _work = 0.0
+    if _gf != 'off':
+        _E0, _parts = system_energy(gs, p, contacts)
+
     # Integrate deformation DOFs (implicit Euler, after force computation)
     if p.deformable_enabled and gs.epsilon is not None:
         from gels.lsdem import integrate_deformation_implicit
@@ -5285,6 +5694,8 @@ def step(gs: GranuleSystem, p: Params, rng, t: float):
         gamma = p.drag_scale * gs.r[:gs.N]         # (N,)
         if p.contact_semi_implicit:                 # V3.2
             gamma = gamma + p.dt * contact_stiffness_per_granule(gs, contacts)
+        if _gf == 'damped':                         # V3.5: see `_energy_audit`
+            gamma = gamma / gs.energy_step_scale
         vel = F[:gs.N] / gamma[:, None]             # (N, 3)
         speed = np.sqrt(np.sum(vel**2, axis=1))     # (N,)
         over = speed > p.v_max
@@ -5315,6 +5726,11 @@ def step(gs: GranuleSystem, p: Params, rng, t: float):
                     gs.omega_3d[i] = omega
                     gs.quat[i] = quat_integrate(gs.quat[i], omega, p.dt)
 
+        if _gf != 'off':
+            _work = float(np.sum(F[:gs.N, :3] * vel)) * p.dt
+            if not gs.is_circle:
+                _work += float(np.sum(torques[:gs.N] * gs.omega_3d[:gs.N])) * p.dt
+
         # Boundary handling
         apply_position_bounds(gs, p)
 
@@ -5326,6 +5742,8 @@ def step(gs: GranuleSystem, p: Params, rng, t: float):
         gamma = p.drag_scale * gs.r[:gs.N]         # (N,)
         if p.contact_semi_implicit:                 # V3.2
             gamma = gamma + p.dt * contact_stiffness_per_granule(gs, contacts)
+        if _gf == 'damped':                         # V3.5: see `_energy_audit`
+            gamma = gamma / gs.energy_step_scale
         vel = F[:gs.N] / gamma[:, None]             # (N, 2)
         speed = np.sqrt(vel[:, 0]**2 + vel[:, 1]**2)
         over = speed > p.v_max
@@ -5349,12 +5767,20 @@ def step(gs: GranuleSystem, p: Params, rng, t: float):
             gs.omega[:gs.N] = np.clip(gs.omega[:gs.N], -p.omega_max, p.omega_max)
             gs.theta[:gs.N] += gs.omega[:gs.N] * p.dt
 
+        if _gf != 'off':
+            _work = float(np.sum(F[:gs.N, :2] * vel)) * p.dt
+            if not gs.is_circle:
+                _work += float(np.sum(torques[:gs.N] * gs.omega[:gs.N])) * p.dt
+
         # Boundary handling
         apply_position_bounds(gs, p)
 
         # Post-step overlap resolution (V2.1 — prevents granule pass-through)
         _resolve_overlaps(gs, p)
         apply_position_bounds(gs, p)
+
+    if _gf != 'off':
+        _energy_audit(gs, p, _gf, _E0, _parts, _work)
 
     _sync_unwrapped(gs, p, pos_before)
     return F, contacts
@@ -6179,6 +6605,9 @@ def run(p=None, seed=None, observer=None):
         else:
             F0, _, contacts0 = compute_forces(gs, p, rng)
         handoff_force_balance(gs, p, F0)                 # V3.4
+        if getattr(p, 'dynamics_gradient_flow', 'off') != 'off':   # V3.5
+            _energy_audit(gs, p, p.dynamics_gradient_flow,
+                          *system_energy(gs, p, contacts0), 0.0)
         if p.save_data:
             save_params_metadata(p, gs, output_dir, seed)   # now carries the handoff
         m = save(0.0, F0, contacts0)

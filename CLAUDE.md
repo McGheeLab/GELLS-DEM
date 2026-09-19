@@ -6,7 +6,7 @@
 is a 2D/3D overdamped particle dynamics simulator for modelling cell-driven rearrangement
 of hydrogel granular scaffolds. The primary simulation engine is `gels/engine.py`.
 
-**Current version: V3.4 (in progress — see `CodeLog/Updates/CHANGELOG.md` for landed phases)**
+**Current version: V3.5 (in progress — see `CodeLog/Updates/CHANGELOG.md` for landed phases)**
 
 **Runs are local only.** HPC execution was retired in V2.7; simulations are driven
 by the five numbered steps in `pipeline/`. See `pipeline/README.md`.
@@ -380,6 +380,26 @@ percolation).
   `phi_bed`: the latter double-counts overlap, which is 1-4 % once a soft bed compacts through
   interpenetration. `n_overlap_clipped` / `overlap_clip_fraction` / `frac_velocity_clipped`
   say whether a run is reporting the contact law or the numerical rails.
+- **Gradient flow** (V3.5): `dynamics.gradient_flow` = `off` (default) | `monitor` |
+  `damped`. Overdamped dynamics is gradient flow, so the energy must fall every step and
+  the work the forces do must account for the fall. `monitor` computes the potential
+  (JKR contact energy `U(a) = (8/15)E*a⁵/R*² − (4/3)√(2πWE*)a^{7/2}/R* + πW a²`, walls,
+  gravity) with no kernel change and reports `energy_delta`, `energy_work` and
+  `energy_residual`. Central-differencing that energy against `compute_forces` gives
+  **3.9e-9** relative for spheres with walls and gravity — the V3.4 force law really is
+  the gradient of an energy, end to end. **Four things break the equality and all are
+  intentional:** the active noise (`T_active` defaults to 5 nN·µm, which injects
+  `2·d·T` = 20 nN·µm per functional granule per step — the *same size* as the contact
+  work, so the audit is uninterpretable unless you set `T_active = 0`); tangential
+  friction, which is applied explicitly and drives a **two-step limit cycle** in which
+  every other step ascends by ~3.5 % of the work, dt-independently; MC-DEM (`κ`
+  multiplies the force but is in no energy, 13 %); and shaped granules (0.26 %, because
+  `R_eff` varies with configuration while the force law treats it as a parameter). With
+  all of those off the residual converges as O(dt) and a passive bed descends on every
+  step. `damped` divides `γ` by a controller that halves on an ascending step — it
+  preserves the fixed point exactly (the same argument as `semi_implicit`) and is a rail
+  against sustained ascent, not a monotonicity guarantee, because with cells seeded
+  monotone descent is *false*: bridges are actuators.
 - **LS-DEM is not the tool for deformable granules** (assessed V3.2): its modes are global
   affine strains about a body-fixed axis, so a granule cannot flatten at a contact; wall
   contacts accumulate no deformation; it forces the whole run onto the Python reference path;

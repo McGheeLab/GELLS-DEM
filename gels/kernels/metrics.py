@@ -17,7 +17,7 @@ from scipy.spatial import cKDTree
 
 from gels.engine import (
     CellState, bed_metrics, boundary_geometry, collagen_field, domain_volume,
-    kozeny_carman_permeability, overlap_solid_volume, projection_metrics,
+    energy_metrics, kozeny_carman_permeability, overlap_solid_volume, projection_metrics,
     rcp_fraction_superellipsoid,
     species_view, superellipse_area, superellipse_perimeter, superellipsoid_volume,
 )
@@ -449,6 +449,7 @@ def compute_metrics(gs, p, phi_f, phi_i, phi_v, t, forces, phi_s=None):
     m['overlap_volume_fraction'] = (_V_lens / (V_f_true + V_i_true)) if (V_f_true + V_i_true) > 0 else 0.0
     m['phi_solid_true_net'] = max(0.0, (V_f_true + V_i_true) - _V_lens) / V_domain
     m.update(projection_metrics(gs))            # V3.2: is the rail or the contact law in charge?
+    m.update(energy_metrics(gs))                # V3.5: is the force law a gradient?
     ar_mean = float(np.mean(np.maximum(gs.a, gs.b) /
                             np.minimum(gs.a, gs.b))) if N > 0 else 1.0
     phi_rcp = rcp_fraction_superellipsoid(ar_mean)
