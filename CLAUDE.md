@@ -27,7 +27,7 @@ GELS/
 │   ├── io/                      # SnapshotWriter (background, atomic, np.load-compatible) (V3.0)
 │   └── kernels/                 # V3.0 compute layer (numba, parallel, thread-count independent)
 │       ├── __init__.py          # numba fallbacks, configure_threads(), auto_threads()
-│       ├── reference.py         # V2.7 Python loops, verbatim — oracle + LS-DEM path
+│       ├── reference.py         # Python twin of the kernels — oracle + LS-DEM path
 │       ├── neighbors.py         # cKDTree pairs (reference order) / linked-cell pairs (sorted); CSR
 │       ├── geometry2d.py, geometry3d.py  # status-tuple contact solvers
 │       ├── contact2d.py, contact3d.py    # pair pass → MC-DEM → owner-writes gather (F, torque, clips, walls)
@@ -39,8 +39,9 @@ GELS/
 │       ├── metrics.py           # compiled metrics twin (bincount, strided Voronoi, shape cache)
 │       └── packing.py           # RSA neighbour grid + compiled settle (bit-identical packing)
 ├── tests/                       # unittest suite (python -m unittest discover -s tests -v)
-│   ├── fixtures/                # V2.7 bit-identical oracle runs (VERSIONED; see .gitignore)
-│   ├── make_fixtures.py         # regenerates fixtures (only on purpose!)
+│   ├── fixtures/                # RETIRED V2.7 oracle — historical record only, nothing reads it
+│   ├── fixtures_local/          # the identity baseline (gitignored, blessed per machine)
+│   ├── make_fixtures.py         # blesses tests/fixtures_local/ (--local --force)
 │   └── test_*.py
 ├── pipeline/                    # STEP-BY-STEP LOCAL RUNNER (V2.7+)
 │   ├── step0_new_setup.py       # Write / convert a sectioned YAML setup file (V3.0)
@@ -649,8 +650,21 @@ percolation).
   bridging statistically equivalent (counter-hash RNG, one `Generator` draw per
   pass). `perf_cells_backend='python'` = exact V2.7 cell machinery on compiled
   contacts; `use_numba=False` = pure reference (the fixture gate). Every kernel
-  has a `tests/test_*_vs_reference.py`; the oracle is `gels/kernels/reference.py`,
-  which must stay verbatim.
+  has a `tests/test_*_vs_reference.py`; the oracle is `gels/kernels/reference.py`.
+  **`reference.py` is no longer frozen** (V3.5). It used to have to stay verbatim
+  because the V2.7 fixture gate compared against it; that gate is retired, so it
+  may now be changed — but only *together with* the kernel twin it is the oracle
+  for, in the same commit, with the `*_vs_reference` test as the proof. It is a
+  twin, not a museum piece.
+- **Regression gating** (V3.5): one gate, `tests/test_identity.py`, against a
+  baseline blessed from the current tree on the current machine
+  (`python tests/make_fixtures.py --local --force`). The V2.7 oracle gate was
+  retired: pinning every deliberate default change to a version nobody runs cost
+  more than it caught (five pins had accumulated), it froze `reference.py`, and
+  it was platform-gated so it skipped on most machines anyway. `tests/fixtures/`
+  stays on disk as the only surviving record of V2.7's behaviour; nothing reads
+  it. **A behaviour change is now re-blessed, not pinned around** — but record
+  why in the changelog, because after re-blessing the gate can no longer see it.
 - **Visualization is parallel over snapshots** (V3.0): the `viz2` suite is plain
   Python/matplotlib — the compiled kernels do not touch it — and used to pin one
   core per run. Every per-snapshot loop (GIF frames, Voronoi tessellations,

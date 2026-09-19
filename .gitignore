@@ -49,7 +49,9 @@ Thumbs.db
 *.synctex.gz
 CodeLog/Paper/tectonic/
 
-# V3.0 regression fixtures are small and MUST be versioned despite the global
+# tests/fixtures/ is the RETIRED V2.7 oracle (V3.5). Nothing reads it; it is kept
+# because the V2.7 code is no longer in the tree, so these files are the only
+# surviving record of its behaviour. Versioned despite the global
 # *.npz / *.npy ignores above (they are the bit-identical oracle for the refactor).
 !tests/fixtures/
 !tests/fixtures/**

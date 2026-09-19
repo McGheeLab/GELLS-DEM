@@ -300,6 +300,42 @@ gate.
 
 Suite: 471 green, 2 skipped.
 
+### Phase 5 - the V2.7 identity gate is retired
+
+The project has not run a significant body of simulations on the old behaviour, so
+reproducing V2.7 bit-for-bit was costing more than it caught:
+
+* **every deliberate default change had to be pinned** in `make_fixtures.COMMON` to keep
+  the gate green. Five pins had accumulated by V3.5 -- `contact_semi_implicit`,
+  `boundary_wall_clamp`, `packing_relax`, `dynamics_gradient_flow` -- each one a
+  configuration the shipped defaults no longer used, so the gate was increasingly testing
+  a version nobody ran;
+* **it froze `gels/kernels/reference.py`.** That file is the oracle for the compiled
+  kernels, and it could not be changed even when the kernels it mirrors needed to change
+  with it. It is a twin, not a museum piece;
+* and it was **platform-gated anyway**: blessed on Windows / CPython 3.14 / numpy 2.5, it
+  skipped everywhere else and the local baseline did the work.
+
+`tests/test_legacy_identity.py` and `tests/test_local_identity.py` are replaced by a single
+`tests/test_identity.py` against `tests/fixtures_local/`, blessed from the current tree on
+the current machine. The comparison machinery moved to `tests/identity_compare.py`.
+`make_fixtures.py` writes only the local baseline, carries **no pins**, and has lost the
+`--i-really-mean-it` hazard along with the ability to write `tests/fixtures/` at all.
+`LOCAL_ONLY_RUNS` and `SUPERSEDED_RUNS` are gone: with the pins removed the `v34_*` runs
+were duplicates of the reference runs, and nothing is superseded relative to a baseline
+blessed from the current tree.
+
+**`tests/fixtures/` is kept on disk.** The V2.7 code is no longer in the tree, so those
+files are the only surviving record of its behaviour. Nothing reads them.
+
+**The rule that replaces it:** a behaviour change is now **re-blessed, not pinned around**
+-- but it must be recorded in this changelog, because after re-blessing the gate can no
+longer see it. And `reference.py` may now be changed, but only *together with* the kernel
+twin it is the oracle for, in the same commit, with the `*_vs_reference` test as the proof.
+
+Suite: 469 green, and for the first time **zero skips** -- the two that remained were the
+platform-gated V2.7 comparisons.
+
 #### Bug Fixes
 
 * **`dynamics.gradient_flow: off` in a YAML setup arrived as `False`.** YAML 1.1 reads
