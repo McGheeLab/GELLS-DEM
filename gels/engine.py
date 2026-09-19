@@ -5086,6 +5086,11 @@ def phi_z_profile(gs, p, n_bins=0):
     return edges, phi
 
 
+# V3.4: warn when the packed bed hands the dynamics more than this multiple of
+# the driving load. 100x is generous -- it is a smell test, not a tolerance.
+HANDOFF_WARN_RATIO = 100.0
+
+
 def granule_weights(gs, p):
     """Buoyant weight per granule in nN: (rho_gran - rho_medium) g (4/3) pi r^3 * 1e-9.
 
@@ -5105,6 +5110,70 @@ def granule_weights(gs, p):
     if fixed is not None:
         w = np.where(fixed[:N], 0.0, w)
     return w
+
+
+def handoff_force_balance(gs, p, F0):
+    """Is the packed bed in force balance under the DYNAMICS' force law? (V3.4)
+
+    The packer and the dynamics are two different force models, and the settle
+    stops on a LENGTH tolerance (``max_overlap < packing_overlap_tol``) that
+    makes no reference to the law the dynamics will then apply. Nothing checked
+    the handoff, so a packing could be delivered enormously pre-loaded and the
+    first hours of the run would be it exploding -- physical descent from an
+    unphysical initial condition, which no integrator fix can help.
+
+    The invariant is a scale comparison, not a conservation law: at t = 0 the
+    residual contact force should be at most comparable to whatever is supposed
+    to drive the run. Two load scales apply:
+
+      * gravity -- the buoyant weight of a granule, when ``gravity_enabled``;
+      * traction -- the force one cell can exert, when cells are seeded.
+
+    Measured on a gravity-consolidated 2D bed of AR-1.8 / n-3.5 granules, the
+    ratio is **5e4**: median true penetration 4.66 um where force balance needs
+    4.8 nm. See the V3.4 changelog.
+
+    Returns a dict (recorded in ``metadata['packing']``); prints a warning when
+    the ratio exceeds ``HANDOFF_WARN_RATIO``.
+    """
+    F0 = np.asarray(F0)
+    if F0.size == 0:
+        return {}
+    f_max = float(np.linalg.norm(F0, axis=1).max())
+    f_mean = float(np.linalg.norm(F0, axis=1).mean())
+
+    scales = {}
+    w = granule_weights(gs, p)
+    if w.size and float(np.max(w)) > 0.0:
+        scales['gravity'] = float(np.max(w))
+    if int(getattr(gs, 'total_cells', 0) or 0) > 0:
+        traction = float(getattr(p, 'F_max_per_cell', 0.0) or 0.0)
+        if traction <= 0.0:
+            traction = float(getattr(p, 'expected_bridge_force', 0.0) or 0.0)
+        if traction > 0.0:
+            scales['traction'] = traction
+    if not scales:
+        gs.handoff_report = {'handoff_F_max': f_max, 'handoff_F_mean': f_mean}
+        return gs.handoff_report
+
+    name = max(scales, key=scales.get)      # compare against the LARGEST driver
+    scale = scales[name]
+    ratio = f_max / scale
+    out = {'handoff_F_max': f_max, 'handoff_F_mean': f_mean,
+           'handoff_load_scale': scale, 'handoff_load_kind': name,
+           'handoff_ratio': ratio}
+    gs.handoff_report = out
+    if ratio > HANDOFF_WARN_RATIO:
+        print(f"  WARNING: the packed bed is not in force balance for the dynamics.\n"
+              f"    max |F| at t=0 is {f_max:.3g} nN against a {name} load scale of "
+              f"{scale:.3g} nN ({ratio:.3g}x).\n"
+              f"    The run will begin by relaxing that, not by doing the physics you "
+              f"asked for.\n"
+              f"    The settle stops on a LENGTH tolerance (packing.overlap_tol) that "
+              f"knows nothing about\n"
+              f"    the contact law; for a gravity bed, force balance needs overlaps "
+              f"~1e-3 of the tolerance.")
+    return out
 
 
 def apply_gravity(gs, p, F):
@@ -5581,6 +5650,9 @@ def save_params_metadata(p, gs, output_dir, seed):
                     'species_density_kg_m3': [float(v) for v in gs.species_rho]},
         'n_boundary': int(np.sum(gs.fixed)),
         'cell_state_enum': {s.name: int(s.value) for s in CellState},
+        # V3.4: is the packed bed in force balance for the DYNAMICS? Present
+        # only once forces have been evaluated at t = 0.
+        'handoff': getattr(gs, 'handoff_report', None),
     }
     with open(os.path.join(output_dir, 'metadata.json'), 'w') as f:
         json.dump(meta, f, indent=2)
@@ -6106,6 +6178,9 @@ def run(p=None, seed=None, observer=None):
             F0, _, contacts0 = compute_forces_3d(gs, p, rng)
         else:
             F0, _, contacts0 = compute_forces(gs, p, rng)
+        handoff_force_balance(gs, p, F0)                 # V3.4
+        if p.save_data:
+            save_params_metadata(p, gs, output_dir, seed)   # now carries the handoff
         m = save(0.0, F0, contacts0)
         print(_hdr)
         _print_metrics(0.0, m)

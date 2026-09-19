@@ -55,7 +55,7 @@ def main():
     from gels.engine import (
         bed_solid_volume, bed_surface, boundary_geometry, consolidation_mode,
         compute_displacement, compute_displacement_species, compute_forces,
-        compute_forces_3d, compute_metrics, generate_packing,
+        compute_forces_3d, compute_metrics, generate_packing, handoff_force_balance,
         generate_packing_2d_slice, generate_packing_3d, group_species_fields,
         render_fields_species,
         save_history_to_disk, save_params_metadata, save_snapshot_to_disk,
@@ -102,6 +102,7 @@ def main():
         F0, _, contacts0 = compute_forces_3d(gs, p, rng)
     else:
         F0, _, contacts0 = compute_forces(gs, p, rng)
+    handoff_force_balance(gs, p, F0)     # V3.4: warn if the packer over-loaded the bed
     phi_s = render_fields_species(gs, p)
     phi_f, phi_i, phi_v = group_species_fields(gs, phi_s)
 

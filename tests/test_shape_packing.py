@@ -240,6 +240,110 @@ class TestProxyTracksTheTruePenetration(unittest.TestCase):
             self.assertLess(self._case(n, 1.02)[0], 0.0)     # separated
             self.assertGreater(self._case(n, 0.95)[0], 0.0)  # overlapping
 
+    # ── V3.4: the accuracy above is ONE orientation pair ──────────────
+    #
+    # `_case` fixes th_i = 0.35, th_j = -0.9 and a single approach azimuth. The
+    # V3.2 claim that the proxy is faithful "within 3 %" rests on that one
+    # geometry. Swept over orientations it has a heavy tail, for a structural
+    # reason:
+    #
+    #     proxy = lambda_i(u) + lambda_j(-u) - d  is the penetration measured
+    #     along the LINE OF CENTRES, while
+    #     delta = min over nu of [h_i(nu) + h_j(nu) - r . nu]  is the minimum
+    #     over ALL directions.
+    #
+    # Evaluating the minimum at nu = u gives delta <= h_i(u) + h_j(u) - d, and
+    # lambda <= h gives proxy <= h_i(u) + h_j(u) - d as well. Both sit under the
+    # same bound, so NEITHER BOUNDS THE OTHER and the proxy errs in both
+    # directions. What it cannot do is invent a contact: proxy > 0 means the two
+    # centre-line surface points have crossed, which really is an overlap. It
+    # can, and does, miss one.
+    #
+    # This is what sets the settle's stopping rule, because that rule is a
+    # MAXIMUM over pairs and the pair with the largest true penetration is
+    # exactly where the proxy is least reliable. Measured on a packed
+    # gravity bed of AR-1.8 / n-3.5 granules: the settle reports
+    # max_overlap = 0.6 um where the true maximum is 16.7 um.
+
+    def _sweep(self, ar, n, trials=3000, seed=1):
+        rng = np.random.default_rng(seed)
+        sc = 20.0 * np.sqrt(np.pi / superellipse_area(ar, 1.0, n))
+        a, b = ar * sc, sc
+        out = []
+        for _ in range(trials):
+            th_i, th_j = rng.uniform(0, 2 * np.pi, 2)
+            phi = rng.uniform(0, 2 * np.pi)
+            ux, uy = np.cos(phi), np.sin(phi)
+            ci, si = np.cos(th_i), np.sin(th_i)
+            cj, sj = np.cos(th_j), np.sin(th_j)
+            li = se2d_lambda_grad(ux * ci + uy * si, -ux * si + uy * ci, a, b, n)[0]
+            lj = se2d_lambda_grad(-ux * cj - uy * sj, ux * sj - uy * cj, a, b, n)[0]
+            d = (li + lj) * rng.uniform(0.60, 0.99)
+            proxy = (li + lj) - d
+            true = _support_mtd_2d(a, b, n, th_i, th_j, d * ux, d * uy)
+            if proxy > 1e-9 and true > 1e-9:
+                out.append(proxy / true)
+        return np.array(out)
+
+    def test_circles_are_the_only_exact_case(self):
+        """For a sphere the line of centres IS the minimising direction, always,
+        so the proxy is the penetration rather than a proxy for it."""
+        r = self._sweep(1.0, 2.0, trials=500)
+        self.assertGreater(len(r), 100)
+        np.testing.assert_allclose(r, 1.0, atol=1e-4)
+
+    def test_the_proxy_errs_in_BOTH_directions_for_shapes(self):
+        """Neither quantity bounds the other -- see the derivation above. An
+        earlier version of this test asserted `proxy <= delta` and was wrong."""
+        r = self._sweep(1.3, 2.5)
+        self.assertGreater(len(r), 500)
+        self.assertGreater(float(r.max()), 1.0 + 1e-3, "should over-report somewhere")
+        self.assertLess(float(r.min()), 1.0 - 1e-3, "should under-report somewhere")
+
+    def test_the_tail_is_what_sets_the_settle_stopping_rule(self):
+        """Typically close, occasionally off by orders of magnitude -- and the
+        settle stops on `max_overlap` over all pairs, i.e. on the tail."""
+        mild = self._sweep(1.3, 2.5)
+        frag = self._sweep(1.8, 3.5)
+        for lab, r in (("mild", mild), ("fragmented", frag)):
+            self.assertGreater(float(np.median(r)), 0.85, lab)       # typical: fine
+            self.assertLess(float(np.percentile(r, 10)), 0.85, lab)  # tail: not fine
+        self.assertLess(float(frag.min()), 0.05,
+                        "the worst case should be orders of magnitude too small")
+        self.assertLess(float(np.percentile(frag, 10)),
+                        float(np.percentile(mild, 10)),
+                        "the tail must worsen with shape severity")
+
+    def test_a_packed_bed_really_is_left_over_penetrated(self):
+        """The consequence, end to end: the settle's own report against the
+        truth on the bed it produces."""
+        import contextlib
+        import io as _io
+        from gels.engine import Params, generate_packing, se2d_mtd_core
+        p = Params(mode='2D', Lx=400.0, Ly=800.0, shape_enabled=True,
+                   aspect_ratio_func_mean=1.8, blockiness_func_mean=3.5,
+                   aspect_ratio_inert_mean=1.6, blockiness_inert_mean=3.2,
+                   packing_shape_contact=True, contact_shape_dynamics=True,
+                   boundary_top='free', gravity_enabled=True, granule_density=1180.0,
+                   packing_consolidation='gravity', phi_solid_target=0.35,
+                   bed_phi_assumed=0.8, cell_surface_coverage=0.0,
+                   n_cells_per_granule=0, save_data=False)
+        with contextlib.redirect_stdout(_io.StringIO()):
+            gs = generate_packing(p, seed=3)
+        true = []
+        for i in range(gs.N):
+            for j in range(i + 1, gs.N):
+                o = se2d_mtd_core(gs.x[i], gs.y[i], gs.a[i], gs.b[i], gs.n_shape[i],
+                                  gs.theta[i], gs.x[j], gs.y[j], gs.a[j], gs.b[j],
+                                  gs.n_shape[j], gs.theta[j])
+                if o[0]:
+                    true.append(o[1])
+        self.assertGreater(len(true), 5)
+        tol = float(getattr(p, 'packing_overlap_tol', 1.0))
+        self.assertGreater(max(true), 5.0 * tol,
+                           "the settle stops at ~tol on its proxy; the true "
+                           "penetration it leaves is far larger")
+
 
 class TestBoundingRadius(unittest.TestCase):
 
