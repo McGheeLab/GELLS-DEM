@@ -8,6 +8,103 @@ MINOR tracks feature additions and improvements.
 
 ---
 
+## [V3.3] - in progress (started 2026-09-19)
+
+Adopts the machinery worth taking from `robotsim/`, the gitignored sibling repo that
+attacks the same physics from the opposite end (explicit surface agents vs. a
+contact-level cell kernel). `robotsim/docs/gells-dem-adoption.md` records what robotsim
+should borrow from GELLS; this is the reverse direction, which had never been written
+down. Plan: `CodeLog/ClaudesPlan/3.3.md`.
+
+Planned: a support-function minimum-translation-distance contact solver (becoming the
+default), FIRE post-settle relaxation, Laguerre/radical Voronoi local packing, union-find
+percolation on the real contact graph, Katz-Thompson permeability, optional
+convergence-based early stopping, cells that stack with an emergent granule preference,
+and an HTML trajectory viewer. Landed so far:
+
+### Phase 0 -- prerequisites
+
+**`cell_capacity_foothold` was applied on one path only.** `kernels/cells.py::_capacity`
+had no `foothold` argument while `engine.cell_capacity` and `division.capacity_vector`
+both applied one, so the two backends computed different per-granule capacities. Not
+latent: `fibroblast_realistic` sets `capacity_foothold=0.25`, and at r = 40 um in 3D the
+reference gave **cap = 64** against the kernel's **16**. Capacity sets the overcrowding
+and division thresholds, so the backends disagreed on cell fate under the flagship preset.
+
+`container_voxel_mask` moved from `viz2/void_percolation.py` to `gels/engine.py` (the
+kernels cannot import from `viz2`), verified mask-identical across box/cylinder x
+wall/free x 2D/3D. A dead `hasattr(gs, 'cell_diameter_offset')` branch in
+`division._daughter_angles` was removed -- the attribute is never assigned anywhere.
+
+### Phase 1 -- periodic neighbour search was silently dropping contacts
+
+`cKDTree(pos, boxsize=L).query_pairs(r)` returns each unordered pair **at most once**, at
+its minimum image, and raises nothing for `r > L/2`. Above that a granule has two images
+of a neighbour inside the cutoff and only one is reported, so the interaction is silently
+**dropped** -- a missing contact, not a double count, which is why it never presented as
+an obviously wrong force. Demonstrated: box L = 10, points at x = 1 and x = 9, cutoff 8
+gives one pair where a 9-image enumeration finds two interactions.
+
+`check_min_image` now guards `half_pairs`, the funnel both the linked-cell and ckdtree
+backends share. No shipped configuration is affected -- the defaults and the DOE2 periodic
+trials sit 8-18x clear -- but three periodic cases in `test_render_metrics_vs_reference`
+were over the line (r_bound up to 82 um in a 400 um box, about four granule diameters
+across) and were measuring the wrong physics; their granules were halved and the 3D
+periodic box raised to 300 um.
+
+**`perf_neighbor_skin` is deprecated, on measurement.** It promised a Verlet list that was
+never implemented. Building it was measured rather than assumed, and it loses
+(N = 3841, 3D, cutoff 135 um):
+
+| skin (um) | pairs | | build | step |
+|---|---|---|---|---|
+| 0 | 193,988 | 1.00x | 1.96 ms | **19.1 ms** |
+| 5 | 214,676 | 1.11x | 2.41 ms | |
+| 10 | 236,695 | 1.22x | 2.60 ms | |
+| 20 | 283,851 | 1.46x | 2.98 ms | **33.3 ms** (1.74x) |
+
+The rebuild a skin eliminates is only ~10-14 % of a step (flat from N = 78 to N = 11197),
+while the larger list it creates is traversed by the force loop on every step. At the
+declared default of 20 um, even free rebuilds would land at ~29 ms against 19 ms today,
+and no positive skin breaks even. The cutoff is `2*max_r_bound + L_max` and **L_max (cell
+sensing) dominates**, so the candidate list is already ~50 neighbours per granule. The
+optimisation the data points at is splitting the short contact-range list from the long
+sensing-range one -- noted, not done.
+
+### Testing -- the V2.7 fixture gate is platform-bound
+
+`test_legacy_identity` failed all four reference runs on macOS **before any V3.3 change**.
+The fixtures were blessed on Windows / CPython 3.14 / numpy 2.5; elsewhere packing
+positions differ by ~1e-13 (different libm, different numpy reduction order). In the 2D
+runs that stays at ~1e-12 forever, but in `run3d_spheres` it flips a discrete
+bridge-formation decision at t = 1.0 and the trajectories bifurcate:
+
+| run | t = 0 | t = 1.0 | t = 2.5 |
+|---|---|---|---|
+| `run2d_walls` | 1.4e-12 | 3.2e-14 | 1.9e-12 |
+| `run3d_spheres` | 2.2e-14 | **6.7e-01** | **7.4e-01** |
+
+No tolerance can bridge that, so exact equality of a **run** is only meaningful on the
+machine that blessed the fixture. `test_legacy_identity` now skips the run comparison on a
+platform-fingerprint mismatch (`params.json` is pure config resolution and is still
+checked everywhere), and `tests/test_local_identity.py` applies the same atol = 0
+comparisons against a baseline blessed on the current machine via
+`make_fixtures.py --local`. Verified sensitive: it catches a 1e-12 relative perturbation.
+`--force` on `tests/fixtures/` now also requires `--i-really-mean-it`, since the V2.7 code
+is no longer in the tree and those files are the only record of its behaviour.
+
+### Bug Fixes
+
+- `kernels/cells.py::_capacity` ignored `cell_capacity_foothold` (4x capacity divergence
+  between backends under `fibroblast_realistic`).
+- Periodic neighbour search silently dropped pairs whenever the cutoff reached half the
+  shortest box edge.
+- `division._daughter_angles` branched on an attribute that is never assigned.
+- `test_io_writer` asserted an "unwritable" path that `write_npz_atomic` creates via
+  `os.makedirs(exist_ok=True)`; it passed on Windows only because `Z:\` does not exist.
+
+---
+
 ## [V3.2] - in progress (started 2026-09-18)
 
 The granules stop being rigid spheres. The lab's are irregular, roughly cuboidal hydrogel
