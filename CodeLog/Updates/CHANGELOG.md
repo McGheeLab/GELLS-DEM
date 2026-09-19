@@ -8,7 +8,29 @@ MINOR tracks feature additions and improvements.
 
 ---
 
-## [V3.3] - in progress (started 2026-09-19)
+## [V3.4] - in progress (started 2026-09-19)
+
+**Support-function minimum-translation-distance contact solver.** Phase 3 of the
+`robotsim/` adoption plan, carried over from V3.3 under its own version because it
+changes the default contact physics for non-spherical granules. Plan:
+`CodeLog/ClaudesPlan/3.4.md`.
+
+The V3.2 KNOWN BLOCKER is now quantified rather than suspected: at 2 % past first touch,
+`find_contact_superellipsoids_3d` detects **25/200 = 12 %** of true contacts and
+over-reports penetration by **median 9.8x, p90 43x** on the ones it does find. The cause
+is structural -- `delta` is the distance between two common-normal surface points, not a
+penetration depth, and the reported normal is `(p_j - p_i)/|.|`, not a surface normal, so
+the force is not the gradient of any energy.
+
+The replacement is exact rather than iterative in the shape: the support function of the
+anisotropic two-exponent superellipsoid is closed form, a nested dual norm
+`h(n) = ||( ||(a n_x, b n_y)||_q1 , c n_z )||_q2` with `q1 = n1/(n1-1)`, `q2 = n2/(n2-1)`,
+verified against a 600x1200 brute-force surface maximisation at **4.9e-6** relative
+(mesh-limited) and **3.6e-15** at the sphere anchor.
+
+---
+
+## [V3.3] - 2026-09-19
 
 Adopts the machinery worth taking from `robotsim/`, the gitignored sibling repo that
 attacks the same physics from the opposite end (explicit surface agents vs. a
@@ -16,11 +38,10 @@ contact-level cell kernel). `robotsim/docs/gells-dem-adoption.md` records what r
 should borrow from GELLS; this is the reverse direction, which had never been written
 down. Plan: `CodeLog/ClaudesPlan/3.3.md`.
 
-Planned: a support-function minimum-translation-distance contact solver (becoming the
-default), FIRE post-settle relaxation, Laguerre/radical Voronoi local packing, union-find
-percolation on the real contact graph, Katz-Thompson permeability, optional
-convergence-based early stopping, cells that stack with an emergent granule preference,
-and an HTML trajectory viewer. Landed so far:
+V3.3 lands the parts that add measurements and correctness without moving any existing
+number: the prerequisite twin-drift fixes, the periodic minimum-image guard, and three
+halo-free structural metrics. The contact solver, FIRE relaxation, cell stacking,
+convergence detection and the HTML viewer are carried into V3.4 and beyond.
 
 ### Phase 0 -- prerequisites
 
