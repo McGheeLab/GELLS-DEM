@@ -1,14 +1,14 @@
-# GELLS-DEM Architecture Document
+# GELS Architecture Document
 
-**Version:** V1.12
-**Last updated:** 2026-03-16
-**Primary source file:** `new_dem_0.py`
+**Version:** V3.0 (in progress)
+**Last updated:** 2026-09-16
+**Primary source files:** `gels/engine.py`, `gels/kernels/reference.py`, `gels/lsdem.py`
 
 ---
 
 ## 1. System Overview
 
-GELLS-DEM simulates the rearrangement of hydrogel granular scaffolds driven by
+GELS simulates the rearrangement of hydrogel granular scaffolds driven by
 cell-mediated forces. It models two populations of granules --- functional (cell-laden)
 and inert (passive) --- within a confined domain, using overdamped Langevin dynamics.
 
@@ -23,7 +23,7 @@ relevant timescales (24--72 hours).
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│                          new_dem_0.py                                │
+│                        gels/engine.py                                │
 │                                                                      │
 │  ┌──────────┐   ┌────────────────────┐   ┌────────────────────────┐ │
 │  │  Params   │──▶│ generate_packing*()│──▶│    GranuleSystem       │ │
@@ -35,11 +35,12 @@ relevant timescales (24--72 hours).
 │  │                                                                │  │
 │  │   ┌───────────────────────┐    ┌────────────────────────────┐  │  │
 │  │   │ compute_forces*()     │───▶│     step()                 │  │  │
-│  │   │  • Hertz contact      │    │  • update_cell_state       │  │  │
+│  │   │  • JKR contact (V2.3) │    │  • update_cell_state       │  │  │
+│  │   │  • LS-DEM (gels/lsdem.py)│    │  • deformation integration │  │  │
 │  │   │  • motor-clutch       │    │  • overdamped Euler (2D/3D)│  │  │
 │  │   │  • wall (4 or 6 face) │    │  • velocity cap            │  │  │
 │  │   │  • friction + torques │    │  • wall clamp              │  │  │
-│  │   │  • active noise       │    │  • quaternion integration  │  │  │
+│  │   │  • contact clips      │    │  • quaternion integration  │  │  │
 │  │   └───────────────────────┘    └────────────────────────────┘  │  │
 │  │                                                                │  │
 │  │   ┌───────────────────────┐    ┌────────────────────────────┐  │  │
@@ -48,6 +49,7 @@ relevant timescales (24--72 hours).
 │  │   │  • 3D: volumetric     │    │  • overlap stats           │  │  │
 │  │   │  • eff. radii         │    │  • Kozeny-Carman, Darcy    │  │  │
 │  │   │  • bbox clipping (3D) │    │  • RCP, compaction ratio   │  │  │
+│  │   │  • deformed SDF (V2.3)│    │  • deformation strain      │  │  │
 │  │   └───────────────────────┘    └────────────────────────────┘  │  │
 │  └────────────────────────────────────────────────────────────────┘  │
 │                                                                      │
@@ -55,7 +57,7 @@ relevant timescales (24--72 hours).
             │ saves data to disk (snapshots, fields, history, params)
             ▼
 ┌──────────────────────────────────────────────────────────────────────┐
-│                  viz/postprocess.py (V1.8)                             │
+│                  viz/postprocess.py (V2.3)                             │
 │                  Unified post-processing orchestrator                 │
 │                                                                      │
 │  Delegates to viz/ package:                                          │
@@ -83,6 +85,22 @@ relevant timescales (24--72 hours).
 └──────────────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────────────┐
+│              viz2/postprocess.py (V2.4) — NEW                         │
+│              Rebuilt 2D/3D visualization system                       │
+│                                                                      │
+│  viz2/common.py           Shared colors, drawing, 3D slicing         │
+│  viz2/voronoi.py          Voronoi engine (center + boundary modes)   │
+│  viz2/scaffold_map.py     Module 1: Vector scaffold map              │
+│  viz2/voronoi_shapes.py   Module 2: Voronoi shape factors + overlay  │
+│  viz2/phase_fractions.py  Module 3: Global + local phase fractions   │
+│  viz2/movies.py           Module 4: GIF animations (all evolutions)  │
+│  viz2/energy_stress.py    Module 5: 6 energy modes + stress/strain   │
+│  viz2/void_percolation.py Module 6: Void percolation theory          │
+│  viz2/scaffold_map_3d.py  Module 7: PyVista 3D rendering (optional)  │
+│  viz2/postprocess.py      Orchestrator (CLI + programmatic)          │
+└──────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────┐
 │          analysis/ — Mathematical Analysis Framework (V1.7+)          │
 │                                                                      │
 │  mean_field_model.py    Two-zone ODE: dx_f/dt = -x_f*(σ_cell-σ_r)/η │
@@ -92,7 +110,40 @@ relevant timescales (24--72 hours).
 │  tissue_descriptors.py  BV/TV, Tb.Th, Tb.Sp, SMI, MIL, tortuosity  │
 │  organ_targets.py       7 organ targets + phase mapping (V1.9)       │
 │  arch_distance.py       Weighted Mahalanobis distance to organs      │
+│  spatial_pde.py         1D radial PDE compaction model (V2.5)        │
+│  contact_network.py     Graph-based topology model (V2.5)            │
+│  contact_network_model.py Gillespie SSA stochastic model (V2.5)     │
 │  MATHEMATICAL_MODEL.md  Formal model document for publications       │
+└──────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────┐
+│       Mesoscale Modelling Hierarchy (V2.5)                            │
+│                                                                      │
+│  Level 1: Mean-field ODE (mean_field_model.py)                       │
+│    • 1 DOF (x_f scalar), milliseconds, no spatial info               │
+│                                                                      │
+│  Level 2a: Spatial PDE (spatial_pde.py)  ◄──► Level 2b               │
+│    • N_x=20 radial grid points           │                           │
+│    • Compaction waves, local jamming      │                           │
+│    • Porosity/permeability profiles       │                           │
+│                                           │                           │
+│  Level 2b: Contact Network (contact_network.py) ◄──► Level 2a       │
+│    • Graph G=(V,E), N nodes              │                           │
+│    • Bridge percolation, Z(t), clusters  │                           │
+│    • Force chain statistics              │                           │
+│    • Deterministic per-timestep stepping │                           │
+│                                                                      │
+│  Level 2c: Stochastic Network (contact_network_model.py)            │
+│    • Gillespie SSA for exact bridge kinetics (BKL 1975)             │
+│    • Union-find percolation tracking (Newman-Ziff 2001)             │
+│    • Monte Carlo ensemble: 1000 runs → mean, IQR, spanning prob    │
+│    • ~2.5s per 72h realization, seconds for full ensemble           │
+│                                                                      │
+│  Level 3: Full DEM (gels/engine.py)                                  │
+│    • N × (pos + orient + cells + deform), hours                      │
+│    • Full particle resolution, superellipsoids, LS-DEM               │
+│                                                                      │
+│  viz/mesoscale.py: Kymographs, profiles, network plots, combined     │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -106,6 +157,15 @@ relevant timescales (24--72 hours).
 |-------|-----------|-------|---------|
 | Mode | `mode` | -- | `"2D"`, `"2D-slice"`, or `"3D"` |
 | Boundary | `boundary_mode` | -- | `"walls"` (default) or `"periodic"` (V1.10) |
+| Container shape | `boundary_shape` | -- | `"box"` (default) or `"cylinder"` (3D only; axis z, R = min(Lx,Ly)/2) (V3.1) |
+| Container top | `boundary_top` | -- | `"wall"` (default) or `"free"` (open top: z up in 3D, y up in 2D) (V3.1) |
+| Wall chemistry | `boundary_functionalization`, `boundary_layer_*` | -- | coated wall; optional immobile granule lining cells can bridge to (V3.1) |
+| Gravity | `gravity_enabled`, `granule_density`, `medium_density` | kg/m^3 | buoyant weight per mobile granule, -z (3D) / -y (2D) (V3.1) |
+| Consolidation | `packing_consolidation` | -- | `centre` (V2.7 pull to the box centre) / `gravity` / `none` / `auto` (V3.1) |
+| Granule amount | `bed_height_um`, `bed_phi_assumed` | um | state the amount as a settled bed height (V3.1) |
+| Contact cap | `contact_E_cap`, `friction_mu` | kPa, -- | numerical cap on the CONTACT modulus + Coulomb friction, for rigid materials (V3.1) |
+| Bridge force | `bridge_force_model`, `cell_contraction_speed` | -- , um/h | `constant` (V2.7 actuator) or `hill` (force-velocity) (V3.1) |
+| Cell division | `cell_division_enabled`, `cell_doubling_time` | -- , h | population growth with contact inhibition (V3.1) |
 | Domain | `Lx`, `Ly`, `Lz` | um | Simulation box size (Lz used in 3D/2D-slice) |
 | Granule sizes | `R_func_mean/std`, `R_inert_mean/std` | um | Gaussian size distributions |
 | Composition | `phi_f_target`, `phi_i_target` | -- | Target area/volume fractions |
@@ -355,7 +415,37 @@ plot_timeseries plot_granules    plot_fields  plot_composite
 | `viz/scaffold_evolution_3d.py` | 3D volumetric evolution with PyVista per organ (V1.9) | `sweep_dir` |
 | `viz/energy_landscape.py` | Energy landscape per organ, time evolution, decomposition, design space (V1.11) | `sweep_dir` |
 
-### 4.2 Mathematical Analysis Scripts — `analysis/` package (V1.12)
+### 4.2 Rebuilt 2D Visualization — `viz2/` package (V2.4)
+
+Unified 2D visualization system built on the scaffold map foundation, with Voronoi-based
+spatial analysis, full energy mode decomposition, and void percolation theory.
+
+**Architecture**: All modules share `viz2/common.py` for drawing primitives and data loading.
+`viz2/voronoi.py` is the shared computational engine used by modules 2, 3, and 4.
+
+| File | Module | Outputs |
+|------|--------|---------|
+| `viz2/common.py` | Shared utilities | Colors, `load_data()`, `ensure_phase_fields()`, `draw_granule_patches()`, `draw_cells_on_ax()`, `render_frame_to_array()`, 3D: `is_3d()`, `slice_snap_z_midplane()`, `slice_field_z_midplane()`, `cell_world_positions_3d()` |
+| `viz2/voronoi.py` | Voronoi engine | `voronoi_from_centers()` (all granules, functional clipped to body), `voronoi_from_boundaries()` (shrink-wrap), `compute_shape_factors()`, `compute_local_phase_fractions()`, Sutherland-Hodgman clipping |
+| `viz2/scaffold_map.py` | 1: Scaffold map | Multi-panel scaffold maps (void=black, functional=red, inert=green, bridges=crimson). 3D: z-midplane slice |
+| `viz2/voronoi_shapes.py` | 2: Shape factors | Voronoi overlay, shape factor maps (circularity/elongation/area), distributions, timeseries. 3D: z-slice |
+| `viz2/phase_fractions.py` | 3: Phase fractions | Global stacked area (conservation check), local heatmaps, inner vs outer timeseries, heterogeneity scatter. 3D: field + snap slicing |
+| `viz2/movies.py` | 4: GIF movies | scaffold_evolution.gif, voronoi_evolution.gif, local_phi_f_evolution.gif, stress_evolution.gif, energy_modes_evolution.gif. 3D: z-slice per frame |
+| `viz2/energy_stress.py` | 5: Energy + stress | Stress/strain maps via coarse-graining, 6 energy mode spatial maps (traction, contact, friction, osmotic, frustration, interfacial), timeseries. 3D: midplane slice of coarse-grained fields |
+| `viz2/void_percolation.py` | 6: Percolation | Void cluster maps, percolation status evolution, P(s) power-law fits, Kozeny-Carman K(t). 3D: all 3 axes checked, z-slice for display |
+| `viz2/scaffold_map_3d.py` | 7: 3D rendering | PyVista off-screen: superellipsoid meshes, cell spheres, bridge tubes, z-clip. Skips if 2D or no PyVista |
+| `viz2/postprocess.py` | Orchestrator | CLI: `python viz2/postprocess.py -i results/default [--skip movies] [--only scaffold voronoi]` |
+| `viz2/parallel.py` | Per-snapshot process pool (V3.0) | `pmap(fn, items, workers)` over snapshots: GIF frames, Voronoi tessellations, energy fields, cluster analysis. Spawn pool, order preserving, single-threaded workers, automatic serial fallback. Worker count: argument → `$VIZ2_WORKERS` → physical cores capped at 8 |
+| `viz2/compare_runs.py` | Multi-run comparison (V3.0) | Any set of finished runs on the same figures: `compare_scaffolds.png` (one panel per run, same colour per f, scale bars, shared legend), `compare_timeseries.png` (one line per run), `compare_species.png`, `compare_dose_response.png` (per-species final outcome vs that species' f), `compare_timelapse.gif` (common time axis), `compare_summary.md/.csv`. Circles via one `EllipseCollection` per panel (10⁵ granules in seconds); 3D as z-midplane slice |
+
+**Key design decisions:**
+- Cell bridges count toward functional space in data analysis but retain crimson color for visibility
+- Voronoi tessellation supports two modes: center-based (standard) and boundary-based shrink-wrap (superellipse surface sampling + ConvexHull merge)
+- `ensure_phase_fields()` reconstructs phase fields from particle data when `save_fields=False`
+- Pure numpy polygon clipping (Sutherland-Hodgman) avoids shapely dependency
+- Each module is fault-isolated: one failure doesn't abort the rest
+
+### 4.3 Mathematical Analysis Scripts — `analysis/` package (V1.12)
 
 | Script | Plots | Input |
 |--------|-------|-------|
@@ -401,15 +491,87 @@ Two formats supported (V1.4.1):
 
 Missing `"mode"` defaults to `"2D"`. See `Trial15_3D.json` for a flat format example.
 
-### HPC Support
+### Compute layout — `gels/kernels/` (V3.0)
 
 | File | Purpose |
 |------|---------|
-| `run_hpc_headless.py` | CLI-driven headless runner with `--trial` and `--mode` support |
-| `run_all_trials.py` | Batch runner: local (mode 1), SLURM generate (mode 2), SLURM auto-submit (mode 3) |
-| `hpc/generate_hpc_scripts.py` | Per-user SLURM script generator and automated HPC setup |
-| `hpc/sync_results.py` | Standalone result sync: check job status + rsync from cluster |
-| `hpc/Alex.json` | User HPC config (netid, group, cpus, walltime, paths) |
+| `gels/kernels/__init__.py` | `HAS_NUMBA` / `njit` / `prange` fallbacks; `configure_threads(n, layer)` — numba threading layer (`omp` default) and thread count (0 = auto physical cores) |
+| `gels/kernels/reference.py` | The V2.7 per-pair / per-cell / per-voxel Python loops, moved verbatim (forces, cell state machine and bridging, overlap resolution, rendering, metrics, packing relaxation). Oracle for the compiled kernels; the path LS-DEM runs on |
+| `gels/kernels/neighbors.py` | Half pair lists: `half_pairs_tree` (cKDTree, reference order) and `half_pairs_cells` (compiled linked-cell grid, sorted pairs, thread-independent); `csr_from_pairs` (particle → its pairs); `neighbor_backend(p)` |
+| `gels/kernels/geometry2d.py`, `geometry3d.py` | Status-tuple copies of the superellipse / superellipsoid / wall contact solvers (numba cannot call the `None`-returning originals) |
+| `gels/kernels/contact2d.py`, `contact3d.py` | Contact forces: `pair_pass_*` (prange over pairs → records), `mc_dem_pairs`, `gather_*` (prange over particles → F, torques, clip arrays, walls; owner writes only). `compute_forces_2d/3d` drivers; `TIMINGS` for the bench |
+| `gels/kernels/contacts.py` | `ContactSoA` (structure-of-arrays contact records that still iterate as dicts), record allocation, active noise |
+| `gels/kernels/cells.py` | Cell state machine (`aggregates_k`, `cells_update_k`) and bridging (`bridge_pairs_k`, `bridge_cells_k`) with a splitmix64 counter RNG; `update_cell_state_k`, `bridging_k` |
+| `gels/kernels/bridging.py` | Interim Python bridging over the kernel's candidate pairs with the restricted ray-cast (`perf_cells_backend='python'`: exact V2.7 cell machinery on compiled contacts) |
+| `gels/kernels/integrate.py` | `resolve_overlaps` — post-step overlap correction on the neighbour list |
+| `gels/kernels/render.py` | Bounding-box phase-field stamps parallel over grid rows / slabs with per-slab image lists; compiled effective radii; `render_fields_species` |
+| `gels/kernels/metrics.py` | `compute_metrics` twin: compiled contact / bridge-count loops (reference order), bincount cluster sizes, strided Voronoi query, cached shape descriptors |
+| `gels/kernels/packing.py` | `RSAChecker` (exact loop or neighbour grid — same decision, same draws) and the compiled settle substep (bit-identical positions) |
+| `gels/io/writer.py` | `write_npz_atomic` (np.load-compatible zip, deflate level, atomic rename) and `SnapshotWriter` (bounded-queue background thread) |
+
+**Exactness policy.** `Params.use_numba=False` (or `perf_neighbor_backend='reference'`) runs the pure-Python
+reference everywhere; the bit-identical fixture gate (`tests/make_fixtures.py`) pins it. On the kernel path,
+packing is bit-identical to the reference; contact forces, rendering and metrics agree to rounding
+(`tests/test_*_vs_reference.py`); the cell state machine's deterministic parts are exact, while bridging draws
+its randomness from a counter hash keyed by one `Generator` draw per pass — statistically equivalent, not
+step-for-step comparable. `perf_cells_backend='python'` restores the exact cell machinery on top of the
+compiled contacts. Every kernel is thread-count independent (owner-writes gathers, sorted pair lists).
+
+**Compute layout of one step (kernel path).** `update_cell_state_k` (2 prange passes) → neighbour list
+(`half_pairs_cells`) → `pair_pass` → `mc_dem_pairs` → `gather` → `bridge_pairs_k` → `bridge_cells_k` → noise
+(numpy) → integration (numpy) → `resolve_overlaps` → at save steps `render_fields_species` (rows / slabs) →
+`compute_metrics` → `SnapshotWriter.submit`. The thread count defaults to `auto_threads(N)` =
+clamp(N / 1000, 4, physical cores); more threads only add fork/join overhead below N ≈ 10⁴.
+
+| `gels/engine.py` | `Params`, `GranuleSystem` (`pos`/`vel`/`pos_unwrap` as `(N,3)` arrays with `x/y/z…` column properties), packing, `run()`/`step()` orchestration, serialization, and same-named **dispatcher wrappers** that forward to `reference` (kernels plug in behind `p.use_numba` / `p.deformable_enabled`) |
+| `gels/materials.py` | Functionalization rules shared by loops and kernels: coverage-mixing of adhesion/friction, per-pair E*, Langmuir/power traction gain, blocker penalty, species pair tables |
+| `gels/bench.py` | `python -m gels.bench` — per-component timings vs N and thread count |
+| `tests/` | `unittest` suite; `tests/fixtures/` holds the V2.7 bit-identical oracle runs (`make_fixtures.py`) |
+
+### Live view — `gels/live/` and the viz2 split (V3.0)
+
+| Module | Role |
+|---|---|
+| `gels/live/observer.py` | `Observer` protocol (`on_start` / `on_step → stop?` / `on_save` / `on_end`) called by `run(p, seed, observer=)`; `LiveViewObserver` ships frames through a bounded queue with `put_nowait` (drop when full, adaptive cadence) and services pause / step / stop / cadence / detach commands |
+| `gels/live/frames.py` | Vectorised cell world positions and bridge segments; compact `start` (static arrays, species table) and `frame` (float32 positions, int8 states, bridge segments, save-step metrics) messages built from a `GranuleSystem` or a snapshot dict |
+| `gels/live/viewer.py` | TkAgg viewer process: `EllipseCollection` granules, per-state cell markers, `LineCollection` bridges, HUD, legend, metrics panel, blitting via Tk `after()`; z-slice for 3D; headless PNG mode. Never imports `viz2.common` |
+| `gels/live/tail.py` | `SnapshotTailSource` (follows a run directory; `.tmp` files invisible, truncated files retried) and `ReplaySource` |
+| `pipeline/live_view.py` | CLI: tail a running step 3, replay a finished run, or dump PNGs |
+| `viz2/palette.py`, `viz2/snapshot_ops.py` | matplotlib-free colours / species tables and snapshot helpers shared by viz2 and the viewer; `viz2/common.py` re-exports them |
+
+Process model: `step3 --live` spawns the viewer (`multiprocessing` `spawn`, daemon) with a
+`Queue(maxsize=4)` for frames and a control queue + events back to the engine. The engine
+never blocks on the viewer; a closed window detaches and the run continues. Snapshot and
+history writes are atomic (`.tmp` + `os.replace`), so a tailing viewer never sees a
+half-written file. The parent process stays on Agg; the child sets `MPLBACKEND=TkAgg`
+before importing matplotlib.
+
+### Execution — `pipeline/` package (V2.7+)
+
+Runs are local and proceed as five numbered steps, each a standalone script
+operating on one run directory. Progress is checkpointed in
+`<run_dir>/pipeline_state.json`, so each step verifies its prerequisite,
+refuses to clobber completed work without `--force`, and can be re-run alone.
+
+| File | Purpose |
+|------|---------|
+| `pipeline/step1_config.py` | Resolve Params (defaults → trial JSON → CLI flags) → `params.json` |
+| `pipeline/step2_pack.py` | Packing, cell seeding, `t = 0` evaluation → `snap_0000.npz` |
+| `pipeline/step3_simulate.py` | Advance to `t_total`; `--continue` resumes or extends a run |
+| `pipeline/step4_postprocess.py` | Drive the `viz2` and/or `viz` suites |
+| `pipeline/step5_analysis.py` | Run the `analysis/` package → `analysis/summary.json` |
+| `pipeline/run_showcase.py` | V3.0 showcase: a table of conditions written as setup files (`Trials/showcase_v3/`), each run as its own steps 1–5 process under a weighted thread budget, then `viz2/compare_runs.py` on all of them |
+| `pipeline/_common.py` | Step state and guards, Params/trial-JSON loading, formatting |
+
+Steps 2 and 3 are joined by the engine's V2.6 resume mechanism: step 2 writes
+snapshot 0000, step 3 restores it and continues the main loop. Since resuming
+restarts the RNG stream, a packing + simulate pair is deterministic for a given
+seed but not bit-for-bit identical to a monolithic `run()` call.
+
+**HPC support was removed in V2.7.** The SLURM templates, cluster config and
+sync scripts are archived unmodified under `old code/hpc/`, alongside the
+retired `run_hpc_headless.py`, `run_all_trials.py` and
+`run_analysis_pipeline.py`. See `old code/README.md`.
 
 ### Mathematical Analysis Framework — `analysis/` package (V1.7+)
 
@@ -482,9 +644,11 @@ Power-law model predicts SLURM walltime from trial parameters:
    (minimum image convention, cKDTree boxsize, position wrapping, no walls).
 3. **Overdamped regime**: No inertial terms. Valid for cell-culture timescales
    (hours) in viscous medium.
-4. **Rigid granules**: Granule shapes do not deform during simulation. Deformation
-   effects captured through Hertz contact force and volume-conserving effective radii.
-5. **Hertz validity**: Contact model assumes small overlaps (delta/R < ~10%).
+4. **Rigid or deformable granules**: Rigid shapes use volume-conserving effective radii;
+   deformable LS-DEM shapes use modal deformation DOFs (V2.3). Both rendered with JKR
+   contact-face clipping for physically realistic flat faces at contacts.
+5. **JKR contact model** (V2.3): Replaces Hertz+DMT. JKR is correct for soft hydrogels
+   (Tabor parameter μ_T >> 1). Reduces exactly to Hertz when W=0.
 6. **Random by default**: Seed is `None` (random) unless explicitly set. All randomness
    flows through `numpy.random.Generator`.
 7. **Performance target**: 500-1000 granules in 3D with optional Numba JIT.

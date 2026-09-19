@@ -1,0 +1,51 @@
+{
+  "version": "V1.6",
+  "git_hash": "cfa8c65665696490c88fc95f30760b823f9f0aa0",
+  "seed": 7,
+  "mode": "2D",
+  "n_granules": 11,
+  "n_functional": 8,
+  "n_inert": 3,
+  "total_cells": 59,
+  "species": [
+    {
+      "index": 0,
+      "name": "collagen",
+      "f": 1.0,
+      "color": "#CC2222",
+      "E_kPa": 10.0,
+      "poisson_ratio": 0.45,
+      "n_granules": 8,
+      "n_cells": 59
+    },
+    {
+      "index": 1,
+      "name": "bare",
+      "f": 0.0,
+      "color": "#22AA22",
+      "E_kPa": 10.0,
+      "poisson_ratio": 0.45,
+      "n_granules": 3,
+      "n_cells": 0
+    }
+  ],
+  "domain": [
+    400.0,
+    400.0,
+    800.0
+  ],
+  "cell_state_enum": {
+    "ATTACHED": 0,
+    "SPREADING": 1,
+    "PROLIFERATING": 2,
+    "BRIDGING": 3,
+    "SENESCENT": 4,
+    "MIGRATING": 5
+  },
+  "wall_time_s": 0.1,
+  "n_steps": 5,
+  "steps_completed": 5,
+  "t_reached": 2.5,
+  "stopped_early": false,
+  "stop_reason": "complete"
+}

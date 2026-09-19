@@ -316,7 +316,7 @@ if __name__ == '__main__':
 
     # V1.5: Load from disk via load_run()
     try:
-        from new_dem_0 import load_run
+        from gels.engine import load_run
         hist, snaps, p, meta = load_run(str(indir))
         run_all(snaps, hist, p, outdir=outdir)
     except Exception as e:

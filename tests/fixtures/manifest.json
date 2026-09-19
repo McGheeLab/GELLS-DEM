@@ -1,0 +1,54 @@
+{
+  "seed": 7,
+  "common": {
+    "t_total": 2.5,
+    "dt": 0.5,
+    "save_every_h": 0.5,
+    "Ngrid": 64,
+    "save_data": true,
+    "save_fields": true,
+    "compress_archive": false
+  },
+  "reference_runs": {
+    "run2d_walls": {
+      "mode": "2D",
+      "Lx": 400.0,
+      "Ly": 400.0,
+      "boundary_mode": "walls"
+    },
+    "run2d_periodic": {
+      "mode": "2D",
+      "Lx": 400.0,
+      "Ly": 400.0,
+      "boundary_mode": "periodic"
+    },
+    "run2d_shapes": {
+      "mode": "2D",
+      "Lx": 400.0,
+      "Ly": 400.0,
+      "shape_enabled": true,
+      "aspect_ratio_func_mean": 1.3,
+      "aspect_ratio_inert_mean": 1.2,
+      "blockiness_func_mean": 2.5,
+      "blockiness_inert_mean": 2.2
+    },
+    "run3d_spheres": {
+      "mode": "3D",
+      "Lx": 250.0,
+      "Ly": 250.0,
+      "Lz": 250.0,
+      "Ngrid_3d": 24,
+      "cell_surface_coverage": 1.0
+    }
+  },
+  "params_trials": [
+    "Trials/DOE2_2D_0001.json",
+    "Trials/default_trial.json"
+  ],
+  "generated_with": {
+    "git_hash": "cfa8c65665696490c88fc95f30760b823f9f0aa0",
+    "python": "3.14.7",
+    "numpy": "2.5.3",
+    "platform": "Windows-11-10.0.26200-SP0"
+  }
+}

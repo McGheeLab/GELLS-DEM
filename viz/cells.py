@@ -30,7 +30,7 @@ from matplotlib.lines import Line2D
 from pathlib import Path
 import argparse
 
-from new_dem_0 import (
+from gels.engine import (
     superellipse_point, superellipse_polygon_pts, CellState,
     superellipsoid_point, quat_rotate
 )
@@ -42,6 +42,7 @@ CELL_COLORS = {
     int(CellState.PROLIFERATING):'#228B22',  # forest green
     int(CellState.BRIDGING):     '#DC143C',  # crimson
     int(CellState.SENESCENT):    '#696969',  # dim gray
+    int(CellState.MIGRATING):    '#4169E1',  # royal blue
 }
 
 CELL_LABELS = {
@@ -50,6 +51,7 @@ CELL_LABELS = {
     int(CellState.PROLIFERATING):'Proliferating',
     int(CellState.BRIDGING):     'Bridging',
     int(CellState.SENESCENT):    'Senescent',
+    int(CellState.MIGRATING):    'Migrating',
 }
 
 
@@ -550,7 +552,7 @@ if __name__ == '__main__':
     outdir = args.outdir or str(indir / 'visualizations')
 
     try:
-        from new_dem_0 import load_run
+        from gels.engine import load_run
         hist, snaps, p, meta = load_run(str(indir))
         run_all(snaps, hist, p, outdir=outdir)
     except Exception as e:

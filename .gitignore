@@ -2,6 +2,7 @@
 simulations/
 results/
 Trials/trials/
+Research/References
 *.npy
 *.npz
 *.pkl
@@ -47,3 +48,18 @@ Thumbs.db
 *.fdb_latexmk
 *.synctex.gz
 CodeLog/Paper/tectonic/
+
+# V3.0 regression fixtures are small and MUST be versioned despite the global
+# *.npz / *.npy ignores above (they are the bit-identical oracle for the refactor).
+!tests/fixtures/
+!tests/fixtures/**
+!tests/fixtures/**/*.npz
+!tests/fixtures/**/*.npy
+
+# Literature, lab data and build tools: large, not part of the model, and
+# permanent once committed. Keep them local (V3.2).
+Research/
+Experimental Results/
+*.pdf
+*.xlsx
+*.docx

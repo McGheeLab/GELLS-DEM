@@ -276,7 +276,7 @@ if __name__ == '__main__':
 
     # V1.5: Try load_run() first, fall back to history.json
     try:
-        from new_dem_0 import load_run
+        from gels.engine import load_run
         hist, snaps, p, meta = load_run(str(indir))
         run_all(hist, outdir=outdir)
     except Exception:

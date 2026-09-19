@@ -2,7 +2,7 @@
 """
 Architectural Distance: Scaffold vs. Native Organ Targets
 ==========================================================
-Computes the weighted Mahalanobis-like distance between GELLS-DEM scaffold
+Computes the weighted Mahalanobis-like distance between GELS scaffold
 descriptors and native organ architecture targets defined in organ_targets.py.
 
 The distance metric uses log-transform for scale-dependent quantities so that
@@ -191,14 +191,14 @@ def closest_organ(scaffold_descriptors, weights=None):
 
 def _load_run_lazy(run_dir):
     """Lazy import and call of new_dem_0.load_run."""
-    from new_dem_0 import load_run
+    from gels.engine import load_run
     return load_run(run_dir)
 
 
 def _descriptors_from_history_entry(h):
     """Extract a scaffold descriptor dict from a history entry.
 
-    Maps history keys (from new_dem_0 metrics) to DESCRIPTOR_KEYS where
+    Maps history keys (from gels.engine metrics) to DESCRIPTOR_KEYS where
     possible. Many descriptors require field-level analysis and will not
     be present in the scalar history -- those are simply omitted.
     """

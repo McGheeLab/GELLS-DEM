@@ -37,7 +37,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-from new_dem_0 import (
+from gels.engine import (
     superellipsoid_point, superellipsoid_normal, superellipsoid_mesh,
     quat_rotate, quat_rotate_inv, CellState,
     find_contact_superellipsoids_3d, find_contact_spheres_3d,
@@ -75,7 +75,7 @@ def granule_surface_mesh(snap, gi, n_pts=32):
     E, O = np.meshgrid(eta, omega, indexing='ij')
 
     # Body-frame vertices via superellipsoid parametric equations
-    from new_dem_0 import _sgnpow
+    from gels.engine import _sgnpow
     e2 = 2.0 / n2
     e1 = 2.0 / n1
     X = a * _sgnpow(np.cos(E), e2) * _sgnpow(np.cos(O), e1)
@@ -261,7 +261,7 @@ def reconstruct_contacts(snap, p):
         if result is not None:
             _, overlap, nx, ny, nz, cx, cy, cz, R_eff = result
             if overlap > 0:
-                from new_dem_0 import hertz_contact_force
+                from gels.engine import hertz_contact_force
                 nu = getattr(p, 'poisson_ratio', 0.49)
                 E_star = (p.E_modulus * 1e3) / (2.0 * (1.0 - nu**2))
                 Fc = hertz_contact_force(E_star, R_eff, overlap)
@@ -967,7 +967,7 @@ if __name__ == '__main__':
     outdir = args.outdir or str(indir / 'visualizations')
 
     try:
-        from new_dem_0 import load_run, Params
+        from gels.engine import load_run, Params
         hist, snaps, p, _ = load_run(str(indir))
         run_all(snaps, hist, p, outdir=outdir)
     except Exception as e:

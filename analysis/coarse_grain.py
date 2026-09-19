@@ -1,5 +1,5 @@
 """
-Continuum Coarse-Graining for GELLS-DEM
+Continuum Coarse-Graining for GELS
 ========================================
 Extracts continuum-level quantities (stress tensor, strain rate tensor,
 effective viscosity, coordination number) from DEM simulation snapshots
@@ -205,7 +205,7 @@ def _reconstruct_contacts(snap, p):
         R_eff = r[i] * r[j] / (r[i] + r[j])
 
         # Hertzian force
-        from new_dem_0 import hertz_contact_force
+        from gels.engine import hertz_contact_force
         Fc = hertz_contact_force(E_star_gg, R_eff, overlap)
 
         # DMT adhesion
@@ -628,7 +628,7 @@ def extract_continuum_timeseries(run_dir):
         sigma_contact_pressure, sigma_active_pressure,
         n_contacts, phi_solid, porosity.
     """
-    from new_dem_0 import load_run
+    from gels.engine import load_run
 
     hist, snaps, p, metadata = load_run(run_dir)
 
@@ -693,11 +693,38 @@ def extract_continuum_timeseries(run_dir):
 # 6. Spatial coarse-graining
 # ======================================================================
 
+def _cell_centres(gx_c, gy_c, gz_c, is_3d):
+    """(C, D) grid-cell centres in the same order as the original nested loops."""
+    if is_3d:
+        X, Y, Z = np.meshgrid(gx_c, gy_c, gz_c, indexing='ij')
+        return np.column_stack([X.ravel(), Y.ravel(), Z.ravel()])
+    X, Y = np.meshgrid(gx_c, gy_c, indexing='ij')
+    return np.column_stack([X.ravel(), Y.ravel()])
+
+
+def _chunk_rows(n_cols, D, budget=6_000_000):
+    """Grid-cell rows per chunk so a (rows, n_cols, D) intermediate stays bounded."""
+    return max(1, int(budget / max(1, n_cols * max(D, 1))))
+
+
+def _gauss_weights(cells, points, w):
+    """(rows, K) Gaussian weights with the original 1e-10 cutoff applied as zeros."""
+    d2 = ((cells[:, None, :] - points[None, :, :]) ** 2).sum(-1)
+    W = np.exp(-d2 / (2.0 * w * w))
+    W[W < 1e-10] = 0.0
+    return W
+
+
 def coarse_grain_field(snap, p, quantity='stress', Ngrid=20):
     """Compute spatially resolved continuum fields via Gaussian coarse-graining.
 
     Divides the domain into Ngrid^D grid cells and computes the stress
     or strain-rate tensor in each cell using a Gaussian weighting function.
+
+    Vectorised (V3.0): the per-cell sums run over numpy arrays in chunks of grid
+    cells instead of a Python loop over cells x contacts. Same weights, same
+    1e-10 cutoff, same normalisation; sums are in a different order, so values
+    agree to floating-point rounding rather than bit-for-bit.
 
     Parameters
     ----------
@@ -750,116 +777,89 @@ def coarse_grain_field(snap, p, quantity='stress', Ngrid=20):
         cell_vol = dx * dy
 
     shape = (Ngrid, Ngrid, Ngrid) if is_3d else (Ngrid, Ngrid)
-    pressure_field = np.zeros(shape)
-    vm_field = np.zeros(shape)
-    vol_sr_field = np.zeros(shape) if quantity == 'strain_rate' else None
-    shear_sr_field = np.zeros(shape) if quantity == 'strain_rate' else None
+    cells = _cell_centres(gx_c, gy_c, gz_c, is_3d)
+    C = cells.shape[0]
+
+    tensors = np.zeros((C, D, D))
+    vol_sr = np.zeros(C) if quantity == 'strain_rate' else None
+    shear_sr = np.zeros(C) if quantity == 'strain_rate' else None
 
     if quantity == 'stress':
         ci_arr, cj_arr, cx_arr, cy_arr, cz_arr, nx_arr, ny_arr, nz_arr, \
             Fn_arr, gti, gtj = _get_contacts(snap, p)
+        K = len(ci_arr)
+        if K > 0:
+            c_pts = (np.column_stack([cx_arr, cy_arr, cz_arr]) if is_3d
+                     else np.column_stack([cx_arr, cy_arr]))
+            n_vec = (np.column_stack([nx_arr, ny_arr, nz_arr]) if is_3d
+                     else np.column_stack([nx_arr, ny_arr]))
+            f_vec = np.asarray(Fn_arr)[:, None] * n_vec           # (K, D)
+            l_vec = pos[np.asarray(cj_arr, dtype=int), :D] - \
+                pos[np.asarray(ci_arr, dtype=int), :D]            # (K, D)
+            outer_k = f_vec[:, :, None] * l_vec[:, None, :]       # (K, D, D)
 
-    vel = _velocities(snap, is_3d) if quantity == 'strain_rate' else None
-    vols = _granule_volumes(snap, is_3d) if quantity == 'strain_rate' else None
+            step = _chunk_rows(K, D)
+            for a in range(0, C, step):
+                b = min(a + step, C)
+                W = _gauss_weights(cells[a:b], c_pts, w)
+                tensors[a:b] = np.tensordot(W, outer_k, axes=(1, 0))
+                wt = W.sum(axis=1)
+                ok = wt > 1e-30
+                denom = cell_vol * wt / max(1, K)
+                tensors[a:b][ok] /= denom[ok][:, None, None]
+                tensors[a:b][~ok] = 0.0
 
-    def _gauss_weight(x_cell, x_part, w):
-        """Gaussian weight function."""
-        d2 = np.sum((x_cell - x_part)**2)
-        return np.exp(-d2 / (2.0 * w**2))
+    elif quantity == 'strain_rate':
+        vel = _velocities(snap, is_3d)
+        vols = _granule_volumes(snap, is_3d)
+        pos_D = pos[:, :D]
+        vel_D = vel[:, :D]
+        step = _chunk_rows(N, D)
+        for a in range(0, C, step):
+            b = min(a + step, C)
+            W = _gauss_weights(cells[a:b], pos_D, w)              # (c, N)
+            wv = W * vols[None, :]                                # (c, N)
+            vol_sum = wv.sum(axis=1)                              # (c,)
+            v_mean = wv @ vel_D                                   # (c, D)
+            has_vol = vol_sum > 1e-30
+            v_mean[has_vol] /= vol_sum[has_vol][:, None]
+            v_mean[~has_vol] = 0.0
 
-    # Iterate over grid cells
-    for ix in range(Ngrid):
-        for iy in range(Ngrid):
-            nz_range = range(Ngrid) if is_3d else range(1)
-            for iz in nz_range:
-                x_cell = np.array([gx_c[ix], gy_c[iy]])
-                if is_3d:
-                    x_cell = np.array([gx_c[ix], gy_c[iy], gz_c[iz]])
+            dxg = pos_D[None, :, :] - cells[a:b][:, None, :]      # (c, N, D)
+            dvg = vel_D[None, :, :] - v_mean[:, None, :]          # (c, N, D)
+            term = np.einsum('cn,cna,cnb->cab', wv, dvg, dxg)
+            eps = 0.5 * (term + term.transpose(0, 2, 1))
 
-                grid_idx = (ix, iy, iz) if is_3d else (ix, iy)
+            wt = W.sum(axis=1)
+            ok = (wt > 1e-30) & (cell_vol > 0)
+            denom = cell_vol * wt / max(1, N)
+            eps[ok] /= denom[ok][:, None, None]
+            eps[~ok] = 0.0
+            tensors[a:b] = eps
 
-                if quantity == 'stress':
-                    sigma_local = np.zeros((D, D))
-                    w_total = 0.0
-
-                    for k in range(len(ci_arr)):
-                        c_pt = np.array([cx_arr[k], cy_arr[k]])
-                        if is_3d:
-                            c_pt = np.array([cx_arr[k], cy_arr[k], cz_arr[k]])
-
-                        wt = _gauss_weight(x_cell, c_pt, w)
-                        if wt < 1e-10:
-                            continue
-
-                        f = np.zeros(D)
-                        f[0] = Fn_arr[k] * nx_arr[k]
-                        f[1] = Fn_arr[k] * ny_arr[k]
-                        if D == 3:
-                            f[2] = Fn_arr[k] * nz_arr[k]
-
-                        i_g, j_g = ci_arr[k], cj_arr[k]
-                        l = pos[j_g, :D] - pos[i_g, :D]
-
-                        sigma_local += wt * np.outer(f, l)
-                        w_total += wt
-
-                    if w_total > 1e-30:
-                        sigma_local /= (cell_vol * w_total / max(1, len(ci_arr)))
-
-                    s3 = _tensor_to_3x3(sigma_local, D)
-                    pressure_field[grid_idx] = -np.trace(s3) / 3.0
-                    vm_field[grid_idx] = _von_mises(s3)
-
-                elif quantity == 'strain_rate':
-                    eps_local = np.zeros((D, D))
-                    w_total = 0.0
-
-                    # Volume-weighted mean velocity in this cell
-                    v_mean_local = np.zeros(D)
-                    vol_sum = 0.0
-                    for i_g in range(N):
-                        wt = _gauss_weight(x_cell, pos[i_g, :D], w)
-                        if wt < 1e-10:
-                            continue
-                        v_mean_local += wt * vols[i_g] * vel[i_g, :D]
-                        vol_sum += wt * vols[i_g]
-                    if vol_sum > 1e-30:
-                        v_mean_local /= vol_sum
-
-                    for i_g in range(N):
-                        wt = _gauss_weight(x_cell, pos[i_g, :D], w)
-                        if wt < 1e-10:
-                            continue
-                        dx_g = pos[i_g, :D] - x_cell
-                        dv_g = vel[i_g, :D] - v_mean_local
-                        Vi = vols[i_g]
-                        eps_local += wt * Vi * (np.outer(dv_g, dx_g) +
-                                                np.outer(dx_g, dv_g)) / 2.0
-                        w_total += wt
-
-                    if w_total > 1e-30 and cell_vol > 0:
-                        eps_local /= (cell_vol * w_total / max(1, N))
-
-                    e3 = _tensor_to_3x3(eps_local, D)
-                    pressure_field[grid_idx] = -np.trace(e3) / 3.0
-                    vm_field[grid_idx] = _von_mises(e3)
-                    if vol_sr_field is not None:
-                        vol_sr_field[grid_idx] = np.trace(e3)
-                    if shear_sr_field is not None:
-                        shear_sr_field[grid_idx] = _dev_magnitude(e3)
+    # Per-cell invariants (C is at most Ngrid^3, so a plain loop is cheap here
+    # and keeps the existing tensor helpers as the single source of truth)
+    pressure_flat = np.zeros(C)
+    vm_flat = np.zeros(C)
+    for c in range(C):
+        t3 = _tensor_to_3x3(tensors[c], D)
+        pressure_flat[c] = -np.trace(t3) / 3.0
+        vm_flat[c] = _von_mises(t3)
+        if vol_sr is not None:
+            vol_sr[c] = np.trace(t3)
+            shear_sr[c] = _dev_magnitude(t3)
 
     result = {
         'grid_x': gx_c,
         'grid_y': gy_c,
-        'pressure': pressure_field,
-        'von_mises': vm_field,
+        'pressure': pressure_flat.reshape(shape),
+        'von_mises': vm_flat.reshape(shape),
     }
     if is_3d:
         result['grid_z'] = gz_c
-    if vol_sr_field is not None:
-        result['volumetric_strain_rate'] = vol_sr_field
-    if shear_sr_field is not None:
-        result['shear_strain_rate'] = shear_sr_field
+    if vol_sr is not None:
+        result['volumetric_strain_rate'] = vol_sr.reshape(shape)
+        result['shear_strain_rate'] = shear_sr.reshape(shape)
 
     return result
 
@@ -1081,7 +1081,7 @@ def run_all(run_dir, outdir=None):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
-        description='Continuum coarse-graining for GELLS-DEM simulations')
+        description='Continuum coarse-graining for GELS simulations')
     parser.add_argument('-i', '--input', required=True,
                         help='Input run directory or .tar.gz archive')
     parser.add_argument('-o', '--outdir', default=None,

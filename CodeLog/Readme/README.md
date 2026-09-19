@@ -1,6 +1,6 @@
-# GELLS-DEM
+# GELS
 
-**Granular Encapsulated Living-cell Laden Scaffold - Discrete Element Method**
+**Granule-Enabled Living Scaffolds**
 
 A 2D/3D particle dynamics simulator for modelling cell-driven rearrangement of
 hydrogel granular scaffolds.
@@ -9,7 +9,7 @@ hydrogel granular scaffolds.
 
 ## What It Does
 
-GELLS-DEM simulates how cell-laden hydrogel granules reorganize over time within
+GELS simulates how cell-laden hydrogel granules reorganize over time within
 a confined domain. Functional granules carry cells that form mechanical bridges
 to neighbouring functional granules, pulling them together. Inert granules act as
 passive spacers. The simulation predicts how scaffold microstructure --- void
@@ -29,28 +29,105 @@ over 24--72 hours.
 
 ---
 
+## What's New in V3.1
+
+The container, the granule material and the cells move closer to the bench experiment:
+**fibroblasts on collagen-coated PMMA granules sedimented under gravity in a well** with a
+flat floor, a cylindrical side wall and a free top.
+
+- **A container that can compact.** `boundary.shape` (`box` | `cylinder`) and `boundary.top`
+  (`wall` | `free`). A closed box is fixed-volume and cannot compact at all; with a free top
+  the bed surface can descend, and against an inert wall the bed can pull away from it.
+- **Gravity** with per-species density (PMMA 1180 kg/m³), and a packer that **sediments** the
+  bed instead of pulling it toward the domain centre (`packing.consolidation`). The old
+  behaviour consolidated sub-RCP packings into a ball with empty corners — see the Bug Fixes
+  entry in the changelog.
+- **Rigid granules.** Declare the true modulus and cap only the contact stiffness
+  (`contact.stiffness_cap_kPa`), plus Coulomb friction. Rigidity is enforced geometrically by
+  the overlap projection, not by resolved Hertz forces — stated plainly because it bounds
+  what the contact forces mean.
+- **Cells that contract against a force balance** (`cells.bridging.force_model: hill`) instead
+  of pulling with a fixed force, and **cells that divide** (`cells.division`, 24 h doubling
+  with contact inhibition).
+- **Boundary chemistry**: a coated wall with an immobile granule lining cells can bridge to,
+  which is what separates the two regimes seen at the bench — an inert boundary lets the bed
+  detach and compact, a functionalized one pins it and the functional phase coarsens.
+- **Bed observables** (`bed_height_mean`, `phi_bed`, `bed_radius_p95`, `wall_contact_fraction`)
+  measured from positions rather than from the rendered field, a `--sweep well` calibration
+  set, and `compare_runs.py --experiment` to overlay measured bed geometry.
+
+## What's New in V3.0
+
+The model is now framed as **fibroblasts migrating on a bed of hydrogel
+granules coated with Collagen-I**:
+
+- **Granule species with a degree of functionalization** `f in [0, 1]` (1 = fully
+  collagen-coated, 0 = bare). Any number of species can be mixed by volume
+  fraction, each with its own radius distribution, shape, stiffness and colour.
+  Adhesion and friction mix bilinearly in coverage; cell traction follows a
+  Langmuir ligand-density law (`g(f) = f(1+k)/(f+k)`, k = K_sigma/sigma_max, defaults
+  from the collagen literature — see `CodeLog/References/fibroblast_parameters.md`);
+  cell seeding, bridging eligibility and the bridge lock-in threshold scale
+  with the same coverage. `f in {0, 1}` reproduces the V2.7 functional / inert model exactly.
+- **Sectioned YAML setup files** (`pipeline/step0_new_setup.py` writes a commented
+  template; `step1_config.py --setup FILE --set path=value`) with physical
+  defaults for human dermal fibroblasts.
+- **Live view**: `step3_simulate.py --live` opens a real-time window (pause,
+  single-step, stop, colour by species / f / speed); `pipeline/live_view.py`
+  tails or replays any run.
+- **Compiled parallel engine** (`gels/kernels/`, numba): contacts, cells and
+  bridging, rendering, metrics and packing run as thread-count-independent
+  kernels. On the 40-core workstation a 2D step at N = 3000 dropped from
+  0.87 s to 0.02 s and a field render at N = 3000 from 298 s to 0.2 s; N = 10^4 to 10^5
+  granules are practical. `use_numba: false` runs the pure-Python reference,
+  which the compiled kernels are tested against (`tests/`).
+- **Showcase and multi-run comparison**: `python pipeline/run_showcase.py` runs
+  nine conditions concurrently (a functionalization ladder on one 5 mm domain,
+  shaped granules, a 20 mm bed of ~51 000 granules, a 1.6 mm 3D cube) into
+  `results/showcase_v3/` and draws them on the same figures with
+  `viz2/compare_runs.py` (final scaffolds side by side, metrics overlaid, a
+  synchronized timelapse, a summary table). The comparison tool works on any
+  set of finished runs.
+
+---
+
 ## Quick Start
 
 ### Requirements
 
 - Python 3.9+
 - numpy, scipy, matplotlib
-- Optional: pyvista (3D rendering), scikit-image (marching cubes), numba (JIT acceleration)
+- Recommended: numba (compiled parallel kernels; without it everything runs on the slow Python reference), pyyaml (YAML setup files)
+- Optional: pyvista (3D rendering), scikit-image (marching cubes)
+- Optional for post-processing: imageio, imageio-ffmpeg, tqdm
 
 ### Run a Simulation
 
+Simulations run locally as five numbered steps, each operating on one run
+directory. Every step prints the command for the next one when it finishes.
+
 ```bash
-# Default 2D simulation
-python3 new_dem_0.py
+python pipeline/step0_new_setup.py   -o setup.yaml                      # optional: commented template to edit
+python pipeline/step1_config.py      --setup setup.yaml --name my_run   # or: --name my_run --t_total 72
+python pipeline/step2_pack.py        -i results/my_run
+python pipeline/step3_simulate.py    -i results/my_run
+python pipeline/step4_postprocess.py -i results/my_run
+python pipeline/step5_analysis.py    -i results/my_run
 ```
 
-This runs the default configuration (800 x 800 um domain, E = 10 kPa, 72 hours)
-and displays granule positions, phase fields, and metric time series.
+Start from a trial config instead of flags:
+
+```bash
+python pipeline/step1_config.py --trial Trials/DOE2_2D_0001.json
+```
+
+See `pipeline/README.md` for the full guide, including resuming an interrupted
+run (`step3_simulate.py --continue`) and re-running individual steps.
 
 ### 3D Volumetric Simulation
 
 ```python
-from new_dem_0 import Params, run
+from gels import Params, run
 
 p = Params(
     mode='3D',
@@ -77,7 +154,7 @@ hist, snaps, p, gs = run(p)
 ### Custom Parameters
 
 ```python
-from new_dem_0 import Params, run
+from gels import Params, run
 
 p = Params(
     E_modulus=5.0,          # kPa — softer hydrogel
@@ -113,45 +190,66 @@ The Young's modulus `E_modulus` controls how much granules overlap under cell fo
 ## Project Structure
 
 ```
-GELLS-DEM/
-├── new_dem_0.py                 # Primary simulation engine (V1.12, no plotting)
-├── run_hpc_headless.py          # HPC headless runner (supports 2D/3D)
-├── run_all_trials.py            # Batch trial runner (local / SLURM array)
-├── run_analysis_pipeline.py     # Full analysis pipeline orchestrator
-├── reconstruct_history.py       # Reconstruct history from snapshots
-├── viz/                         # Visualization package
-│   ├── postprocess.py           # Unified post-processing orchestrator
-│   ├── cells.py                 # Cell morphology & stress maps
-│   ├── stress.py                # 3D surface stress, isosurfaces
-│   ├── compaction.py            # Void-space & compaction plots
-│   ├── percolation.py           # Transport property analysis
-│   ├── movies.py                # 3D volumetric animations
-│   ├── phases.py                # Individual phase volumes
-│   ├── shapes.py                # Granule shape gallery
-│   ├── doe.py                   # DOE statistical analysis
-│   ├── dimensionless.py         # Dimensionless analysis, data collapse
-│   ├── scaffold_evolution.py    # 2D microstructure evolution timelapse (V1.9)
-│   ├── scaffold_evolution_3d.py # 3D volumetric evolution, PyVista (V1.9)
-│   └── energy_landscape.py      # Energy landscape visualization (V1.11)
-├── analysis/                    # Mathematical analysis package
-│   ├── mean_field_model.py      # Two-zone compaction ODE (V1.9)
-│   ├── parameter_sweep.py       # 11-D LHS + 1D PDE sweep (V1.10)
-│   ├── energy_landscape.py      # Free energy landscape decomposition (V1.11)
-│   ├── coarse_grain.py          # Stress tensor, strain rate, viscosity
-│   ├── tissue_descriptors.py    # Tissue architecture descriptors
-│   ├── organ_targets.py         # Organ system target vectors + phase mapping (V1.9)
-│   └── arch_distance.py         # Architectural distance to organs
-├── Trials/                      # Parameter sweep configs (DOE)
-│   ├── generate_doe.py          # DOE config generator
-│   └── default_trial.json       # Default V1.9 trial config
+GELS/
+├── gels/                         # Simulation engine package (V2.7+)
+│   ├── __init__.py               # Re-exports Params, run, load_run, ...
+│   ├── engine.py                 # Primary engine (was new_dem_0.py)
+│   └── lsdem.py                  # LS-DEM deformable particles
+├── pipeline/                     # Step-by-step local runner (V2.7+)
+│   ├── step1_config.py           # Resolve parameters -> params.json
+│   ├── step2_pack.py             # Packing + cell seeding -> snap_0000
+│   ├── step3_simulate.py         # Advance dynamics to t_total
+│   ├── step4_postprocess.py      # Figures and movies
+│   ├── step5_analysis.py         # Mathematical analysis
+│   ├── _common.py                # Step state, guards, config loading
+│   └── README.md                 # Pipeline guide
+├── viz/                          # Visualization package (V1.x suite)
+│   ├── postprocess.py            # Unified post-processing orchestrator
+│   ├── cells.py                  # Cell morphology & stress maps
+│   ├── stress.py                 # 3D surface stress, isosurfaces
+│   ├── compaction.py             # Void-space & compaction plots
+│   ├── percolation.py            # Transport property analysis
+│   ├── movies.py                 # 3D volumetric animations
+│   ├── phases.py                 # Individual phase volumes
+│   ├── shapes.py                 # Granule shape gallery
+│   ├── doe.py                    # DOE statistical analysis
+│   ├── dimensionless.py          # Dimensionless analysis, data collapse
+│   ├── scaffold_evolution.py     # 2D microstructure evolution timelapse
+│   ├── scaffold_evolution_3d.py  # 3D volumetric evolution, PyVista
+│   └── energy_landscape.py       # Energy landscape visualization
+├── viz2/                         # V2 visualization suite (pipeline default)
+│   ├── postprocess.py            # viz2 orchestrator
+│   ├── scaffold_map.py           # Scaffold maps (2D / 3D)
+│   ├── voronoi_shapes.py         # Voronoi tessellation
+│   ├── phase_fractions.py        # Global and local phase fractions
+│   ├── energy_stress.py          # Energy and stress maps
+│   ├── void_percolation.py       # Void percolation, Kozeny-Carman
+│   └── common.py                 # Shared loading + field reconstruction
+├── analysis/                     # Mathematical analysis package
+│   ├── mean_field_model.py       # Two-zone compaction ODE
+│   ├── spatial_pde.py            # 1D radial PDE compaction model
+│   ├── contact_network.py        # Graph-based contact network model
+│   ├── contact_network_model.py  # Gillespie SSA stochastic network
+│   ├── parameter_sweep.py        # 11-D LHS + 1D PDE sweep
+│   ├── energy_landscape.py       # Free energy landscape decomposition
+│   ├── coarse_grain.py           # Stress tensor, strain rate, viscosity
+│   ├── tissue_descriptors.py     # Tissue architecture descriptors
+│   ├── organ_targets.py          # Organ system target vectors
+│   └── arch_distance.py          # Architectural distance to organs
+├── Trials/                       # Parameter sweep configs (DOE)
+│   ├── generate_doe.py           # DOE config generator
+│   └── default_trial.json        # Default trial config
+├── results/                      # Run directories (gitignored)
+├── old code/                     # Retired scripts and HPC machinery (V2.7)
+│   ├── hpc/                      # SLURM templates, cluster config, sync
+│   └── README.md                 # What was archived and why
 ├── CodeLog/
-│   ├── Architecture/            # Architecture documents
-│   ├── Paper/                   # Publication manuscript (LaTeX)
-│   ├── Readme/README.md         # This file
-│   ├── References/              # Literature references
+│   ├── Architecture/             # Architecture documents
+│   ├── Paper/                    # Publication manuscript (LaTeX)
+│   ├── Readme/README.md          # This file
+│   ├── References/               # Literature references
 │   └── Updates/CHANGELOG.md
-├── hpc/                         # HPC setup, user configs, sync scripts
-└── CLAUDE.md                    # Developer guide + HPC best practices
+└── CLAUDE.md                     # Developer guide
 ```
 
 ---
@@ -230,29 +328,28 @@ The simulation tracks transport-relevant quantities:
 
 ---
 
-## HPC Usage
+## Running Batches
 
-### Run on HPC (e.g., UArizona Puma)
+HPC execution was retired in V2.7 — everything runs locally. To sweep a set of
+trial configs, loop the pipeline over them:
 
 ```bash
-# Set up environment (one time)
-python3 hpc/generate_hpc_scripts.py       # generates scripts, syncs repo, sets up venv
-
-# Run a single simulation
-python3 run_hpc_headless.py --t_total 48 --output-dir results/run1
-
-# Run from a trial config
-python3 run_hpc_headless.py --trial Trials/Trial15_3D.json --output-dir results/3d_test
-
-# Run all trials as SLURM array job (auto-submit + monitor)
-# Set RUN_MODE=3 in run_all_trials.py, then:
-python3 run_all_trials.py
-
-# Sync results from cluster
-python3 hpc/sync_results.py
+for trial in Trials/DOE2_2D_*.json; do
+    name=$(basename "$trial" .json)
+    python pipeline/step1_config.py      --trial "$trial" --name "$name"
+    python pipeline/step2_pack.py        -i "results/$name"
+    python pipeline/step3_simulate.py    -i "results/$name"
+    python pipeline/step4_postprocess.py -i "results/$name"
+    python pipeline/step5_analysis.py    -i "results/$name"
+done
 ```
 
-See `CLAUDE.md` for detailed UArizona HPC best practices.
+Because each step checkpoints into `pipeline_state.json`, re-running the loop
+skips work that already completed and only picks up where it left off.
+
+The previous SLURM machinery (`hpc/`, `run_all_trials.py`,
+`run_hpc_headless.py`) is archived unmodified under `old code/` — see
+`old code/README.md` for what moved and how to recover it from git.
 
 ---
 

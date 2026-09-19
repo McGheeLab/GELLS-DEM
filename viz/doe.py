@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-DOE Analysis & Visualization for GELLS-DEM Fractional Factorial
+DOE Analysis & Visualization for GELS Fractional Factorial
 ================================================================
 Loads all DOE trial results and performs full statistical analysis of
 the 2^(5-1) + augmented func-only design.
@@ -870,7 +870,7 @@ def plot_summary_dashboard(data, outdir):
     # --- Text summary ---
     summary_path = os.path.join(outdir, 'doe_summary.txt')
     with open(summary_path, 'w') as f:
-        f.write("GELLS-DEM DOE Analysis Summary\n")
+        f.write("GELS DOE Analysis Summary\n")
         f.write("=" * 60 + "\n\n")
         f.write(f"Runs loaded: {len(data['runs'])} / 24\n")
         f.write(f"Block 1 (A=±1): {sum(1 for r in data['runs'] if r['block']==1)}\n")
@@ -938,7 +938,7 @@ def run_all(data, outdir='results/doe_analysis', skip=None):
     os.makedirs(outdir, exist_ok=True)
 
     print("\n" + "=" * 65)
-    print("  GELLS-DEM DOE Analysis")
+    print("  GELS DOE Analysis")
     print("=" * 65)
 
     for i, (name, (label, func)) in enumerate(MODULES.items(), 1):
@@ -963,7 +963,7 @@ def run_all(data, outdir='results/doe_analysis', skip=None):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
-        description='GELLS-DEM DOE analysis: load all DOE trial results and '
+        description='GELS DOE analysis: load all DOE trial results and '
                     'produce statistical analysis plots.')
     parser.add_argument('--results-dir', default=None,
                         help='Directory containing DOE_01/...DOE_24/ '

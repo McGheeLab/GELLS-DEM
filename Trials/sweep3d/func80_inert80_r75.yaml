@@ -1,0 +1,195 @@
+# GELS V3.0 showcase condition: func80_inert80_r75
+# F 80 um / I 80 um  (75 % func)
+# 75 % of the solid is 80 um fully coated granules, the rest 80 um bare granules.
+#
+# mode 3D, domain 2000 x 2000 x 2000 um, solid fraction 0.55, ~15,935 granules expected
+# species (f, share of solid, expected count): functional_80um (1.00, 0.75, ~11951); inert_80um (0.00, 0.25, ~3984)
+#
+# Written by pipeline/run_showcase.py; everything not listed there is the V3.0 template
+# default (gels/config.py TEMPLATE_YAML). Run alone with:
+#   python pipeline/step1_config.py --setup Trials/sweep3d/func80_inert80_r75.yaml --name func80_inert80_r75 --seed 42
+domain:
+  mode: 3D
+  size_um:
+  - 2000.0
+  - 2000.0
+  - 2000.0
+boundary:
+  mode: walls
+granules:
+  solid_fraction: 0.55
+  count_rule: mean_volume
+  species:
+  - name: functional_80um
+    functionalization: 1.0
+    volume_fraction: 0.75
+    color: '#CC2222'
+    radius:
+      mean_um: 40.0
+      std_um: 4.0
+      min_um: 20.0
+      distribution: normal
+    aspect_ratio:
+      mean: 1.0
+      std: 0.0
+    aspect_ratio_c:
+      mean: 1.0
+      std: 0.0
+    blockiness:
+      mean: 2.0
+      std: 0.0
+    blockiness_n2:
+      mean: 2.0
+      std: 0.0
+    E_kPa: null
+    poisson_ratio: null
+    count_rule: null
+  - name: inert_80um
+    functionalization: 0.0
+    volume_fraction: 0.25
+    color: '#22AA22'
+    radius:
+      mean_um: 40.0
+      std_um: 4.0
+      min_um: 20.0
+      distribution: normal
+    aspect_ratio:
+      mean: 1.0
+      std: 0.0
+    aspect_ratio_c:
+      mean: 1.0
+      std: 0.0
+    blockiness:
+      mean: 2.0
+      std: 0.0
+    blockiness_n2:
+      mean: 2.0
+      std: 0.0
+    E_kPa: null
+    poisson_ratio: null
+    count_rule: null
+cells:
+  seeding:
+    surface_coverage: 0.8
+    n_cells_per_granule: 8
+    coverage: 0.6
+    law: langmuir
+    K_attach_per_um2: 50.0
+    seeding_exponent: 1.0
+    min_functionalization: 0.05
+    diameter_um: 20.0
+    spread_height_um: 5.0
+    stacking_max: 3.0
+    overcrowd_senescence_time_h: 12.0
+  ligand:
+    sigma_max_per_um2: 750.0
+    K_traction_per_um2: 160.0
+  kinetics:
+    attach_onset_h: 0.0
+    attach_half_h: 0.0
+    spread_duration_h: 2.0
+    fa_maturation_rate_per_h: 0.5
+  motor_clutch:
+    n_motors: 200
+    F_motor_stall_nN: 0.5
+    n_clutches: 75
+    k_clutch_nN_per_um: 5.0
+    k_on_per_s: 1.0
+    k_off_per_s: 0.1
+    F_max_per_cell_nN: 150.0
+    traction_f_law: langmuir
+    traction_f_rule: target
+    traction_exponent: 1.0
+  migration:
+    speed_um_per_h: 30.0
+    directed_speed_mult: 2.0
+  sensing:
+    sense_distance_um: 40.0
+    bridge_decay_length_um: 10.0
+  bridging:
+    attempt_rate_per_h: 0.3
+    formation_time_h: 2.0
+    senescence_time_h: 24.0
+    min_fa: 0.3
+    break_gap_um: 60.0
+    lock_force_nN: 20.0
+    lock_scales_with_ligand: true
+    secondary_rate_mult: 3.0
+    expected_force_nN: 100.0
+    contact_factor: 5.0
+    bare_blocker_factor: 0.1
+    commit_angle_rad: 0.5
+    exclusion_angle_rad: 0.8
+    alignment_rate_per_h: 0.3
+    alignment_min: 0.3
+  activity:
+    T_active_nN_um: 5.0
+contact:
+  E_kPa: 10.0
+  poisson_ratio: 0.45
+  adhesion_energy_J_per_m2:
+    cc: 0.002
+    cb: 0.001
+    bb: 0.0005
+  friction_shear_stress_Pa:
+    cc: 2000.0
+    cb: 500.0
+    bb: 50.0
+  friction_v_ref_um_per_h: 1.0
+  mc_dem:
+    enabled: true
+    kappa_max: 5.0
+  max_overlap_frac: 0.15
+dynamics:
+  drag_scale: 0.05
+  drag_scale_rot: 0.05
+  v_max_um_per_h: 20.0
+  omega_max_rad_per_h: 1.0
+  omega_max_3d_rad_per_h: 1.0
+packing:
+  gap_um: 0.0
+  settle_steps: 400
+  relax_substeps: 15
+  inflate_phi_safe: 0.2
+  shape_enabled: false
+time:
+  dt_h: 0.5
+  t_total_h: 72.0
+  save_every_h: 4.0
+output:
+  dir: results/default
+  save_data: true
+  save_fields: false
+  compress_archive: true
+  Ngrid: 200
+  Ngrid_3d: 256
+  interface_width_um: 3.0
+  metrics_boundary_exclusion: 0.2
+  keep_snaps_in_memory: true
+performance:
+  threads: 8
+  threading_layer: omp
+  use_numba: true
+  neighbor_backend: cells
+  cells_backend: kernels
+  neighbor_skin_um: 20.0
+  max_clips: 16
+  field_dtype: float32
+  field_res_um: 0.0
+  max_grid_2d: 4096
+  max_grid_3d: 256
+  metrics_voronoi_stride: 4
+  async_io: true
+  io_queue_depth: 2
+  io_compresslevel: 1
+  fastmath: true
+  warmup: true
+deformable:
+  enabled: false
+  n_def_modes: 2
+  sdf_resolution: 32
+  n_surface_nodes: 128
+  n_surface_nodes_3d: 512
+  sdf_padding: 1.3
+  def_drag_scale: 0.1
+  def_eps_max: 0.3

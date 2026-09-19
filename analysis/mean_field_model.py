@@ -703,7 +703,7 @@ def from_run(run_dir):
     tuple of (CompactionModel, dict, dict)
         (model, fit_result, data) where data contains the raw time series.
     """
-    from new_dem_0 import load_run
+    from gels.engine import load_run
 
     hist, snaps, p, metadata = load_run(run_dir)
 

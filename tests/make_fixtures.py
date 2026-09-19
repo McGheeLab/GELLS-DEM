@@ -1,0 +1,150 @@
+"""
+Generate V2.7 reference fixtures for the V3.0 refactor.
+=======================================================
+
+Run this ONCE on the pre-refactor (V2.7) code and keep the outputs under
+``tests/fixtures/``. The regression tests re-run the same configurations on
+the current code and require bit-identical results for the Python path
+(Phases 0-4 of the V3.0 plan), so any behaviour change is caught immediately.
+
+Contents written:
+
+    tests/fixtures/manifest.json                 versions, seed, configurations
+    tests/fixtures/params_v27_<trial>.json       params.json as produced by step1_config.py --trial
+    tests/fixtures/<run_name>/                   5-step reference run: params.json, metadata.json,
+                                                 history.json, snapshots/snap_0000..0005.npz, fields/
+
+Usage:
+    python tests/make_fixtures.py             # refuses to overwrite existing fixtures
+    python tests/make_fixtures.py --force     # regenerate (only do this deliberately!)
+"""
+
+import argparse
+import json
+import os
+import platform
+import shutil
+import subprocess
+import sys
+import tempfile
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if REPO not in sys.path:
+    sys.path.insert(0, REPO)
+
+os.environ.setdefault('MPLBACKEND', 'Agg')
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding='utf-8', errors='replace')
+    except (AttributeError, ValueError):
+        pass
+
+FIXTURES = os.path.join(REPO, 'tests', 'fixtures')
+SEED = 7
+
+# Small, fast configurations that still exercise every code path the refactor
+# touches: walls vs periodic, circles vs superellipses, 2D vs 3D, and both
+# cell-seeding rules (n_cells_per_granule fallback vs cell_surface_coverage).
+COMMON = dict(
+    t_total=2.5, dt=0.5, save_every_h=0.5,   # 5 steps, a snapshot every step
+    Ngrid=64, save_data=True, save_fields=True, compress_archive=False,
+)
+REFERENCE_RUNS = {
+    'run2d_walls': dict(mode='2D', Lx=400.0, Ly=400.0, boundary_mode='walls'),
+    'run2d_periodic': dict(mode='2D', Lx=400.0, Ly=400.0, boundary_mode='periodic'),
+    'run2d_shapes': dict(mode='2D', Lx=400.0, Ly=400.0, shape_enabled=True,
+                         aspect_ratio_func_mean=1.3, aspect_ratio_inert_mean=1.2,
+                         blockiness_func_mean=2.5, blockiness_inert_mean=2.2),
+    'run3d_spheres': dict(mode='3D', Lx=250.0, Ly=250.0, Lz=250.0, Ngrid_3d=24,
+                          cell_surface_coverage=1.0),
+}
+PARAMS_TRIALS = ['Trials/DOE2_2D_0001.json', 'Trials/default_trial.json']
+
+
+def reference_params(name):
+    """Params for one reference run (shared with the regression test)."""
+    from gels.engine import Params
+    p = Params(**COMMON, **REFERENCE_RUNS[name])
+    # The fixtures define the pure-Python reference path (bit-identical gate).
+    # The compiled kernels are held to that path by tests/test_forces_vs_reference.py.
+    p.use_numba = False
+    return p
+
+
+def make_run(name, out_dir):
+    """Run one reference configuration into out_dir."""
+    from gels.engine import run
+    p = reference_params(name)
+    p.output_dir = out_dir
+    os.makedirs(out_dir, exist_ok=True)
+    run(p, seed=SEED)
+
+
+def params_fixture_name(trial):
+    return 'params_v27_' + os.path.splitext(os.path.basename(trial))[0] + '.json'
+
+
+def make_params_fixture(trial, out_path):
+    """Capture params.json exactly as step1_config.py produces it for a trial."""
+    tmp = tempfile.mkdtemp(prefix='gels_fixture_')
+    try:
+        subprocess.run(
+            [sys.executable, os.path.join('pipeline', 'step1_config.py'),
+             '--trial', trial, '-o', tmp, '--force'],
+            cwd=REPO, check=True, capture_output=True)
+        shutil.copy(os.path.join(tmp, 'params.json'), out_path)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
+    ap.add_argument('--force', action='store_true',
+                    help='overwrite existing fixtures')
+    args = ap.parse_args()
+
+    if os.path.isdir(FIXTURES) and os.listdir(FIXTURES) and not args.force:
+        print(f"Fixtures already exist in {FIXTURES}; use --force to regenerate.")
+        return 1
+    if args.force and os.path.isdir(FIXTURES):
+        shutil.rmtree(FIXTURES)
+    os.makedirs(FIXTURES, exist_ok=True)
+
+    import numpy
+    try:
+        git_hash = subprocess.check_output(
+            ['git', 'rev-parse', 'HEAD'], cwd=REPO,
+            stderr=subprocess.DEVNULL).decode().strip()
+    except Exception:
+        git_hash = 'unknown'
+
+    for trial in PARAMS_TRIALS:
+        out = os.path.join(FIXTURES, params_fixture_name(trial))
+        print(f"params fixture: {trial} -> {os.path.relpath(out, REPO)}")
+        make_params_fixture(trial, out)
+
+    for name in REFERENCE_RUNS:
+        out_dir = os.path.join(FIXTURES, name)
+        print(f"\nreference run: {name} -> {os.path.relpath(out_dir, REPO)}")
+        make_run(name, out_dir)
+
+    manifest = {
+        'seed': SEED,
+        'common': COMMON,
+        'reference_runs': REFERENCE_RUNS,
+        'params_trials': PARAMS_TRIALS,
+        'generated_with': {
+            'git_hash': git_hash,
+            'python': platform.python_version(),
+            'numpy': numpy.__version__,
+            'platform': platform.platform(),
+        },
+    }
+    with open(os.path.join(FIXTURES, 'manifest.json'), 'w') as f:
+        json.dump(manifest, f, indent=2)
+    print(f"\nWrote {os.path.relpath(FIXTURES, REPO)}")
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

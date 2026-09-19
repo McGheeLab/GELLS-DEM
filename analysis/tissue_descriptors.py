@@ -1,8 +1,8 @@
 """
-Tissue Architecture Descriptors for GELLS-DEM
+Tissue Architecture Descriptors for GELS
 ==============================================
 Computes a comprehensive tissue architecture descriptor vector from 3D
-phase fields -- used to characterise both GELLS scaffolds and compare
+phase fields -- used to characterise both GELS scaffolds and compare
 to native organ architectures.
 
 Descriptor categories:
@@ -16,7 +16,7 @@ Descriptor categories:
     8. Pore size distribution
 
 Data is loaded via:
-    from new_dem_0 import load_run
+    from gels.engine import load_run
     hist, snaps, p, metadata = load_run(run_dir)
     # snaps[i] is a dict with 'phi_f', 'phi_i', 'phi_v' as 3D arrays
 
@@ -1081,7 +1081,7 @@ def from_run(run_dir, snap_index=-1):
     dict
         Descriptor dictionary from compute_descriptor_vector().
     """
-    from new_dem_0 import load_run
+    from gels.engine import load_run
 
     hist, snaps, p, metadata = load_run(run_dir)
     if not snaps:
@@ -1116,7 +1116,7 @@ def descriptor_timeseries(run_dir):
     list of dict
         One descriptor dictionary per snapshot.
     """
-    from new_dem_0 import load_run
+    from gels.engine import load_run
 
     hist, snaps, p, metadata = load_run(run_dir)
     if not snaps:
@@ -1152,7 +1152,7 @@ def run_all(run_dir, outdir=None):
         Output directory for plots and JSON summary. Defaults to
         ``run_dir/tissue_descriptors``.
     """
-    from new_dem_0 import load_run
+    from gels.engine import load_run
 
     hist, snaps, p, metadata = load_run(run_dir)
     if not snaps:
@@ -1464,7 +1464,7 @@ def plot_pore_size_distribution(descriptors, ax=None, outdir=None):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
-        description='Tissue architecture descriptors for GELLS-DEM')
+        description='Tissue architecture descriptors for GELS')
     parser.add_argument('-i', '--input', required=True,
                         help='Input run directory or .tar.gz archive')
     parser.add_argument('-o', '--outdir', default=None,
@@ -1477,7 +1477,7 @@ if __name__ == '__main__':
     outdir = args.outdir
 
     print("=" * 65)
-    print("  GELLS-DEM Tissue Architecture Descriptors")
+    print("  GELS Tissue Architecture Descriptors")
     print("=" * 65)
 
     if outdir is None and args.snap == -1:
@@ -1485,7 +1485,7 @@ if __name__ == '__main__':
         run_all(indir, outdir=outdir)
     else:
         # Single snapshot analysis
-        from new_dem_0 import load_run
+        from gels.engine import load_run
 
         hist, snaps, p, metadata = load_run(indir)
         if not snaps:
