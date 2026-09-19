@@ -283,6 +283,109 @@ along the wall normal.
 Both twins agree exactly (`max |dtau| = 0.0`), because both call the same wall core, and the
 flag provably moves no force (`assert_array_equal` on `F`).
 
+### `contact.semi_implicit` now defaults to true
+
+V3.2 added it and left it off. Measured across the four reference configurations, leaving it
+off means a fifth to a third of granules are pinned at the velocity cap and a tenth to a
+seventh at the overlap projection -- so those runs were reporting the numerical rails, not
+the contact law. Turning it on clears **both**:
+
+| run | `frac_velocity_clipped` | `overlap_clip_fraction` | `max_overlap_ratio` |
+|---|---|---|---|
+| `run2d_walls` | 0.182 -> **0.000** | 0.105 -> **0.000** | 0.018 -> 0.075 |
+| `run2d_periodic` | 0.182 -> **0.000** | 0.143 -> **0.000** | 0.042 -> 0.051 |
+| `run2d_shapes` | 0.000 -> 0.000 | 0.100 -> 0.095 | 0.013 -> 0.041 |
+| `run3d_spheres` | 0.353 -> **0.000** | 0.039 -> **0.000** | 0.143 -> **0.057** |
+
+The rise in `max_overlap_ratio` in 2D is the point, not a cost: granules now reach the
+overlap the contact law actually asks for instead of being throttled short of it. In 3D,
+where the throttling was worst, it *falls* by a factor of 2.5.
+
+**Honest limit.** On a very loose sedimented bed the velocity rail clears 0.250 -> 0.000 but
+an overlap rail appears in its place (0.000 -> 0.024). `semi_implicit` takes the velocity cap
+off stability duty; it does not make an arbitrary configuration well posed. That particular
+bed turned out to have a different problem entirely -- see the next entry.
+
+**Gate B is preserved rather than superseded.** All four fixtures move under the new default
+(positions by 6.7-18.6 um), but unlike the contact solver the old code path still exists, so
+`contact_semi_implicit=False` is **pinned in `make_fixtures.COMMON`**. The V2.7 oracle
+therefore keeps comparing at `atol = 0` on everything else, instead of being retired
+wholesale. Verified: with the pin, `run2d_walls` reproduces the stored V2.7 snapshots to
+**2.0e-12 um** and `run2d_periodic` to **exactly 0.0**. (`run3d_spheres` differs by 18 um,
+which is the platform bifurcation documented in V3.3, not this change.)
+
+A pin would otherwise leave the shipped configuration untested, so `make_fixtures` gains
+**`LOCAL_ONLY_RUNS`** -- `v34_2d_walls`, `v34_3d_spheres`, `v34_2d_shapes` -- built from
+`COMMON_BASE` with no V2.7 pins at all. They have no V2.7 counterpart, so they live only in
+the platform-local baseline and are checked only by `test_local_identity`. Between the two
+sets, both the V2.7 configuration and the shipping configuration are pinned bit-for-bit.
+
+### The packer hands the dynamics an unphysical bed, and nothing checked it
+
+Chasing why a loose sedimented shaped bed reorients ~90 degrees over 72 h with no cells. It
+is **not** an integrator instability -- the run is a legitimate descent from an illegitimate
+initial condition, and no stability fix can help, because the problem is upstream.
+
+Measured on a gravity-consolidated 2D bed (AR 1.8, n 3.5, 16 granules):
+
+| | |
+|---|---|
+| settle's own report | `max_overlap = 0.6 um` |
+| **true maximum penetration (MTD)** | **16.7 um** |
+| median true penetration | 4.66 um |
+| `max abs F` at t = 0 under the dynamics | **8.86e3 nN** |
+| buoyant weight of a granule | 3.29 nN |
+| **ratio** | **2.7e3x** |
+
+So the bed arrives pre-loaded by three orders of magnitude, and the first hours of the run
+are it relaxing that: `bed_height` 414 -> 530 um, `n_contacts` 26 -> 1, `F_mean` decaying
+0.058x as the bed disperses.
+
+**Why the settle does not notice.** It stops on `max_overlap < packing_overlap_tol`, a
+LENGTH tolerance, measured with the directional-radius proxy
+`lambda_i(u) + lambda_j(-u) - d` -- the penetration along the **line of centres**. The true
+penetration is `min over nu of [h_i(nu) + h_j(nu) - r.nu]`, a minimum over **all**
+directions. Evaluating that minimum at `nu = u` bounds it by `h_i(u) + h_j(u) - d`, and
+`lambda <= h` bounds the proxy by the same quantity -- so **neither bounds the other** and
+the proxy errs both ways. Swept over 3000 random orientation pairs (proxy / true):
+
+| shape | p1 | p10 | median | p90 | p99 | min | max |
+|---|---|---|---|---|---|---|---|
+| circles | 1.000 | 1.000 | **1.000** | 1.000 | 1.000 | 1.000 | 1.000 |
+| mild (`run2d_shapes`) | 0.443 | 0.809 | 0.977 | 1.034 | 1.068 | 0.174 | 1.083 |
+| preset `fragmented_granules` | 0.138 | 0.452 | 0.888 | 1.130 | 1.331 | **0.042** | 1.392 |
+| blocky (n = 6) | 0.124 | 0.389 | 0.849 | 1.083 | 1.471 | **0.030** | 1.561 |
+
+Circles are exact -- for a sphere the line of centres IS the minimising direction -- which is
+why this was invisible until shapes were switched on. **The typical case is fine and the tail
+is catastrophic**, and the settle's stopping rule is a *maximum over pairs*, so it is decided
+entirely by the tail. What the proxy cannot do is invent a contact (`proxy > 0` means the
+centre-line surface points have crossed, which really is an overlap); it can only miss one,
+or mis-size it.
+
+`tests/test_shape_packing.py::TestProxyTracksTheTruePenetration` previously asserted this
+proxy was accurate "within 3 %" -- from **one** fixed orientation pair. It now sweeps
+orientations and pins the distribution above, plus the end-to-end consequence on a real
+packed bed. An intermediate version of that test asserted `proxy <= delta`; that was wrong,
+and the derivation above is why.
+
+**What landed: `handoff_force_balance`** (`gels/engine.py`), called at the packer ->
+dynamics handoff in both `run()` and `pipeline/step2_pack.py`, and recorded in
+`metadata['handoff']`. It compares `max abs F` at t = 0 against the largest thing that is
+supposed to drive the run -- the buoyant weight of a granule when gravity is on, the
+per-cell traction when cells are seeded -- and warns above `HANDOFF_WARN_RATIO = 100`. It
+fires on the bed above (2.7e3x) and is silent on all four reference configurations.
+
+This is a diagnostic, not the fix. The fix is to stop the settle on the **true** penetration
+(which V3.4 made cheap) or on a FORCE tolerance in the dynamics' own units -- Phase 4.
+
+**On conservation laws.** Overdamped dynamics is gradient flow, `gamma x_dot = -grad E`, so
+`dE/dt = -gamma |x_dot|^2 <= 0`: total potential energy must fall monotonically, every step,
+and any increase is an integrator or force-model failure. That invariant is worth having and
+is not yet instrumented -- but it would **not** have caught this, because energy was falling
+the whole time. The invariant that catches this one is the scale comparison above, which is
+why that is what was built.
+
 ---
 
 ## [V3.3] - 2026-09-19
