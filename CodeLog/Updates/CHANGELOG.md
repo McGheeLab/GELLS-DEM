@@ -36,6 +36,43 @@ kernels cannot import from `viz2`), verified mask-identical across box/cylinder 
 wall/free x 2D/3D. A dead `hasattr(gs, 'cell_diameter_offset')` branch in
 `division._daughter_angles` was removed -- the attribute is never assigned anywhere.
 
+### Cell capacity was returning geometrically impossible numbers
+
+Exposed by the foothold fix above: with both paths finally agreeing, they agreed on a
+number that cannot happen. `cells_from_surface_coverage` computed `A_surface / A_cell`,
+which tiles a surface at **100 %** -- no packing achieves that. On an R = 40 um granule
+with `cell_capacity_foothold = 0.25` it returned **64 cells**, against a hard ceiling of
+**58** rigid 20 um discs (hexagonal, 0.9069; random close packing gives 53), and against a
+confluent fibroblast monolayer of **20-40** (500-1000 um^2/cell at 1-2e5 cells/cm^2).
+
+Two compounding causes:
+
+1. **No packing-efficiency factor.** Added `engine.PACKING_EFFICIENCY = 0.9069` (the planar
+   hexagonal maximum), applied in all three implementations of the rule --
+   `engine.cells_from_surface_coverage`, the compiled `kernels/cells.py::_capacity`, and
+   `division.capacity_vector`. A geometric constant, not a knob, so it is module-level
+   rather than a Params field. Capacity can no longer exceed what discs can occupy.
+2. **`fibroblast_realistic` sat exactly on the floor.** `A_rounded/A_spread = h/d = 0.25`
+   *exactly* by volume conservation, so `capacity_foothold = 0.25` was the densest value
+   the parameter can express and was identical to anything below it. Raised to **0.5**.
+
+Together these give **~700 um^2/cell at every granule size** -- scale-invariant and
+mid-band for a confluent fibroblast monolayer:
+
+| granule | R = 20 (D 40) | R = 30 | R = 40 (D 80) | R = 60 |
+|---|---|---|---|---|
+| before | 16 | 36 | **64** (impossible) | 144 |
+| after | 7 | 16 | **29** | 65 |
+| um^2/cell | 718 | 707 | 693 | 696 |
+
+The legacy projected-area rule (`cell_coverage`, used when no surface coverage is set) is
+untouched: its 0.6 default already acts as a de-facto efficiency factor. Only
+`run3d_spheres` of the four reference runs uses the surface-coverage rule, and its seeded
+population moved 211 -> 192, exactly the 9.07 % the factor predicts.
+
+Tests pin the ceiling (capacity never exceeds hexagonal packing at any foothold or
+radius), the biological band, and three-way agreement between the implementations.
+
 ### Phase 1 -- periodic neighbour search was silently dropping contacts
 
 `cKDTree(pos, boxsize=L).query_pairs(r)` returns each unordered pair **at most once**, at

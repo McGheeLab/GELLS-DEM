@@ -27,7 +27,8 @@ Cells are never created on a granule that cells cannot grip
 
 import numpy as np
 
-from gels.engine import CellState, capacity_coverage, cell_projected_area, cells_from_surface_coverage
+from gels.engine import (CellState, PACKING_EFFICIENCY, capacity_coverage, cell_projected_area,
+                         cells_from_surface_coverage)
 
 __all__ = ['divide_cells', 'capacity_vector', 'age_cells', 'cycle_metrics']
 
@@ -51,7 +52,7 @@ def capacity_vector(gs, p):
             A_cell = max(cell_projected_area(0.0, p.cell_diameter, p.cell_height_spread),
                          foothold * A_cell)
         area = 4.0 * np.pi * r ** 2 if p.mode in ('3D', '2D-slice') else np.pi * r ** 2
-        cap = np.maximum(1.0, np.round(area * cov / A_cell))
+        cap = np.maximum(1.0, np.round(area * cov * PACKING_EFFICIENCY / A_cell))
     else:
         A_cell = cell_projected_area(0.0, p.cell_diameter, p.cell_height_spread)
         cap = np.floor(np.pi * r ** 2 * p.cell_coverage / A_cell)

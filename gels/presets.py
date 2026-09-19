@@ -188,10 +188,18 @@ PRESETS: Dict[str, List[str]] = {
         'cells.seeding.surface_coverage=0.8',
         # cells ball up to whatever contact area they can grip, and a cell
         # spanning two granules only needs a foothold on each -- so capacity
-        # is set by the rounded cross-section, not by a flat spread cell.
-        # Without this a 40 um granule holds exactly ONE cell and the bed is
-        # confluent at seeding, so nothing ever divides.
-        'cells.seeding.capacity_foothold=0.25',
+        # is set below the flat spread footprint. Without this a 40 um granule
+        # holds exactly ONE cell and the bed is confluent at seeding, so
+        # nothing ever divides.
+        # V3.3: was 0.25, which is EXACTLY the floor (A_rounded/A_spread = h/d
+        # = 0.25 by volume conservation) -- the densest value the parameter can
+        # express, and identical to anything below it. Combined with the
+        # missing packing-efficiency factor it gave 64 cells on an R = 40 um
+        # granule, above the hard ceiling of 58 rigid 20 um discs and well
+        # above a confluent fibroblast monolayer (20-40 at 500-1000 um^2/cell).
+        # 0.5 with PACKING_EFFICIENCY gives 29 at R = 40 and 7 at R = 20, both
+        # inside the confluent band.
+        'cells.seeding.capacity_foothold=0.5',
         # integration: v_max must not be the thing that limits contraction
         'dynamics.v_max_um_per_h=30.0',
     ],

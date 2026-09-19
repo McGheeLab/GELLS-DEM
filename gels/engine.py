@@ -2497,6 +2497,18 @@ def max_cells_on_granule(R, cell_proj_area, coverage):
     return max(1, int(A_granule * coverage / cell_proj_area))
 
 
+# V3.3: areal efficiency of packing discs on a surface. A_surface / A_cell
+# tiles at 100 %, which no packing achieves: the planar maximum is the
+# hexagonal 0.9069 (random close packing of discs is ~0.83). Without this the
+# capacity rule returned geometrically IMPOSSIBLE numbers -- at R = 40 um with
+# cell_capacity_foothold = 0.25 it gave 64 cells where 58 rigid 20 um discs is
+# the hard ceiling. Curvature makes it slightly worse still (a 20 um disc
+# subtends 319 um^2 of an R = 40 sphere, not 314), which this does not model.
+# A geometric constant, not a knob: module-level rather than a Params field,
+# following gels/kernels/packing.py:196-198.
+PACKING_EFFICIENCY = 0.9069
+
+
 def cells_from_surface_coverage(R, cell_d, cell_h, coverage, mode="3D", foothold=1.0):
     """Compute number of cells for a target surface coverage fraction.
 
@@ -2516,6 +2528,9 @@ def cells_from_surface_coverage(R, cell_d, cell_h, coverage, mode="3D", foothold
     the spread footprint, so foothold <= 0.25 gives a rounded-cell reference and
     a 40 um granule holds 4.
 
+    The result is scaled by ``PACKING_EFFICIENCY`` (V3.3), because cells cannot
+    tile a surface at 100 %.
+
     3D/2D-slice: uses sphere surface area 4πR².
     2D:          uses projected disk area πR².
     """
@@ -2527,7 +2542,7 @@ def cells_from_surface_coverage(R, cell_d, cell_h, coverage, mode="3D", foothold
         A_surface = 4.0 * np.pi * R ** 2
     else:
         A_surface = np.pi * R ** 2
-    return max(1, int(round(A_surface * coverage / A_cell_spread)))
+    return max(1, int(round(A_surface * coverage * PACKING_EFFICIENCY / A_cell_spread)))
 
 
 def seeded_cells(n_full, f, p):

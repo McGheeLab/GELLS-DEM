@@ -40,6 +40,7 @@ import numpy as np
 from gels.engine import (CellState, capacity_coverage, quat_rotate, quat_rotate_inv,
                          superellipse_point, superellipsoid_point)
 from gels.kernels import njit, prange
+from gels.engine import PACKING_EFFICIENCY
 from gels.materials import blocker_factor, hill_pair_factor, law_code, rule_code, traction_gain
 
 ATTACHED = int(CellState.ATTACHED)
@@ -140,7 +141,7 @@ def _capacity(R, activity, spread_frac, cell_d, cell_h, cov_surface, cov, is_3d_
             A_surface = 4.0 * np.pi * R ** 2
         else:
             A_surface = np.pi * R ** 2
-        n_full = max(1, int(round(A_surface * cov_surface / A_spread)))
+        n_full = max(1, int(round(A_surface * cov_surface * PACKING_EFFICIENCY / A_spread)))
     else:
         A_cell = _proj_area(spread_frac, cell_d, cell_h)
         n_full = max(1, int(np.pi * R ** 2 * cov / A_cell))

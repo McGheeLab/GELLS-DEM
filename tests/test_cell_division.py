@@ -72,6 +72,53 @@ class TestCapacity(unittest.TestCase):
         self.assertTrue(bool(np.all(cap == expected)), cap)
 
 
+class TestCapacityGeometricLimit(unittest.TestCase):
+    """Capacity must never exceed what discs can actually occupy (V3.3).
+
+    A_surface / A_cell tiles at 100 %, which no packing achieves. Before
+    PACKING_EFFICIENCY was introduced, cell_capacity_foothold = 0.25 (which is
+    EXACTLY the floor, A_rounded/A_spread = h/d) returned 64 cells on an
+    R = 40 um granule where 58 rigid 20 um discs is the hexagonal ceiling.
+    """
+
+    HEX = 0.9069  # planar maximum for equal discs
+
+    def test_never_exceeds_hexagonal_packing(self):
+        from gels.engine import cells_from_surface_coverage, cell_projected_area
+        d, h = 20.0, 5.0
+        A_round = cell_projected_area(0.0, d, h)
+        for R in (10.0, 20.0, 40.0, 60.0, 100.0):
+            for foothold in (1.0, 0.75, 0.5, 0.25, 0.1):
+                n = cells_from_surface_coverage(R, d, h, 1.0, '3D', foothold)
+                ceiling = 4.0 * np.pi * R ** 2 * self.HEX / A_round
+                self.assertLessEqual(
+                    n, np.ceil(ceiling) + 1e-9,
+                    f"R={R} foothold={foothold}: {n} cells exceeds the "
+                    f"hexagonal ceiling of {ceiling:.1f} rounded cells")
+
+    def test_confluent_density_is_biological(self):
+        """fibroblast_realistic's capacity must land in 500-1000 um^2/cell."""
+        from gels.engine import cells_from_surface_coverage
+        for R in (20.0, 30.0, 40.0, 60.0):
+            n = cells_from_surface_coverage(R, 20.0, 5.0, 1.0, '3D', 0.5)
+            per_cell = 4.0 * np.pi * R ** 2 / n
+            self.assertGreater(per_cell, 500.0, f"R={R}: {per_cell:.0f} um^2/cell is denser than confluent")
+            self.assertLess(per_cell, 1000.0, f"R={R}: {per_cell:.0f} um^2/cell is sparser than confluent")
+
+    def test_all_three_capacity_implementations_agree(self):
+        """engine, the compiled kernel and division.capacity_vector share one rule."""
+        from gels.engine import cells_from_surface_coverage
+        from gels.kernels import HAS_NUMBA
+        if not HAS_NUMBA:
+            self.skipTest("numba not installed")
+        from gels.kernels import cells as K
+        for foothold in (1.0, 0.75, 0.5, 0.25):
+            for R, mode, is3d in ((20.0, '3D', True), (40.0, '3D', True), (30.0, '2D', False)):
+                ref = cells_from_surface_coverage(R, 20.0, 5.0, 1.0, mode, foothold)
+                ker = K._capacity(R, 1.0, 1.0, 20.0, 5.0, 1.0, 0.6, is3d, foothold)
+                self.assertEqual(ref, ker, f"foothold={foothold} R={R} {mode}")
+
+
 class TestGrowthLaw(unittest.TestCase):
 
     def test_population_doubles_on_schedule(self):
