@@ -75,7 +75,7 @@ class TestLocalIdentity(_TestLegacyIdentity):
         why = fingerprint_mismatch(FIXTURES_LOCAL)
         if why:
             self.skipTest(why + " - re-bless with `make_fixtures.py --local --force`")
-        for name in mf.REFERENCE_RUNS:
+        for name in list(mf.REFERENCE_RUNS) + list(mf.LOCAL_ONLY_RUNS):
             with self.subTest(run=name):
                 ref_dir = os.path.join(FIXTURES_LOCAL, name)
                 self.assertTrue(os.path.isdir(ref_dir), f"missing baseline run {name}")

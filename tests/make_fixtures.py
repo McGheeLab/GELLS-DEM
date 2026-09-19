@@ -80,6 +80,13 @@ def platform_fingerprint():
 COMMON = dict(
     t_total=2.5, dt=0.5, save_every_h=0.5,   # 5 steps, a snapshot every step
     Ngrid=64, save_data=True, save_fields=True, compress_archive=False,
+    # ── V2.7 defaults that later versions changed, pinned here ──
+    # The fixtures exist to reproduce V2.7, so a deliberate DEFAULT change must
+    # be pinned rather than superseded whenever the old code path still exists.
+    # Pinning keeps the oracle testing everything else at atol = 0; superseding
+    # would retire it wholesale. The shipping defaults are covered instead by
+    # LOCAL_ONLY_RUNS below, so neither configuration goes unguarded.
+    contact_semi_implicit=False,             # V3.4 flipped this to True
 )
 REFERENCE_RUNS = {
     'run2d_walls': dict(mode='2D', Lx=400.0, Ly=400.0, boundary_mode='walls'),
@@ -91,6 +98,23 @@ REFERENCE_RUNS = {
                           cell_surface_coverage=1.0),
 }
 PARAMS_TRIALS = ['Trials/DOE2_2D_0001.json', 'Trials/default_trial.json']
+
+# Runs at the CURRENT shipping defaults, with none of the V2.7 pins in COMMON.
+# They have no V2.7 counterpart, so they exist only in the platform-local
+# baseline and are checked only by `test_local_identity`. They are what stops a
+# pin in COMMON from leaving the shipped configuration untested.
+LOCAL_ONLY_RUNS = {
+    'v34_2d_walls': dict(mode='2D', Lx=400.0, Ly=400.0, boundary_mode='walls'),
+    'v34_3d_spheres': dict(mode='3D', Lx=250.0, Ly=250.0, Lz=250.0, Ngrid_3d=24,
+                           cell_surface_coverage=1.0),
+    'v34_2d_shapes': dict(mode='2D', Lx=400.0, Ly=400.0, shape_enabled=True,
+                          aspect_ratio_func_mean=1.3, aspect_ratio_inert_mean=1.2,
+                          blockiness_func_mean=2.5, blockiness_inert_mean=2.2),
+}
+
+# The parts of COMMON that are configuration rather than a V2.7 pin.
+COMMON_BASE = dict(t_total=2.5, dt=0.5, save_every_h=0.5,
+                   Ngrid=64, save_data=True, save_fields=True, compress_archive=False)
 
 # Reference runs whose V2.7 output a later version DELIBERATELY supersedes.
 # `test_legacy_identity` skips these with the reason printed; the platform-local
@@ -111,9 +135,16 @@ SUPERSEDED_RUNS = {
 
 
 def reference_params(name):
-    """Params for one reference run (shared with the regression test)."""
+    """Params for one reference run (shared with the regression test).
+
+    ``REFERENCE_RUNS`` carry the V2.7 pins in ``COMMON``; ``LOCAL_ONLY_RUNS``
+    deliberately do not, so they exercise the current shipping defaults.
+    """
     from gels.engine import Params
-    p = Params(**COMMON, **REFERENCE_RUNS[name])
+    if name in LOCAL_ONLY_RUNS:
+        p = Params(**COMMON_BASE, **LOCAL_ONLY_RUNS[name])
+    else:
+        p = Params(**COMMON, **REFERENCE_RUNS[name])
     # The fixtures define the pure-Python reference path (bit-identical gate).
     # The compiled kernels are held to that path by tests/test_forces_vs_reference.py.
     p.use_numba = False
@@ -185,7 +216,8 @@ def main():
         print(f"params fixture: {trial} -> {os.path.relpath(out, REPO)}")
         make_params_fixture(trial, out)
 
-    for name in REFERENCE_RUNS:
+    runs = list(REFERENCE_RUNS) + (list(LOCAL_ONLY_RUNS) if args.local else [])
+    for name in runs:
         out_dir = os.path.join(target, name)
         print(f"\nreference run: {name} -> {os.path.relpath(out_dir, REPO)}")
         make_run(name, out_dir)
@@ -194,6 +226,7 @@ def main():
         'seed': SEED,
         'common': COMMON,
         'reference_runs': REFERENCE_RUNS,
+        'local_only_runs': LOCAL_ONLY_RUNS if args.local else {},
         'params_trials': PARAMS_TRIALS,
         'generated_with': {
             'git_hash': git_hash,

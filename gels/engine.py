@@ -224,7 +224,11 @@ class Params:
     friction_mu: float = 0.0        # Coulomb coefficient added to the shear-stress friction (0 = hydrogel law only)
     contact_overlap_model: str = 'fixed'   # fixed (max_overlap_frac as given) | elastic (derived from the contact law, V3.2)
     contact_overlap_safety: float = 1.5    # elastic only: headroom over the equilibrium overlap
-    contact_semi_implicit: bool = False    # V3.2: damp the step by the local contact stiffness
+    contact_semi_implicit: bool = True     # V3.4 (was False in V3.2-3.3): damp the step by the
+                                           # local contact stiffness. Measured across the four
+                                           # reference configs, the fraction of granules pinned
+                                           # at the velocity cap falls 0.18-0.35 -> 0.000, so a
+                                           # run reports the contact law instead of the rail.
     cell_contact_adhesion: float = 0.0     # nN per mature bridging cell added to that contact's shear cap
     packing_shape_contact: bool = False    # V3.2: shape-aware settle (true r_bound + directional overlap + rotation)
     packing_shape_margin: float = 0.0      # inflate every directional radius by (1 + margin); blunt, see the plan

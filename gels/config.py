@@ -1309,7 +1309,7 @@ contact:                           # hydrogel granules
   max_overlap_frac: 0.15           # standing overlap allowed before the projection acts; phi ceiling = (2/(2-f))^3
   overlap_model: fixed             # fixed = use max_overlap_frac as given; elastic = derive it from the contact law
   overlap_safety: 1.5              # elastic only: headroom over the overlap at which a contact carries expected_force_nN
-  semi_implicit: false             # damp each step by the local contact stiffness (stable at any E; same fixed point)
+  semi_implicit: true              # damp each step by the local contact stiffness (stable at any E; same fixed point)
   shape_dynamics: false            # shape-aware overlap projection (REQUIRED with packing.shape_contact, or the bed relaxes apart)
   curvature_R_cap: 2.0             # cap R_eff at this x min(r_i,r_j); 0 = off. REQUIRED for blocky shapes (2.0): a flat
                                    # face has an almost infinite curvature radius and F ~ sqrt(R_eff)

@@ -368,10 +368,15 @@ percolation).
   has a curvature radius of ~1e15 um and `F ~ sqrt(R_eff)`.
 - **Soft granules** (V3.2): `contact.overlap_model: elastic` sizes `max_overlap_frac` from the
   contact law rather than by hand -- the volumetric ceiling it imposes is `(2/(2-f))^3`, so
-  V3.1's 0.03 left only 4.6 % of headroom. `contact.semi_implicit` damps each step by the
-  local contact stiffness (`vel = F/(gamma + dt*sum 2 E_s a)`): unconditionally stable in the
-  diagonal part, same fixed point, and it takes stability duty off the velocity cap (fraction
-  of granules pinned at the cap fell from ~1.0 to ~0.00). **Trust `phi_bed_net`**, not
+  V3.1's 0.03 left only 4.6 % of headroom. `contact.semi_implicit` (**default true since
+  V3.4**; false in V3.2-3.3) damps each step by the local contact stiffness
+  (`vel = F/(gamma + dt*sum 2 E_s a)`): unconditionally stable in the diagonal part, same
+  fixed point, and it takes stability duty off the velocity cap. Across the four reference
+  configs it drives `frac_velocity_clipped` from 0.18-0.35 to **0.000** and
+  `overlap_clip_fraction` from 0.04-0.14 to **0.000** on three of four, so a run reports the
+  contact law rather than the rails. It does not make an arbitrary configuration well posed:
+  a very loose gravity bed still hits the overlap rail and needs `overlap_model: elastic` or
+  a smaller `dt`. **Trust `phi_bed_net`**, not
   `phi_bed`: the latter double-counts overlap, which is 1-4 % once a soft bed compacts through
   interpenetration. `n_overlap_clipped` / `overlap_clip_fraction` / `frac_velocity_clipped`
   say whether a run is reporting the contact law or the numerical rails.
