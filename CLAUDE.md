@@ -332,9 +332,14 @@ percolation).
   resolved — and the hardcoded `R_local = 0.5·r_bound`, which is exactly 2× low for a
   sphere and ranges 0.51–11.2× across blocky orientations. **No stored fixture exercises
   the shaped wall path**, so `tests/test_wall_contact.py` is its only guard.
-  `contact.wall_torque` (default false) applies `r × F` at that contact point; it is new
-  physics, it is zero for spheres by construction, and it can exceed the largest pair
-  torque on a bed pressed against a wall.
+  `contact.wall_torque` (**default true**) applies `r × F` at that contact point. Both twins
+  AND it with `not is_circle` and a sphere's wall contact is on its own centre line, so it is
+  identically zero for spheres — the default is exactly "on for non-spherical granules" and
+  no sphere run can move. Where it applies it is a leading term, not a correction: it can
+  exceed the largest pair torque on a bed pressed against a wall, and over 72 h on a
+  sedimented dish slice it moves granules by up to 37 µm. Note that a bed packed with
+  `packing_consolidation='centre'` (the Params default) sits OFF the walls entirely, so wall
+  contacts only appear once gravity or cell traction presses the bed into a boundary.
 - **Transport metrics** (V1.4+): Kozeny-Carman permeability, Darcy flow, RCP fraction,
   compaction ratio, Darcy number. See `kozeny_carman_permeability()`, `rcp_fraction_superellipsoid()`.
 - **Rotational dynamics**: Overdamped rotation from off-centre contact torques.

@@ -245,19 +245,32 @@ it replaces. It also pins the property that makes a wall exact rather than merel
 The retired samplers survive as `*_cn`, called by nothing, so both measurements above stay
 reproducible from the suite.
 
-### `contact.wall_torque` (new, default false)
+### `contact.wall_torque` (new, ON for non-spherical granules)
 
-The wall force has always been applied at the granule CENTRE, discarding the lever arm.
-Now that the solver returns the contact point, `r x F` costs nothing -- but it is **new
-physics**, not a correction to existing physics, so it is opt-in. A circle or sphere touches
-a wall on its own centre line, so its wall torque is identically zero and both kernels skip
-the branch entirely when `is_circle`; only shapes are affected.
+The wall force has always been applied at the granule CENTRE, discarding the lever arm. Now
+that the solver returns the contact point, `r x F` costs nothing. Discarding it was an
+omission rather than a modelling choice -- a shaped granule that cannot tip flat against a
+wall is simply wrong -- so it is **on by default**.
 
-It is not a small term. On a shaped bed pressed against a wall the wall torque reaches
-**1.25e5 nN um against a largest pair torque of 5.97e4** -- twice the leading granule-granule
-contribution (that configuration is deliberately pressed hard, so read it as an order of
-magnitude, not a typical value). Turning it on can therefore change a walled run materially,
-which is exactly why it defaults off.
+Both twins AND the flag with `not is_circle`, and a sphere or circle touches a wall on its
+own centre line, so `r x F` is identically zero for it. The default is therefore exactly
+"on for non-spherical granules", and **no sphere run can move**: Gate B's `run2d_walls` and
+`run3d_spheres` are unchanged at `atol = 0` across the flip, and
+`test_a_sphere_bed_is_bit_identical_with_the_flag_on` asserts it directly on a sphere bed
+pressed into a wall.
+
+It is not a small term where it applies. On a shaped bed pressed against a wall it reaches
+**1.25e5 nN um against a largest pair torque of 5.97e4** -- twice the leading
+granule-granule contribution (that configuration is deliberately pressed hard, so read it as
+an order of magnitude, not a typical value). On a sedimented 2D dish slice run for 72 h it
+moves granules by up to **37.6 um** and reorients them by up to **176 deg** relative to the
+same run with it off.
+
+A caveat that applies to both wall changes, and is a finding in its own right: a bed packed
+with `packing_consolidation = 'centre'` -- the Params default -- **sits off the walls
+entirely**, and even `'none'` leaves an RSA margin. Wall contacts appear once gravity or
+cell traction presses the bed into a boundary. Configurations that never touch a wall are
+unaffected by any of this.
 
 The implementation is the conservative torque, and the test says so rather than assuming it:
 `pen = h(w; theta) - sign*(c - wall)` and the repulsive magnitude is `E'(pen) = Fw`, so the

@@ -417,11 +417,14 @@ class TestAgainstTheRetiredSamplers(SeededCase):
 # ── wall torque (contact.wall_torque) ────────────────────────────────
 
 class TestWallTorque(SeededCase):
-    """`contact.wall_torque` (V3.4, default off).
+    """`contact.wall_torque` (V3.4, default ON for non-spherical granules).
 
-    The lever arm is free once the wall solver returns its contact point, but
-    this is NEW physics -- a blocky granule can tip flat against a wall -- so it
-    is opt-in rather than a correction to what was there.
+    The lever arm is free once the wall solver returns its contact point.
+    Discarding it was an omission, not a modelling choice: a shaped granule that
+    cannot tip flat against a wall is wrong. Both twins AND the flag with
+    ``not is_circle``, and a sphere's wall contact is on its own centre line, so
+    its wall torque is identically zero -- which is why turning this on by
+    default cannot move a sphere run.
     """
 
     @staticmethod
@@ -549,6 +552,36 @@ class TestWallTorque(SeededCase):
         np.testing.assert_array_equal(F0, F1, "the flag must not move any force")
         self.assertGreater(int(np.count_nonzero(np.asarray(t0) != np.asarray(t1))), 0,
                            "the flag did nothing on a bed that touches walls")
+
+    def test_a_sphere_bed_is_bit_identical_with_the_flag_on(self):
+        """The safety property the ON-by-default rests on.
+
+        Both twins AND the flag with ``not is_circle``, and a sphere's wall
+        contact is on its own centre line, so `r x F` is identically zero. The
+        default is therefore exactly "on for non-spherical granules" and no
+        sphere run can move. Gate B is the end-to-end form of this claim --
+        `run2d_walls` and `run3d_spheres` are unchanged at atol = 0 across the
+        default flip -- and this is the direct one.
+        """
+        import contextlib
+        import copy
+        import io as _io
+        from gels.engine import Params, generate_packing_3d
+        from gels.kernels.contact3d import compute_forces_3d
+        base = dict(mode='3D', Lx=250.0, Ly=250.0, Lz=250.0, phi_solid_target=0.5,
+                    cell_surface_coverage=1.0, packing_settle_steps=40, save_data=False)
+        off = Params(**base, contact_wall_torque=False)
+        with contextlib.redirect_stdout(_io.StringIO()):
+            gs = generate_packing_3d(copy.deepcopy(off), seed=4)
+        self.assertTrue(gs.is_circle, "this fixture must be spheres")
+        on = Params(**base, contact_wall_torque=True)
+        # press the bed into the x = 0 wall so the wall branch is live
+        gs.pos[:, 0] -= gs.x.min() - 0.5 * float(gs.r.min())
+        gs.x[:] = gs.pos[:, 0]
+        F0, t0, _ = compute_forces_3d(gs, off, np.random.default_rng(0))
+        F1, t1, _ = compute_forces_3d(gs, on, np.random.default_rng(0))
+        np.testing.assert_array_equal(F0, F1)
+        np.testing.assert_array_equal(np.asarray(t0), np.asarray(t1))
 
     def test_both_twins_agree_with_the_flag_on(self):
         from gels.engine import Params

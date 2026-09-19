@@ -1314,9 +1314,9 @@ contact:                           # hydrogel granules
   curvature_R_cap: 2.0             # cap R_eff at this x min(r_i,r_j); 0 = off. REQUIRED for blocky shapes (2.0): a flat
                                    # face has an almost infinite curvature radius and F ~ sqrt(R_eff)
   stiffness_cap_kPa: 0.0           # 0 = none; caps the CONTACT modulus only (cells see the true E); PMMA preset 100
-  wall_torque: false               # apply r x F at the wall contact point (V3.4). Free -- the support function
-                                   #   returns the point -- but it is NEW physics: a blocky granule can tip flat
-                                   #   against a wall. Off by default.
+  wall_torque: true                # apply r x F at the wall contact point (V3.4). Free -- the support function
+                                   #   returns the point. Identically zero for spheres (their wall contact is on
+                                   #   the centre line), so this is "on for non-spherical granules".
   friction_mu: 0.0                 # Coulomb coefficient added to the shear-stress friction (0 = hydrogel law only)
 
 dynamics:
