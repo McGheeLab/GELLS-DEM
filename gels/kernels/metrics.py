@@ -23,6 +23,7 @@ from gels.engine import (
 )
 from gels.kernels import njit
 from gels.kernels.geometry2d import se2d_contact_k
+from gels.kernels.percolation import graph_percolation_metrics
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -58,8 +59,14 @@ def lens_volume_k(R1, R2, d):
 
 @njit(cache=True)
 def contact_stats_k(pos, r, r_bound, a, b, n_shape, theta, gtype, sid, f_sp, K,
-                    pair_i, pair_j, is_3d, is_circle, periodic, Lx, Ly, Lz):
-    """Contact counts, species pair matrix, overlap statistics — in pair order."""
+                    pair_i, pair_j, is_3d, is_circle, periodic, Lx, Ly, Lz,
+                    out_is_contact):
+    """Contact counts, species pair matrix, overlap statistics — in pair order.
+
+    ``out_is_contact`` (V3.3) receives the per-pair contact flag, so the graph
+    percolation in ``gels.kernels.percolation`` uses the engine's OWN contact
+    predicate rather than a second definition of "touching".
+    """
     n_contacts = 0
     n_ff = 0
     n_if = 0
@@ -95,6 +102,7 @@ def contact_stats_k(pos, r, r_bound, a, b, n_shape, theta, gtype, sid, f_sp, K,
             overlap = delta if ok else 0.0
 
         if overlap > 0:
+            out_is_contact[k] = 1
             n_contacts += 1
             ti = gtype[i]
             tj = gtype[j]
@@ -321,10 +329,13 @@ def compute_metrics(gs, p, phi_f, phi_i, phi_v, t, forces, phi_s=None):
     f_sp_c = np.ascontiguousarray(f_sp, dtype=np.float64)
     gtype_c = np.ascontiguousarray(gs.gtype, dtype=np.int64)
     Lz = float(getattr(p, 'Lz', 0.0))
+    is_contact = np.zeros(pair_i.shape[0], dtype=np.uint8)
     (n_contacts, n_contacts_ff, n_contacts_if, n_contacts_ii, sp_pair, f_prod_sum,
      max_overlap_ratio, total_overlap_area) = contact_stats_k(
         pos_c, gs.r, gs.r_bound, gs.a, gs.b, gs.n_shape, gs.theta, gtype_c, sid_c, f_sp_c, int(K_sp),
-        pair_i, pair_j, bool(gs.is_3d), bool(gs.is_circle), periodic, float(p.Lx), float(p.Ly), Lz)
+        pair_i, pair_j, bool(gs.is_3d), bool(gs.is_circle), periodic, float(p.Lx), float(p.Ly), Lz,
+        is_contact)
+    m.update(graph_percolation_metrics(gs, p, pos, pair_i, pair_j, is_contact, periodic))
 
     cutoff_bridge = 2 * max_rb + p.cell_sense_distance
     pair_bi, pair_bj = _pairs(tree, cutoff_bridge)

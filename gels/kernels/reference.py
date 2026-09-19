@@ -27,6 +27,7 @@ from scipy.ndimage import label
 
 from gels.engine import *  # noqa: F401,F403  (public helpers, leaf njit functions, Params, GranuleSystem, CellState, ...)
 from gels.materials import traction_gain, blocker_factor, law_code, rule_code  # noqa: E402
+from gels.kernels.percolation import graph_percolation_metrics  # noqa: E402
 from gels.engine import (  # noqa: E402  private helpers used by the moved loops
     _angular_distance_to_target_2d,
     _angular_distance_to_target_3d,
@@ -2754,6 +2755,9 @@ def compute_metrics(gs, p, phi_f, phi_i, phi_v, t, forces, phi_s=None):
     K_sp, sid_sp, adh_sp, f_sp = species_view(gs)
     sp_pair = np.zeros((K_sp, K_sp), dtype=np.int64)
     f_prod_sum = 0.0
+    # V3.3: per-pair contact flag for the graph percolation, recorded from this
+    # loop so the twin uses the engine's own predicate, not a second one.
+    is_contact_ref = np.zeros(len(pairs), dtype=np.uint8)
 
     for idx in range(len(pairs)):
         i, j = pairs[idx]
@@ -2779,6 +2783,7 @@ def compute_metrics(gs, p, phi_f, phi_i, phi_v, t, forces, phi_s=None):
                 overlap = result[1] if result is not None else 0.0
 
         if overlap > 0:
+            is_contact_ref[idx] = 1
             n_contacts += 1
             ti, tj = gs.gtype[i], gs.gtype[j]
             if ti == 0 and tj == 0:
@@ -2809,6 +2814,9 @@ def compute_metrics(gs, p, phi_f, phi_i, phi_v, t, forces, phi_s=None):
                     # Approximate overlap area for superellipses
                     R_eff = gs.r[i] * gs.r[j] / (gs.r[i] + gs.r[j])
                     total_overlap_area += np.pi * R_eff * overlap
+
+    m.update(graph_percolation_metrics(gs, p, pos, pairs[:, 0], pairs[:, 1],
+                                       is_contact_ref, periodic))
 
     # Bridge count (functional-functional pairs with attached cells in sensing range)
     cutoff_bridge = 2 * max_rb + p.cell_sense_distance

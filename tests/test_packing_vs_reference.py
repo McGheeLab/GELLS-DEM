@@ -164,9 +164,11 @@ class TestCellListSettle(unittest.TestCase):
         def stats(gs):
             pos = np.ascontiguousarray(gs.pos[:, :2])
             pi, pj = half_pairs_tree(pos, 2 * float(gs.r_bound.max()), False, (p.Lx, p.Ly))
+            # V3.3: out_is_contact is an output array, unused here
             out = contact_stats_k(pos, gs.r, gs.r_bound, gs.a, gs.b, gs.n_shape, gs.theta,
                                   gs.gtype.astype(np.int64), gs.species_id, gs.species_f, gs.K,
-                                  pi, pj, False, True, False, p.Lx, p.Ly, p.Lz)
+                                  pi, pj, False, True, False, p.Lx, p.Ly, p.Lz,
+                                  np.zeros(pi.shape[0], dtype=np.uint8))
             return out[0], out[6]     # n_contacts, max overlap ratio
         nc1, ov1 = stats(gs1)
         nct, ovt = stats(gs_tree)
