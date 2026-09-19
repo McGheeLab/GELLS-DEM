@@ -54,6 +54,11 @@ FIXTURES_LOCAL = mf.FIXTURES_LOCAL
 class TestLocalIdentity(_TestLegacyIdentity):
     """Same comparisons as the V2.7 gate, against the platform-local baseline."""
 
+    # The local baseline is blessed from the CURRENT tree, so no run is
+    # superseded relative to it -- including the ones V3.4 superseded in V2.7.
+    # This is what stops `SUPERSEDED_RUNS` from becoming a hole in the gate.
+    superseded = {}
+
     @classmethod
     def setUpClass(cls):
         if not os.path.isfile(os.path.join(FIXTURES_LOCAL, 'manifest.json')):

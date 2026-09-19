@@ -106,6 +106,12 @@ def _snapshot_files(run_dir, sub='snapshots', prefix='snap_'):
 
 class TestLegacyIdentity(unittest.TestCase):
 
+    # Runs a later version deliberately supersedes; see mf.SUPERSEDED_RUNS.
+    # test_local_identity overrides this to {} -- the local baseline is blessed
+    # from the CURRENT tree, so nothing is superseded relative to it.
+    superseded = mf.SUPERSEDED_RUNS
+
+
     @classmethod
     def setUpClass(cls):
         if not os.path.isfile(os.path.join(FIXTURES, 'manifest.json')):
@@ -168,6 +174,8 @@ class TestLegacyIdentity(unittest.TestCase):
             self.skipTest(why + " - see tests/test_local_identity.py")
         for name in mf.REFERENCE_RUNS:
             with self.subTest(run=name):
+                if name in self.superseded:
+                    self.skipTest(self.superseded[name])
                 ref_dir = os.path.join(FIXTURES, name)
                 self.assertTrue(os.path.isdir(ref_dir), f"missing fixture {name}")
                 cur_dir = os.path.join(self.tmp, name)

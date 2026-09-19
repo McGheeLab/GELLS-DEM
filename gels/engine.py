@@ -229,7 +229,11 @@ class Params:
     packing_shape_contact: bool = False    # V3.2: shape-aware settle (true r_bound + directional overlap + rotation)
     packing_shape_margin: float = 0.0      # inflate every directional radius by (1 + margin); blunt, see the plan
     contact_shape_dynamics: bool = False   # V3.2: shape-aware overlap projection, wall clamp and bed surface
-    curvature_R_cap: float = 0.0           # V3.2: cap R_eff at cap*min(r_i,r_j) (0 = off); flat faces blow up
+    curvature_R_cap: float = 2.0           # V3.4: cap R_eff at cap*min(r_i,r_j) (0 = off). Was 0.0
+                                           # in V3.2-3.3. Cannot bind for spheres --
+                                           # R_eff = r_i r_j/(r_i+r_j) <= min(r_i,r_j) < 2 min --
+                                           # so this only affects shapes, where it is REQUIRED:
+                                           # the true curvature radius at a flat face is ~1e15 um.
     cell_capacity_foothold: float = 1.0    # V3.2: fraction of the spread footprint a cell needs to HOLD a place
 
     # ── LS-DEM deformable granules (V2.3, Henzel & Karapiperis 2026) ──
@@ -2227,11 +2231,25 @@ def se2d_mtd_core(xi, yi, ai, bi, ni, thetai, xj, yj, aj, bj, nj, thetaj):
     return True, delta, nx, ny, cx, cy, R_loc_i, R_loc_j, res
 
 
-def mtd_contact_2d(xi, yi, ai, bi, ni, thetai, xj, yj, aj, bj, nj, thetaj):
-    """Optional-returning wrapper of :func:`se2d_mtd_core` (reference path).
+# THE SHAPED CONTACT SOLVER. These two names are what the engine, the oracle in
+# `kernels/reference.py` and `viz/stress.py` all call, so pointing them at the
+# MTD core switches every path at once -- there is no `contact.solver` flag, no
+# per-call-site branch, and therefore no way for one path to be running
+# different physics from another. The common-normal bodies are retained under
+# `*_cn` names as evidence for the defect tests and are called by nothing.
+#
+# Returning Optional from Python (rather than a status tuple from @njit) is
+# free here: every caller of these two is pure Python. Compiled callers use
+# `kernels/geometry2d.se2d_contact_k` / `geometry3d.se3d_contact_k`, which wrap
+# the same core.
 
-    Same contract as ``find_contact_superellipses``: ``None`` when apart,
-    ``(True, delta, nx, ny, cx, cy, R_loc_i, R_loc_j)`` when in contact.
+def find_contact_superellipses(xi, yi, ai, bi, ni, thetai, xj, yj, aj, bj, nj, thetaj):
+    """Contact of two superellipses by support-function MTD (V3.4).
+
+    ``None`` when apart, else ``(True, delta, nx, ny, cx, cy, R_loc_i, R_loc_j)``
+    -- the same contract the common-normal solver had, with `delta` now a true
+    minimum translation distance, `n` a true contact normal pointing from i to
+    j, and the local radii exact rather than a 0.01-radian finite difference.
     """
     out = se2d_mtd_core(xi, yi, ai, bi, ni, thetai, xj, yj, aj, bj, nj, thetaj)
     if not out[0]:
@@ -2239,17 +2257,22 @@ def mtd_contact_2d(xi, yi, ai, bi, ni, thetai, xj, yj, aj, bj, nj, thetaj):
     return out[:8]
 
 
-def mtd_contact_3d(xi, yi, zi, ai, bi, ci, n1i, n2i, qi,
-                   xj, yj, zj, aj, bj, cj, n1j, n2j, qj):
-    """Optional-returning wrapper of :func:`se3d_mtd_core` (reference path).
+def find_contact_superellipsoids_3d(xi, yi, zi, ai, bi, ci, n1i, n2i, qi,
+                                    xj, yj, zj, aj, bj, cj, n1j, n2j, qj):
+    """Contact of two superellipsoids by support-function MTD (V3.4).
 
-    Same contract as ``find_contact_superellipsoids_3d``.
+    ``None`` when apart, else ``(True, delta, nx, ny, nz, cx, cy, cz, R_eff)``.
     """
     out = se3d_mtd_core(xi, yi, zi, ai, bi, ci, n1i, n2i, qi,
                         xj, yj, zj, aj, bj, cj, n1j, n2j, qj)
     if not out[0]:
         return None
     return out[:9]
+
+
+# Back-compat aliases for anything that imported the V3.4-Phase-3.2 names.
+mtd_contact_2d = find_contact_superellipses
+mtd_contact_3d = find_contact_superellipsoids_3d
 
 
 
@@ -2838,9 +2861,25 @@ def _find_closest_param(bx_target, by_target, a, b, n, t_guess=None):
 # ── Contact detection: superellipse–superellipse (common normal) ──
 
 @njit(cache=True)
-def find_contact_superellipses(xi, yi, ai, bi, ni, thetai,
-                                xj, yj, aj, bj, nj, thetaj):
+def find_contact_superellipses_cn(xi, yi, ai, bi, ni, thetai,
+                                   xj, yj, aj, bj, nj, thetaj):
     """
+    RETIRED (V3.4). The common-normal solver, kept verbatim as EVIDENCE only.
+
+    Nothing in the engine calls this. It is retained so the two defects recorded
+    in the V3.4 changelog stay checkable from the suite
+    (``tests/test_mtd_contact.py::TestAgainstTheCommonNormalSolver``):
+
+      * `delta` is `dp_mag`, the distance between two common-normal SURFACE
+        POINTS, not a penetration depth -- over-reported by median 9.8x, p90 43x;
+      * the reported normal is `(p_j - p_i)/|.|`, which points from j back toward
+        i once those points cross, i.e. for **29 % of 2D and 50 % of 3D** shaped
+        contacts at preset blockiness. Since the force law applies `-F_normal * n`
+        to body i, a flipped normal turns repulsion into attraction.
+
+    `find_contact_superellipses` now dispatches to the support-function MTD
+    solver. Delete this once the V2.7 `run2d_shapes` fixture is retired.
+
     Common normal contact detection between two superellipses.
 
     Returns: (in_contact, delta, nx, ny, cx, cy, R_loc_i, R_loc_j)
@@ -3808,10 +3847,14 @@ def find_contact_spheres_3d(xi, yi, zi, ri, xj, yj, zj, rj):
 
 
 @njit(cache=True)
-def find_contact_superellipsoids_3d(
+def find_contact_superellipsoids_3d_cn(
         xi, yi, zi, ai, bi, ci, n1i, n2i, qi,
         xj, yj, zj, aj, bj, cj, n1j, n2j, qj):
     """
+    RETIRED (V3.4) -- see :func:`find_contact_superellipses_cn`. Evidence only;
+    nothing in the engine calls this. ``find_contact_superellipsoids_3d`` now
+    dispatches to the support-function MTD solver.
+
     Common normal contact detection between two 3D superellipsoids.
     Returns (in_contact, delta, nx, ny, nz, cx, cy, cz, R_eff) or None.
     """
@@ -5680,8 +5723,7 @@ def _warmup_jit(is_3d=False):
     superellipse_point(0.5, a, b, n)
     superellipse_normal_vec(0.5, a, b, n)
     superellipse_curvature_radius(0.5, a, b, n)
-    find_contact_superellipses(0.0, 0.0, a, b, n, 0.0,
-                                100.0, 0.0, a, b, n, 0.0)
+    se2d_mtd_core(0.0, 0.0, a, b, n, 0.0, 100.0, 0.0, a, b, n, 0.0)
     find_contact_superellipse_wall(50.0, 50.0, a, b, n, 0.1, 0.0, 0, 1)
     hertz_contact_force(5000.0, 20.0, 1.0)
     se2d_support(0.6, 0.8, a, b, n)          # V3.4 support leaves
@@ -5692,9 +5734,8 @@ def _warmup_jit(is_3d=False):
         superellipsoid_normal(0.3, 0.5, a, b, a, n, n)
         quat_rotate(q, np.array([1.0, 0.0, 0.0]))
         find_contact_spheres_3d(0.0, 0.0, 0.0, a, 100.0, 0.0, 0.0, a)
-        find_contact_superellipsoids_3d(
-            0.0, 0.0, 0.0, a, b, a, n, n, q,
-            100.0, 0.0, 0.0, a, b, a, n, n, q)
+        se3d_mtd_core(0.0, 0.0, 0.0, a, b, a, n, n, q,
+                      100.0, 0.0, 0.0, a, b, a, n, n, q)
         se3d_support(0.6, 0.0, 0.8, a, b, a, n, n)   # V3.4 support leaves
         support_R_eff_3d(0.6, 0.0, 0.8, a, b, a, n, n)
 

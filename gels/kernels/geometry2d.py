@@ -2,12 +2,16 @@
 Status-tuple 2D superellipse contact solvers for compiled callers (V3.0).
 =======================================================================
 
-Faithful copies of ``gels.engine.find_contact_superellipses`` and
-``find_contact_superellipse_wall`` that return ``(hit, ...)`` tuples instead
-of ``None``: numba cannot call an Optional-returning ``@njit`` function from
-another compiled function. The arithmetic is identical statement for
-statement (and both go through numba), so the kernels reproduce the
-reference contact geometry bit for bit.
+Compiled callers cannot use the Optional-returning wrappers in ``gels.engine``
+(numba cannot call an Optional-returning ``@njit`` function from another
+compiled function), so the contact solvers appear here returning
+``(hit, ...)`` tuples instead.
+
+V3.4: ``se2d_contact_k`` is now the support-function MTD solver, wrapping the
+single core ``gels.engine.se2d_mtd_core`` that the Python path also calls --
+so the two paths cannot run different physics. ``se2d_contact_cn_k`` is the
+retired common-normal copy, kept verbatim as evidence for the defect tests and
+called by nothing; see ``gels.engine.find_contact_superellipses_cn``.
 """
 
 import numpy as np
@@ -20,8 +24,11 @@ from gels.kernels import njit
 
 
 @njit(cache=True)
-def se2d_contact_k(xi, yi, ai, bi, ni, thetai, xj, yj, aj, bj, nj, thetaj):
-    """Common-normal contact of two superellipses.
+def se2d_contact_cn_k(xi, yi, ai, bi, ni, thetai, xj, yj, aj, bj, nj, thetaj):
+    """RETIRED (V3.4): the common-normal contact of two superellipses.
+
+    Evidence only -- nothing calls this. See
+    ``gels.engine.find_contact_superellipses_cn``.
 
     Returns (hit, delta, nx, ny, cx, cy, R_loc_i, R_loc_j); all zeros with
     hit=False when the bodies do not overlap.
@@ -111,11 +118,16 @@ def se2d_contact_k(xi, yi, ai, bi, ni, thetai, xj, yj, aj, bj, nj, thetaj):
 
 
 @njit(cache=True)
-def se2d_mtd_k(xi, yi, ai, bi, ni, thetai, xj, yj, aj, bj, nj, thetaj):
-    """Support-function MTD contact, in ``se2d_contact_k``'s tuple (V3.4).
+def se2d_contact_k(xi, yi, ai, bi, ni, thetai, xj, yj, aj, bj, nj, thetaj):
+    """Contact of two superellipses by support-function MTD (V3.4).
 
-    A thin wrapper over the single solver in ``gels.engine``, not a second copy
-    -- see :func:`gels.kernels.geometry3d.se3d_mtd_k`.
+    Returns ``(hit, delta, nx, ny, cx, cy, R_loc_i, R_loc_j)``; all zeros with
+    ``hit=False`` when the bodies do not overlap.
+
+    A thin wrapper over the one solver in ``gels.engine``, not a second copy --
+    all it does is drop the convergence residual, which only the tests consume.
+    Both twins going through the same core is what stops them drifting the way
+    ``_capacity`` did in V3.3.
     """
     hit, delta, nx, ny, cx, cy, R_loc_i, R_loc_j, _res = se2d_mtd_core(
         xi, yi, ai, bi, ni, thetai, xj, yj, aj, bj, nj, thetaj)
@@ -155,4 +167,4 @@ def se2d_wall_k(xi, yi, ai, bi, ni, thetai, wall_pos, wall_axis, wall_sign):
     return True, pen, R_local
 
 
-__all__ = ['se2d_contact_k', 'se2d_wall_k']
+__all__ = ['se2d_contact_k', 'se2d_contact_cn_k', 'se2d_wall_k']

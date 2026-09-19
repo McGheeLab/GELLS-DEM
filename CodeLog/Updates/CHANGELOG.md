@@ -138,6 +138,76 @@ vanish, the `num < 1e-30` guard fires and the function returns `max(a,b) * 10` -
 a circle of radius 40. An axis-aligned pair converges to exactly `t = 0`, so this is not a
 measure-zero curiosity. `support_R_eff_2d` has no such branch and returns 40.0 everywhere.
 
+### Phase 3.3 -- MTD becomes the shaped solver, and there is no flag
+
+The plan carried a `contact.solver = 'mtd' | 'common_normal'` field with both paths kept
+first class. **That was dropped**: the measurements above leave nothing to choose between,
+so `find_contact_superellipses` / `find_contact_superellipsoids_3d` (Python) and
+`se2d_contact_k` / `se3d_contact_k` (compiled) simply *are* the MTD solver now. The
+common-normal bodies live on under `*_cn` names, called by nothing, purely so the defect
+measurements stay checkable from the suite.
+
+Doing it by renaming rather than by branching means **no call site changed at all** -- not
+the six live ones, not `kernels/reference.py` (which stays verbatim and gets the new solver
+for free), not `viz/stress.py`. There is consequently no way for one path to be running
+different contact physics from another, which a flag would have made possible.
+
+**Exactly one stored fixture moved, and it is the shaped one.** `run2d_walls`,
+`run2d_periodic` and `run3d_spheres` stay bit-identical at `atol = 0`; `run2d_shapes`
+changes because it must. Counting contacts directly on its own stored snapshots, 11
+granules over all 55 pairs:
+
+| | t = 0 | t = 2.5 | mean delta |
+|---|---|---|---|
+| common-normal | **0** | **0** | -- |
+| MTD | 1 | 3 | 0.19-1.17 um |
+
+The V2.7 behaviour for this configuration was that shaped granules pass through each other:
+the contacts are 0.19-1.17 um deep, which is exactly the shallow regime the 12 % detection
+rate destroys. With them present, `disp_func` falls 6.30 -> 4.41 um over 2.5 h -- the
+granules move less because the contacts now resist -- and the final orientations differ by
+up to 0.96 rad, because the torque lever arm was previously meaningless.
+
+`tests/make_fixtures.py` gains `SUPERSEDED_RUNS`, a dict of run name -> reason.
+`test_legacy_identity` skips those runs and prints the reason; `test_local_identity`
+overrides it to `{}`, so the superseded run is still pinned bit-for-bit against a baseline
+blessed from the current tree. A superseded fixture is therefore unpinned from V2.7, never
+unguarded. Adding an entry is a statement that the old numbers were wrong and needs the
+measurement to back it up.
+
+**`contact.curvature_R_cap` now defaults to 2.0** (was 0.0). Under the support function
+`R_eff` is the body's TRUE curvature radius, which at a flat face really is ~1e15 um, where
+the common-normal path returned a 0.01-radian finite difference of a parametric sample --
+noise that happened to stay bounded. Being right about the geometry makes the cap
+load-bearing rather than advisory. It **cannot bind for spheres**
+(`R_eff = r_i r_j/(r_i+r_j) <= min(r_i,r_j) < 2 min(r_i,r_j)`), so no sphere run moves, and
+`run3d_spheres` is bit-identical across the change. The `validate()` rule widened from
+`packing.shape_contact` to any blocky packing; it was raised to an error first and then made
+unreachable by the default, because erroring on legacy trial JSONs the user cannot edit is
+not a fix.
+
+### The KNOWN BLOCKER, re-measured as a controlled A/B
+
+The V3.2 entry recorded that a shaped bed drifts 12.3 % over 72 h with no cells. Rather than
+try to reproduce a number from a setup that is no longer the default, the retired solver was
+run against the new one on the **same seed, the same packing and the same everything else**,
+with only `find_contact_superellipses` swapped -- which is possible precisely because the
+common-normal body was kept. AR 1.8 / n 3.5, 72 h, no cells, measured as the radius of
+gyration of the granule centres:
+
+| solver | R_g after 72 h | drift | contacts |
+|---|---|---|---|
+| common-normal (retired) | 148.15 um | **-3.01 %** | 12 |
+| MTD (V3.4) | 152.74 um | **-0.00 %** | 19 |
+
+(from `R_g = 152.745 um` at t = 0.) The drift is inward here rather than outward because
+`packing_consolidation = 'centre'` is the Params default and its centripetal pull has nothing
+to push back against when contacts are missing; the direction depends on the setup, the
+presence of the drift does not. With the contacts actually detected, the bed holds to 0.00 %.
+
+The guidance at the end of the V3.2 blocker -- *"do not draw physical conclusions from any
+run with `shape_enabled` and n > 2"* -- is withdrawn.
+
 ---
 
 ## [V3.3] - 2026-09-19
@@ -414,6 +484,11 @@ were lowered to 0.52 (3D) and 0.70 (2D) so the bed starts with room to compact.
   against a 1 um tolerance, hitting the 3000-step cap). Default 0 is correct.
 
 ### KNOWN BLOCKER: the superellipse contact solver is wrong (pre-existing, V1.3)
+
+> **RESOLVED in V3.4.** The shaped path now uses a support-function minimum-translation-
+> distance solver and the common-normal solver has been retired. The diagnosis below
+> stands; see the V3.4 entry for the replacement and for a third defect found while
+> writing it -- the reported normal was BACKWARDS for about half of all shaped contacts.
 
 **A shaped bed is not yet usable for compaction studies.** From a loose start (request 0.70)
 it EXPANDS 12.3 % over 72 h with no cells at all, true phi falling 0.693 -> 0.586; with the

@@ -194,11 +194,13 @@ def _support_mtd_2d(a, b, n, th_i, th_j, dx, dy, m=4000):
 class TestProxyTracksTheTruePenetration(unittest.TestCase):
     """The settle's directional-radius gap must be a faithful overlap.
 
-    This is the guarantee the shape-aware packer rests on, and it is what
-    distinguishes the settle from `se2d_contact_k`, the common-normal solver the
-    DYNAMICS uses -- which misses blocky contacts entirely and, when it does
-    fire, returns an "overlap" larger than the granule. See the KNOWN BLOCKER
-    section of the V3.2 changelog.
+    This is the guarantee the shape-aware packer rests on. Until V3.4 it was
+    also what distinguished the settle from the DYNAMICS, which ran the
+    common-normal solver -- that missed blocky contacts entirely and, when it
+    did fire, returned an "overlap" larger than the granule (the KNOWN BLOCKER
+    of the V3.2 changelog). The dynamics now use the support-function MTD
+    solver, so the two agree on what an overlap is; this test still pins the
+    settle's own proxy, which remains a separate, cheaper law.
     """
 
     def _case(self, n, frac):

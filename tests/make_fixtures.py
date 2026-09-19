@@ -92,6 +92,23 @@ REFERENCE_RUNS = {
 }
 PARAMS_TRIALS = ['Trials/DOE2_2D_0001.json', 'Trials/default_trial.json']
 
+# Reference runs whose V2.7 output a later version DELIBERATELY supersedes.
+# `test_legacy_identity` skips these with the reason printed; the platform-local
+# baseline (`test_local_identity`) still pins them bit-for-bit, so they are not
+# unguarded -- only unpinned to V2.7.
+#
+# Adding an entry here is a statement that the old numbers were WRONG, and it
+# needs the measurement to back it up. Never add one to make a gate go green.
+SUPERSEDED_RUNS = {
+    'run2d_shapes':
+        "V3.4: shaped contacts moved to the support-function MTD solver. The "
+        "V2.7 common-normal solver found ZERO granule-granule contacts in this "
+        "configuration at every frame (11 granules, 55 pairs, overlaps of "
+        "0.19-1.17 um); MTD finds 1 at t=0 and 3 at t=2.5, and disp_func falls "
+        "6.30 -> 4.41 um because the contacts now resist. See the V3.4 entry in "
+        "CodeLog/Updates/CHANGELOG.md.",
+}
+
 
 def reference_params(name):
     """Params for one reference run (shared with the regression test)."""

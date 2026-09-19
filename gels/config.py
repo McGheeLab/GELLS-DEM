@@ -988,7 +988,17 @@ def validate(setup: Setup) -> None:
         errs.append("contact.shape_dynamics needs packing.shape_enabled")
     if float(setup.contact.curvature_R_cap) < 0:
         errs.append("contact.curvature_R_cap must be >= 0")
-    if setup.packing.shape_contact and float(setup.contact.curvature_R_cap) <= 0:
+    _blocky = max([max(float(sp.blockiness.mean), float(sp.blockiness_n2.mean))
+                   for sp in setup.granules.species] or [2.0]) > 2.05
+    if (float(setup.contact.curvature_R_cap) <= 0
+            and (setup.packing.shape_contact
+                 or (setup.packing.shape_enabled and _blocky))):
+        # V3.4 widened this from packing.shape_contact to any blocky packing.
+        # Under the support-function solver R_eff is the TRUE curvature radius
+        # of the body, which at a flat face really is ~1e15 um -- where the old
+        # common-normal path returned a 0.01-radian finite difference of a
+        # parametric sample, i.e. noise that happened to stay bounded. Being
+        # right about the geometry makes the cap load-bearing, not optional.
         errs.append("blocky granules need contact.curvature_R_cap > 0 (2.0 is the recommended "
                     "value): the local curvature radius at a flat face runs to ~1e15 um, and "
                     "F ~ sqrt(R_eff), so the contact is millions of times too stiff")
@@ -1299,7 +1309,7 @@ contact:                           # hydrogel granules
   overlap_safety: 1.5              # elastic only: headroom over the overlap at which a contact carries expected_force_nN
   semi_implicit: false             # damp each step by the local contact stiffness (stable at any E; same fixed point)
   shape_dynamics: false            # shape-aware overlap projection (REQUIRED with packing.shape_contact, or the bed relaxes apart)
-  curvature_R_cap: 0.0             # cap R_eff at this x min(r_i,r_j); 0 = off. REQUIRED for blocky shapes (2.0): a flat
+  curvature_R_cap: 2.0             # cap R_eff at this x min(r_i,r_j); 0 = off. REQUIRED for blocky shapes (2.0): a flat
                                    # face has an almost infinite curvature radius and F ~ sqrt(R_eff)
   stiffness_cap_kPa: 0.0           # 0 = none; caps the CONTACT modulus only (cells see the true E); PMMA preset 100
   friction_mu: 0.0                 # Coulomb coefficient added to the shear-stress friction (0 = hydrogel law only)

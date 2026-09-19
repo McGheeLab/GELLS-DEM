@@ -5,11 +5,14 @@ Status-tuple 3D contact solvers for compiled callers (V3.0).
 Copies of ``find_contact_spheres_3d``, ``find_contact_superellipsoids_3d``
 and ``find_contact_wall_3d`` from ``gels.engine`` returning ``(hit, ...)``
 tuples instead of ``None`` (numba cannot call Optional-returning functions
-from compiled code). The superellipsoid solver is statement-for-statement
-the original; the sphere and wall routines were plain Python and are
+from compiled code). The sphere and wall routines were plain Python and are
 re-expressed with scalar loops, which agree with the originals to rounding.
-The allocation-free rewrite of the superellipsoid solver is a later Phase 6
-step.
+
+V3.4: ``se3d_contact_k`` is now the support-function MTD solver, wrapping the
+single core ``gels.engine.se3d_mtd_core`` that the Python path also calls, and
+it is allocation-free. ``se3d_contact_cn_k`` is the retired common-normal copy,
+kept verbatim as evidence for the defect tests and called by nothing; see
+``gels.engine.find_contact_superellipsoids_3d_cn``.
 """
 
 import numpy as np
@@ -43,7 +46,7 @@ def sph3d_contact_k(xi, yi, zi, ri, xj, yj, zj, rj):
 
 
 @njit(cache=True)
-def se3d_contact_k(xi, yi, zi, ai, bi, ci, n1i, n2i, qi,
+def se3d_contact_cn_k(xi, yi, zi, ai, bi, ci, n1i, n2i, qi,
                    xj, yj, zj, aj, bj, cj, n1j, n2j, qj):
     """Common-normal contact of two superellipsoids.
 
@@ -144,15 +147,16 @@ def se3d_contact_k(xi, yi, zi, ai, bi, ci, n1i, n2i, qi,
 
 
 @njit(cache=True)
-def se3d_mtd_k(xi, yi, zi, ai, bi, ci, n1i, n2i, qi,
-               xj, yj, zj, aj, bj, cj, n1j, n2j, qj):
-    """Support-function MTD contact, in ``se3d_contact_k``'s tuple (V3.4).
+def se3d_contact_k(xi, yi, zi, ai, bi, ci, n1i, n2i, qi,
+                   xj, yj, zj, aj, bj, cj, n1j, n2j, qj):
+    """Contact of two superellipsoids by support-function MTD (V3.4).
+
+    Returns ``(hit, delta, nx, ny, nz, cx, cy, cz, R_eff)``.
 
     A thin wrapper, not a second implementation: there is exactly one MTD solver
     (``gels.engine.se3d_mtd_core``) and both twins call it, so they cannot drift
     the way ``_capacity`` did in V3.3. All this does is drop the convergence
-    residual, which only the tests consume, so the two solvers are
-    interchangeable at a call site by one ``if``.
+    residual, which only the tests consume.
     """
     hit, delta, nx, ny, nz, cx, cy, cz, R_eff, _res = se3d_mtd_core(
         xi, yi, zi, ai, bi, ci, n1i, n2i, qi,
@@ -262,4 +266,5 @@ def wall3d_k(xi, yi, zi, ai, bi, ci, n1i, n2i, qi, ri_bound, wall_pos, wall_axis
     return True, pen, R_local
 
 
-__all__ = ['sph3d_contact_k', 'se3d_contact_k', 'wall3d_k', 'wall3d_plane_k']
+__all__ = ['sph3d_contact_k', 'se3d_contact_k', 'se3d_contact_cn_k',
+           'wall3d_k', 'wall3d_plane_k']

@@ -308,10 +308,23 @@ percolation).
 - **Granule shape 2D** (V1.3+): Superellipses `|x/a|^n + |y/b|^n = 1` parameterised by
   semi-axes (a, b), blockiness exponent (n), and orientation (θ). Circles are the
   special case a=b, n=2. Enable with `shape_enabled=True`. See `superellipse_*()` functions.
-- **Contact detection 2D** (V1.3+): Common normal method for superellipse–superellipse contact.
-  Newton-Raphson iterative solver. Circle fast-path bypasses solver entirely.
-- **Contact detection 3D** (V1.4+): 3D common normal method for superellipsoid–superellipsoid
-  contact. 4-unknown Newton-Raphson (eta_i, omega_i, eta_j, omega_j). Sphere fast-path.
+- **Contact detection, shaped granules** (V3.4, replaces the V1.3/V1.4 common-normal
+  method): **support-function minimum translation distance**. The support function of the
+  two-exponent superellipsoid is closed form — a nested dual norm
+  `h(n) = ‖(‖(a·nₓ, b·n_y)‖_q₁, c·n_z)‖_q₂` with `q = n/(n−1)` — so
+  `sep(n) = (c₂−c₁)·n − h₁(n) − h₂(n)` is concave, `δ = −max sep` is a true penetration
+  depth and the force is the gradient of an energy. `∇h` IS the support point, so the
+  contact point is free; `(η, ω)` invert in closed form; and `R_eff = √(det ∇²h)` on the
+  tangent plane is exact to ~1e-11 instead of ~1e-3. `sep(n₀) > 0` PROVES separation, which
+  makes it 4.5× faster than the old solver at realistic neighbour-list occupancy while
+  finding 3.3× more contacts. **There is no solver flag** — `find_contact_superellipses` /
+  `find_contact_superellipsoids_3d` and `se2d_contact_k` / `se3d_contact_k` simply are the
+  MTD solver; the retired common-normal bodies survive under `*_cn` names, called by
+  nothing, only as evidence for the defect tests. Circle / sphere fast paths unchanged.
+  The old solver detected **12 %** of true contacts, over-reported penetration **9.8×
+  median**, and reported the normal **backwards for ~50 % of 3D shaped contacts** (force is
+  applied as `−F·n`, so that was attraction). `contact.curvature_R_cap` defaults to 2.0
+  because the new `R_eff` at a flat face is the true ~1e15 µm; it cannot bind for spheres.
 - **Transport metrics** (V1.4+): Kozeny-Carman permeability, Darcy flow, RCP fraction,
   compaction ratio, Darcy number. See `kozeny_carman_permeability()`, `rcp_fraction_superellipsoid()`.
 - **Rotational dynamics**: Overdamped rotation from off-centre contact torques.

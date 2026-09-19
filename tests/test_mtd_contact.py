@@ -37,7 +37,7 @@ for _p in (REPO, HERE):
 
 from gels.engine import (  # noqa: E402
     MTD_GPERP_RTOL, mtd_contact_2d, mtd_contact_3d,
-    find_contact_spheres_3d, find_contact_superellipsoids_3d,
+    find_contact_spheres_3d, find_contact_superellipsoids_3d_cn,
     quat_random, quat_rotate, quat_rotate_inv,
     se2d_mtd_core, se3d_mtd_core, se2d_support, se3d_support,
     superellipse_implicit, superellipsoid_implicit,
@@ -687,7 +687,7 @@ class TestAgainstTheCommonNormalSolver(SeededCase):
             if not mtd[0]:
                 continue
             cls.n_true += 1
-            old = find_contact_superellipsoids_3d(0.0, 0.0, 0.0, *shp, qi,
+            old = find_contact_superellipsoids_3d_cn(0.0, 0.0, 0.0, *shp, qi,
                                                   cj[0], cj[1], cj[2], *shp, qj)
             if old is not None:
                 cls.n_old += 1
@@ -732,7 +732,7 @@ class TestAgainstTheCommonNormalSolver(SeededCase):
             qj = quat_random(rng)
             u = rand_unit(rng)
             cj = 2.0 * 40.0 * rng.uniform(0.70, 0.98) * u
-            old = find_contact_superellipsoids_3d(0.0, 0.0, 0.0, *shp_i, qi,
+            old = find_contact_superellipsoids_3d_cn(0.0, 0.0, 0.0, *shp_i, qi,
                                                   cj[0], cj[1], cj[2], *shp_j, qj)
             if old is None:
                 continue
