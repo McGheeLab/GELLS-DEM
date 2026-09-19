@@ -139,7 +139,7 @@ def gather_3d(pos, r, a, b, c, n1, n2, quat, r_bound, sid, is_sphere, periodic, 
               off, nbr_pair, nbr_side,
               c_hit, c_overlap, c_nx, c_ny, c_nz, c_cx, c_cy, c_cz, c_Fn, c_a, c_Ftx, c_Fty, c_Ftz, dF,
               wall_W, wall_Estar, F, torques, clip_n, clip_d, clip_cnt, clip_over,
-              wall_torque):
+              wall_torque, wall_k):
     N = pos.shape[0]
     max_clips = clip_d.shape[1]
     for i in prange(N):
@@ -150,6 +150,7 @@ def gather_3d(pos, r, a, b, c, n1, n2, quat, r_bound, sid, is_sphere, periodic, 
         ty = 0.0
         tz = 0.0
         nclip = 0
+        kw = 0.0            # V3.6: this granule's wall contact stiffness
         nover = 0
         for m in range(off[i], off[i + 1]):
             k = nbr_pair[m]
@@ -265,6 +266,7 @@ def gather_3d(pos, r, a, b, c, n1, n2, quat, r_bound, sid, is_sphere, periodic, 
                     wcz = 0.0
                 if ok:
                     Fw, a_w = jkr_force_from_overlap(pen, R_local, E_star_gw, W_wall)
+                    kw += 2.0 * E_star_gw * 1e-3 * a_w   # V3.6 wall contact stiffness
                     Fwx = 0.0
                     Fwy = 0.0
                     Fwz = 0.0
@@ -321,6 +323,7 @@ def gather_3d(pos, r, a, b, c, n1, n2, quat, r_bound, sid, is_sphere, periodic, 
                         wccz = 0.0
                     if ok_c:
                         Fw, a_w = jkr_force_from_overlap(pen_c, R_loc_c, E_star_gw, W_wall)
+                        kw += 2.0 * E_star_gw * 1e-3 * a_w   # V3.6 wall contact stiffness
                         fx -= Fw * ux
                         fy -= Fw * uy
                         if wall_torque:
@@ -360,6 +363,7 @@ def gather_3d(pos, r, a, b, c, n1, n2, quat, r_bound, sid, is_sphere, periodic, 
         torques[i, 2] = tz
         clip_cnt[i] = nclip
         clip_over[i] = nover
+        wall_k[i] = kw
 
 
 def compute_forces_3d(gs, p, rng):
@@ -415,6 +419,7 @@ def compute_forces_3d(gs, p, rng):
     clip_d = np.zeros((N, max_clips))
     clip_cnt = np.zeros(N, dtype=np.int32)
     clip_over = np.zeros(N, dtype=np.int32)
+    wall_k = np.zeros(N)            # V3.6: wall contact stiffness, nN/um
     gather_3d(pos, gs.r, gs.a, gs.b, gs.c, gs.n1, gs.n2, quat, gs.r_bound, gs.species_id,
               bool(gs.is_circle), periodic, float(p.Lx), float(p.Ly), float(p.Lz),
               int(geom.shape_code), float(geom.R_cyl), float(geom.cx), float(geom.cy), bool(geom.top_free),
@@ -422,8 +427,10 @@ def compute_forces_3d(gs, p, rng):
               rec['hit'], rec['overlap'], rec['nx'], rec['ny'], rec['nz'], rec['cx'], rec['cy'], rec['cz'],
               rec['Fn'], rec['a'], rec['Ftx'], rec['Fty'], rec['Ftz'], dF,
               gs.wall_W, gs.wall_Estar, F, torques, clip_n, clip_d, clip_cnt, clip_over,
-              bool(getattr(p, 'contact_wall_torque', False)) and not bool(gs.is_circle))
+              bool(getattr(p, 'contact_wall_torque', False)) and not bool(gs.is_circle),
+              wall_k)
     gs.clip_arrays = (clip_n, clip_d, clip_cnt)     # consumed by the compiled renderer
+    gs.wall_stiffness = wall_k                      # V3.6: read by the semi-implicit step
     _warn_clip_overflow(clip_over, max_clips)
 
     contacts = ContactSoA.from_records(pair_i, pair_j, rec, gs, c_Estar, c_W, c_tau, dF, c_kappa, 3)

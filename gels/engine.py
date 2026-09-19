@@ -600,6 +600,12 @@ class GranuleSystem:
         self.n_overlap_pairs = 0
         self.frac_velocity_clipped = 0.0
 
+        # V3.6: per-granule wall contact stiffness (nN/um), written by whichever
+        # force evaluation ran last. Walls are applied inline in the gathers and
+        # never reach the pair contact list, so this is the only route by which
+        # the semi-implicit step can learn that a granule is held by a wall.
+        self.wall_stiffness = np.zeros(self.N)
+
         # V3.5 gradient-flow audit (set by `step` when dynamics.gradient_flow
         # is on; `energy_metrics` reads them and they stay zero when it is off)
         self.energy_total = 0.0
@@ -4836,9 +4842,19 @@ def contact_stiffness_per_granule(gs, contacts):
     ``dt * k_i`` is unconditionally stable in the diagonal part and leaves the
     FIXED POINT untouched (at equilibrium F = 0, so the step is zero for any
     damping) -- it changes the transient, not the physics.
+
+    V3.6: the WALL contacts are added too. They are applied inline in both
+    gathers and never reach the contact list, so before V3.6 a granule held only
+    by a wall was damped by ``drag_scale * r`` alone and rang about its contact
+    equilibrium. That was invisible until V3.5 changed ``boundary.wall_clamp``
+    to ``contact``, because until then the clip held every floor granule 0.5 um
+    clear of the wall and no granule was ever in wall contact at all.
     """
     N = gs.N
     k = np.zeros(N)
+    wk = getattr(gs, 'wall_stiffness', None)    # V3.6; None on a restored gs
+    if wk is not None and len(wk) >= N:
+        k += np.asarray(wk[:N], dtype=float)
     if contacts is None or len(contacts) == 0:
         return k
     col = getattr(contacts, 'column', None)
@@ -5074,8 +5090,22 @@ def bed_metrics(gs, p):
         cx, cy = 0.5 * p.Lx, 0.5 * p.Ly
         rho = np.hypot(gs.x[:N] - cx, gs.y[:N] - cy)
         out['bed_radius_p95'] = float(np.percentile((rho + rb)[mob], 95)) if np.any(mob) else 0.0
-        near = np.minimum(np.minimum(gs.x[:N] - rb, p.Lx - gs.x[:N] - rb),
-                          np.minimum(gs.y[:N] - rb, p.Ly - gs.y[:N] - rb)) if not gs.is_3d else             np.minimum(gs.x[:N] - rb, p.Lx - gs.x[:N] - rb)
+        # V3.6: the surface-to-nearest-wall gap, over the faces that ARE walls.
+        # Until V3.6 the 3D branch looked at the two x faces only, so the floor
+        # -- the one face a sedimented bed actually rests on -- was invisible
+        # and this read 0.0 on a bed that was demonstrably in wall contact. The
+        # V3.1 free top is not a wall and is excluded in both dimensions.
+        _faces = [gs.x[:N] - rb, p.Lx - gs.x[:N] - rb, gs.y[:N] - rb]
+        if gs.is_3d:
+            _faces.append(p.Ly - gs.y[:N] - rb)
+            _faces.append(gs.z[:N] - rb)
+            if not geom.top_free:
+                _faces.append(p.Lz - gs.z[:N] - rb)
+        elif not geom.top_free:
+            _faces.append(p.Ly - gs.y[:N] - rb)
+        near = _faces[0]
+        for _f in _faces[1:]:
+            near = np.minimum(near, _f)
         shell = mob & (near < 2.0 * float(np.mean(rb[mob]) if np.any(mob) else 1.0))
         out['wall_contact_fraction'] = (float(np.sum(mob & (near < 1.0))) / float(np.sum(shell))
                                         if np.any(shell) else 0.0)

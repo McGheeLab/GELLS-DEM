@@ -174,7 +174,7 @@ def gather_2d(pos, r, a, b, n_shape, theta, sid, is_circle, periodic, Lx, Ly, to
               off, nbr_pair, nbr_side,
               c_hit, c_overlap, c_nx, c_ny, c_cx, c_cy, c_Fn, c_a, c_Ftx, c_Fty, dF,
               wall_W, wall_Estar, F, torques, clip_n, clip_d, clip_cnt, clip_over,
-              wall_torque):
+              wall_torque, wall_k):
     N = pos.shape[0]
     max_clips = clip_d.shape[1]
     for i in prange(N):
@@ -182,6 +182,7 @@ def gather_2d(pos, r, a, b, n_shape, theta, sid, is_circle, periodic, Lx, Ly, to
         fy = 0.0
         tq = 0.0
         nclip = 0
+        kw = 0.0            # V3.6: this granule's wall contact stiffness
         nover = 0
         # ── pair contacts, in pair order ──
         for m in range(off[i], off[i + 1]):
@@ -251,6 +252,7 @@ def gather_2d(pos, r, a, b, n_shape, theta, sid, is_circle, periodic, Lx, Ly, to
                         pen = yi - (Ly - ri)
                     if pen > 0:
                         Fw, a_w = jkr_force_from_overlap(pen, ri, E_star_gw, W_wall)
+                        kw += 2.0 * E_star_gw * 1e-3 * a_w   # V3.6 wall contact stiffness
                         if w == 0:
                             fx += Fw
                             wall_d = abs(xi)
@@ -312,6 +314,7 @@ def gather_2d(pos, r, a, b, n_shape, theta, sid, is_circle, periodic, Lx, Ly, to
                                                        theta[i], wall_pos, axis, sign)
                     if ok:
                         Fw, a_w = jkr_force_from_overlap(pen, R_local, E_star_gw, W_wall)
+                        kw += 2.0 * E_star_gw * 1e-3 * a_w   # V3.6 wall contact stiffness
                         if axis == 0:
                             fx += sign * Fw
                             wall_d = abs(xi - wall_pos)
@@ -348,6 +351,7 @@ def gather_2d(pos, r, a, b, n_shape, theta, sid, is_circle, periodic, Lx, Ly, to
         torques[i] = tq
         clip_cnt[i] = nclip
         clip_over[i] = nover
+        wall_k[i] = kw
 
 
 def compute_forces_2d(gs, p, rng):
@@ -398,6 +402,7 @@ def compute_forces_2d(gs, p, rng):
     clip_d = np.zeros((N, max_clips))
     clip_cnt = np.zeros(N, dtype=np.int32)
     clip_over = np.zeros(N, dtype=np.int32)
+    wall_k = np.zeros(N)            # V3.6: wall contact stiffness, nN/um
     gather_2d(pos, gs.r, gs.a, gs.b, gs.n_shape, gs.theta, gs.species_id,
               bool(gs.is_circle), periodic, float(p.Lx), float(p.Ly),
               bool(boundary_geometry(p, '2D').top_free),
@@ -405,8 +410,10 @@ def compute_forces_2d(gs, p, rng):
               rec['hit'], rec['overlap'], rec['nx'], rec['ny'], rec['cx'], rec['cy'], rec['Fn'],
               rec['a'], rec['Ftx'], rec['Fty'], dF,
               gs.wall_W, gs.wall_Estar, F, torques, clip_n, clip_d, clip_cnt, clip_over,
-              bool(getattr(p, 'contact_wall_torque', False)) and not bool(gs.is_circle))
+              bool(getattr(p, 'contact_wall_torque', False)) and not bool(gs.is_circle),
+              wall_k)
     gs.clip_arrays = (clip_n, clip_d, clip_cnt)     # consumed by the compiled renderer
+    gs.wall_stiffness = wall_k                      # V3.6: read by the semi-implicit step
     _warn_clip_overflow(clip_over, max_clips)
 
     contacts = ContactSoA.from_records(pair_i, pair_j, rec, gs, c_Estar, c_W, c_tau, dF, c_kappa, 2)

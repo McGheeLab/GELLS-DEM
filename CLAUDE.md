@@ -6,7 +6,7 @@
 is a 2D/3D overdamped particle dynamics simulator for modelling cell-driven rearrangement
 of hydrogel granular scaffolds. The primary simulation engine is `gels/engine.py`.
 
-**Current version: V3.5 (in progress — see `CodeLog/Updates/CHANGELOG.md` for landed phases)**
+**Current version: V3.6 (in progress — see `CodeLog/Updates/CHANGELOG.md` for landed phases)**
 
 **Runs are local only.** HPC execution was retired in V2.7; simulations are driven
 by the five numbered steps in `pipeline/`. See `pipeline/README.md`.
@@ -381,6 +381,23 @@ percolation).
   `phi_bed`: the latter double-counts overlap, which is 1-4 % once a soft bed compacts through
   interpenetration. `n_overlap_clipped` / `overlap_clip_fraction` / `frac_velocity_clipped`
   say whether a run is reporting the contact law or the numerical rails.
+  **The WALL contact's stiffness is in that sum since V3.6** (`gs.wall_stiffness`,
+  accumulated in both gathers from the `a_w` they already computed and threw away).
+  Before that, wall contacts — which are applied inline and never reach the pair contact
+  list — contributed nothing, so a granule held only by a wall was damped by
+  `drag_scale * r` alone: at the default `dt = 0.5 h` that is `dt k / gamma = 13`, i.e.
+  thirteen times inside the explicitly unstable regime, held up by the velocity cap and the
+  overlap projection instead of by the contact law. It was invisible until V3.5 changed
+  `boundary.wall_clamp` to `contact`, because until then the clip held every floor granule
+  0.5 µm clear of the wall and **no granule was ever in wall contact at all**. Adding it
+  cannot move the equilibrium (at `F = 0` the step is zero for any drag); what it removes is
+  overshoot — the fraction of steps on which a wall granule reverses direction falls from
+  0.10–0.37 to 0.002–0.015 across 10–200 kPa, and at 50 kPa the ringing was measurably
+  shaking the free granules too. Note the energy monitor sees **no ascent** in any of those
+  runs, so `gradient_flow` will not catch this class of defect: count direction reversals.
+  Related fix: `wall_contact_fraction` took the gap to the two **x** faces only in 3D, so it
+  read 0.0 on a bed demonstrably resting on the floor; it now enumerates every face that is
+  a wall and excludes the V3.1 free top in both dimensions.
 - **Packer handoff** (V3.5): `packing.relax` = `auto` (default) | `none` | `fire`.
   `auto` is `fire` exactly when something drives the run (gravity on, or cells seeded) and
   `none` otherwise — a bed with no load has a genuinely loose equilibrium under JKR (a

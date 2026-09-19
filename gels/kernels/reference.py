@@ -1387,6 +1387,10 @@ def compute_forces(gs: GranuleSystem, p: Params, rng):
     N = gs.N
     F = np.zeros((N, 2))
     torques = np.zeros(N)
+    # V3.6: per-granule wall contact stiffness, zeroed every evaluation and
+    # read by `contact_stiffness_per_granule`. Stays 0 under periodic
+    # boundaries and for a bed that never touches a wall.
+    gs.wall_stiffness = np.zeros(N)
     pos = gs.positions()
     contacts = []  # V1.5.2: per-contact data for stress visualization
 
@@ -1686,6 +1690,8 @@ def compute_forces(gs: GranuleSystem, p: Params, rng):
                 for pen, axis, sign in _pens:
                     if pen > 0:
                         Fw, a_w = jkr_force_from_overlap(pen, r, E_star_gw, W_wall)
+                        # V3.6: wall contact stiffness, dF/d(delta) = 2 E_s a  (nN/um)
+                        gs.wall_stiffness[i] += 2.0 * E_star_gw * 1e-3 * a_w
                         F[i, axis] += sign * Fw
                         # Wall clip: distance from centre to wall face
                         if axis == 0:
@@ -1714,6 +1720,8 @@ def compute_forces(gs: GranuleSystem, p: Params, rng):
                         pen, R_local = wresult
                         Fw, a_w = jkr_force_from_overlap(
                             pen, R_local, E_star_gw, W_wall)
+                        # V3.6: wall contact stiffness, dF/d(delta) = 2 E_s a  (nN/um)
+                        gs.wall_stiffness[i] += 2.0 * E_star_gw * 1e-3 * a_w
                         F[i, wall_axis] += wall_sign * Fw
                         if getattr(p, 'contact_wall_torque', False) and not gs.is_circle:
                             # V3.4: r x F at the wall contact point, which the
@@ -1767,6 +1775,10 @@ def compute_forces_3d(gs: GranuleSystem, p: Params, rng):
     N = gs.N
     F = np.zeros((N, 3))
     torques = np.zeros((N, 3))
+    # V3.6: per-granule wall contact stiffness, zeroed every evaluation and
+    # read by `contact_stiffness_per_granule`. Stays 0 under periodic
+    # boundaries and for a bed that never touches a wall.
+    gs.wall_stiffness = np.zeros(N)
     pos = gs.positions()  # (N, 3)
     contacts = []  # V1.5.2: per-contact data for stress visualization
 
@@ -2038,6 +2050,8 @@ def compute_forces_3d(gs: GranuleSystem, p: Params, rng):
                     if pen > 0:
                         Fw, a_w = jkr_force_from_overlap(
                             pen, r, E_star_gw, W_wall)
+                        # V3.6: wall contact stiffness, dF/d(delta) = 2 E_s a  (nN/um)
+                        gs.wall_stiffness[i] += 2.0 * E_star_gw * 1e-3 * a_w
                         F[i, axis] += sign * Fw
                         wall_d = abs(coords[axis] - wall_pos)
                         # Clip normal points TOWARD wall (opposite of force sign)
@@ -2055,6 +2069,8 @@ def compute_forces_3d(gs: GranuleSystem, p: Params, rng):
                         pen, R_local = wresult
                         Fw, a_w = jkr_force_from_overlap(
                             pen, R_local, E_star_gw, W_wall)
+                        # V3.6: wall contact stiffness, dF/d(delta) = 2 E_s a  (nN/um)
+                        gs.wall_stiffness[i] += 2.0 * E_star_gw * 1e-3 * a_w
                         F[i, axis] += sign * Fw
                         if getattr(p, 'contact_wall_torque', False) and not gs.is_circle:
                             # V3.4: see the 2D twin above.
@@ -2090,6 +2106,8 @@ def compute_forces_3d(gs: GranuleSystem, p: Params, rng):
                     if wres_c is not None:
                         pen_c, R_loc_c = wres_c
                         Fw, a_w = jkr_force_from_overlap(pen_c, R_loc_c, E_star_gw, W_wall)
+                        # V3.6: wall contact stiffness, dF/d(delta) = 2 E_s a  (nN/um)
+                        gs.wall_stiffness[i] += 2.0 * E_star_gw * 1e-3 * a_w
                         F[i, 0] -= Fw * ux
                         F[i, 1] -= Fw * uy
                         if getattr(p, 'contact_wall_torque', False) and not gs.is_circle:

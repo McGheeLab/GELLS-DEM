@@ -8,7 +8,94 @@ MINOR tracks feature additions and improvements.
 
 ---
 
-## [V3.5] - in progress (started 2026-09-19)
+## [V3.6] - in progress (started 2026-09-19)
+
+Plan: `CodeLog/ClaudesPlan/3.6.md`. Two things the engine models but the solver
+never feels, and they are the same defect twice: a substrate the force law knows
+about and the numerics never asks about.
+
+### Phase 1 - the wall contact reaches the semi-implicit step
+
+`contact_stiffness_per_granule` sums `dF/d(delta) = 2 E_s a` over the **pair**
+contact list, and the semi-implicit step damps by `dt * k_i`. Wall contacts are
+applied inline in `gather_2d` / `gather_3d` and their `reference.py` twin and
+never reach that list, so a granule held only by a wall was damped by
+`drag_scale * r` alone.
+
+At the default `dt = 0.5 h`, `drag_scale = 0.05` and `r = 20 um`, a hydrogel
+wall contact carries `k ~ 27 nN/um` against a bare drag of `1.0`: **`dt k / gamma
+= 13`**. Explicit overdamped Euler is stable only for `k < gamma/dt`, so those
+granules were a factor of thirteen inside the unstable regime, held up by the
+velocity cap and the overlap projection rather than by the contact law -- exactly
+the failure mode `contact.semi_implicit` was introduced in V3.2 to end.
+
+**Why it was invisible until now.** Until V3.5 `boundary.wall_clamp` was a
+hardcoded `rb + 0.5`, so a granule resting on the floor was **never in wall
+contact**: the clip carried its weight and the wall force read zero. Changing
+the default to `contact` made wall contacts real, and made this gap real with
+them. Fixing it also needed the V3.5 Phase 5 retirement of the `reference.py`
+freeze, because the stiffness has to be accumulated in both twins' gathers.
+
+**It costs nothing to collect.** `jkr_force_from_overlap` already returns
+`(F, a)` at all ten wall call sites -- 5 in `reference.py`, 2 in `contact2d`,
+3 in `contact3d` -- and `a_w` was discarded at every one of them. Carried on
+`gs.wall_stiffness` (float64, length N), written by the force evaluation, read
+by `contact_stiffness_per_granule`, so neither `step` call site changes.
+
+**What it does not do: move the answer.** At the fixed point `F = 0`, so the
+step is zero for any drag; a drag term changes the transient, not the physics.
+The same argument `contact_semi_implicit` and `gradient_flow: damped` rest on.
+Checked on the total potential energy, which agrees to four figures with and
+without the term in every configuration measured.
+
+**What it does: remove the overshoot.** On a FIRE-relaxed 2D gravity bed at the
+default `dt`, as the fraction of steps on which a granule reverses direction:
+
+| E_modulus | wall granules | free granules | bed energy |
+|---|---|---|---|
+| 10 kPa  | 0.100 -> **0.002** | 0.000 -> 0.000 | 310.2 -> 310.2 |
+| 50 kPa  | 0.368 -> **0.015** | 0.033 -> **0.002** | 316.4 -> 316.4 |
+| 200 kPa | 0.333 -> **0.002** | 0.024 -> **0.000** | 327.0 -> 327.0 |
+
+The 50 kPa row is the one that matters: a ringing wall granule was shaking its
+neighbours, so this was never purely a boundary artefact. Note the energy
+monitor records **no ascent** in any of these runs -- the step overshoots its
+contact equilibrium and comes back without ever raising the total energy by a
+tenth of the work, which is why V3.5's gradient-flow audit did not catch it and
+a direction-reversal count does.
+
+**Bug fix found while checking it: `wall_contact_fraction` was blind to the
+floor in 3D.** `gs.wall_stiffness` said seven granules were in wall contact and
+`bed_metrics` said none were. The 3D branch took the surface gap to the two **x**
+faces only -- the one face a sedimented bed actually rests on never entered the
+minimum. Now every face that is a wall is enumerated, and the V3.1 free top is
+excluded in both dimensions (the 2D branch counted the open lid as a wall).
+
+**Baseline re-blessed** (V3.5 rule: a behaviour change is re-blessed, not pinned
+around, and recorded here because afterwards the gate cannot see it). Three of
+the four reference runs are **bit-identical** -- their beds sit off the walls,
+`packing_consolidation='centre'` being the `Params` default. Only
+`run3d_spheres` changed, and it changed in the direction the argument predicts:
+
+| final frame | V3.5 | V3.6 |
+|---|---|---|
+| `max_overlap_ratio` | **0.15** (= `max_overlap_frac`, i.e. on the rail) | 0.016 |
+| `overlap_clip_fraction` | 0.018 | **0.000** |
+| `n_overlap_clipped` | 1 | **0** |
+| `total_overlap_area` | 7839 um^3 | **123 um^3** |
+
+That run was reporting the geometric rail rather than the contact law on its
+last frame, and is not any more. `F_max` on that frame went the other way
+(110 -> 201 nN) and is not evidence either way: it is a max over a heavy tail on
+a 17-granule bed, which is the thing V3.5 measured you must not judge on.
+
+New: `tests/test_wall_stiffness.py` (17 tests) -- the quantity itself against
+`2 E_s a` by hand, identically zero under periodic boundaries and for a bed off
+the walls, the twins on one bed, the fixed-point claim, the reversal
+measurements above, all four wall geometries (2D box, 3D box, cylinder, shaped),
+and the `wall_contact_fraction` fix.
+
+## [V3.5] - 2026-09-19
 
 Plan: `CodeLog/ClaudesPlan/3.5.md`. Two halves of one subject -- energy descent.
 Phase 1 is the gradient-flow audit; Phase 2 is the packer->dynamics handoff fix
