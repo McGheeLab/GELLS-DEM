@@ -37,7 +37,8 @@ Semantic differences from the reference, on purpose:
 
 import numpy as np
 
-from gels.engine import (CellState, capacity_coverage, quat_rotate, quat_rotate_inv,
+from gels.engine import (CellState, adhesion_force_ceiling, capacity_coverage,
+                         quat_rotate, quat_rotate_inv,
                          superellipse_point, superellipsoid_point)
 from gels.kernels import njit, prange
 from gels.engine import PACKING_EFFICIENCY
@@ -98,16 +99,38 @@ def hash_normal2(seed, a, b, salt):
     return rad * np.cos(th), rad * np.sin(th)
 
 
+def _adh_or_zeros(gs, p):
+    """V3.6 adhesion ceiling as an (N,) float array, zeros when the feature is off.
+
+    The kernel cannot take None, and a zero entry is the documented "off" value
+    in `mc_force_k`, so this is the whole adaptation.
+    """
+    a = adhesion_force_ceiling(gs, p)
+    return np.ascontiguousarray(a, dtype=np.float64) if a is not None \
+        else np.zeros(gs.N, dtype=np.float64)
+
+
 # ──────────────────────────────────────────────────────────────────────
 # compiled leaves
 # ──────────────────────────────────────────────────────────────────────
 
 @njit(cache=True)
-def mc_force_k(E_kPa, nu, fa, g, F_stall, a_cell, k_opt, engagement, F_max):
-    """``engine.motor_clutch_force`` with the Params scalars pre-extracted."""
+def mc_force_k(E_kPa, nu, fa, g, F_stall, a_cell, k_opt, engagement, F_max, F_adh):
+    """``engine.motor_clutch_force`` with the Params scalars pre-extracted.
+
+    ``F_adh`` is the V3.6 adhesion ceiling for this granule AT g = 1, from
+    `engine.adhesion_force_ceiling`; <= 0 means the feature is off and the cap is
+    ``F_max`` alone. It is scaled by g HERE because the ligand gain is a property
+    of the pair, and the adhesion stress scales with engaged-bond density.
+    """
     k_sub = np.pi * E_kPa * a_cell / (1.0 - nu**2)
     F_mc = F_stall * (k_sub / (k_sub + g * k_opt)) * engagement * fa * g
-    return min(F_mc, F_max)
+    cap = F_max
+    if F_adh > 0.0:
+        cap_adh = F_adh * g
+        if cap_adh < cap:
+            cap = cap_adh
+    return min(F_mc, cap)
 
 
 @njit(cache=True)
@@ -478,6 +501,7 @@ def bridge_pairs_k(cidx, pair_i, pair_j, hit, overlap, d_rec, dx, dy, dz, nx_rec
                    r, r_bound, f, E_gran, nu_gran, fa, pos,
                    cell_offset, cell_state, cell_target, off, nbr_pair, nbr_side,
                    law, rule, gamma, kappa, F_stall, a_cell, k_opt, engagement, F_max,
+                   F_adh_g1,
                    break_gap, sense, contact_factor, decay_len_raw, inert_factor,
                    cell_bridge_age, cell_align, cell_force_prev, cell_gap_prev,
                    model, dt, drag_scale, v0, f_ecc, gap_min, formation_time, align_min,
@@ -518,8 +542,10 @@ def bridge_pairs_k(cidx, pair_i, pair_j, hit, overlap, d_rec, dx, dy, dz, nx_rec
                         gap = 0.0
         g_i = traction_gain(f[i], f[j], law, rule, gamma, kappa)
         g_j = traction_gain(f[j], f[i], law, rule, gamma, kappa)
-        out_Fi[q] = mc_force_k(E_gran[i], nu_gran[i], fa[i], g_i, F_stall, a_cell, k_opt, engagement, F_max)
-        out_Fj[q] = mc_force_k(E_gran[j], nu_gran[j], fa[j], g_j, F_stall, a_cell, k_opt, engagement, F_max)
+        out_Fi[q] = mc_force_k(E_gran[i], nu_gran[i], fa[i], g_i, F_stall, a_cell, k_opt,
+                               engagement, F_max, F_adh_g1[i])
+        out_Fj[q] = mc_force_k(E_gran[j], nu_gran[j], fa[j], g_j, F_stall, a_cell, k_opt,
+                               engagement, F_max, F_adh_g1[j])
         n_ex = 0
         # V3.1: the pair's isometric capacity, last step's force and last
         # step's gap drive one force-velocity factor for all of its bridges.
@@ -872,6 +898,7 @@ def bridging_k(gs, p, rng, F, pair_i, pair_j, rec, pos, dim, csr):
                    gs.cell_offset, gs.cell_state, gs.cell_bridge_target, off, nbr_pair, nbr_side,
                    law, rule, float(p.traction_exponent), float(kappa), float(F_stall), float(a_cell),
                    float(k_opt), float(engagement), float(p.F_max_per_cell),
+                   _adh_or_zeros(gs, p),                      # V3.6
                    float(p.bridge_break_gap), float(p.cell_sense_distance), float(p.bridge_contact_factor),
                    float(p.bridge_decay_length), float(p.bridge_inert_factor),
                    gs.cell_bridge_age, gs.cell_alignment, gs.cell_bridge_force, gs.cell_bridge_gap_prev,

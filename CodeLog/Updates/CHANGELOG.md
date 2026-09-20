@@ -14,6 +14,115 @@ Plan: `CodeLog/ClaudesPlan/3.6.md`. Two things the engine models but the solver
 never feels, and they are the same defect twice: a substrate the force law knows
 about and the numerics never asks about.
 
+### Phase 3 - `gels/celltypes/`: cell types as objects, traction as a stress, cell strain energy
+
+Not in the version as planned. Added on the request that cells should build
+strain energy from the motor-clutch model and from bridge stretch, with the
+contact area giving the traction stress, and that cell types should be
+instantiable so fibroblasts can be swapped for something else.
+
+**`gels/celltypes/`.** A `CellType` is a frozen dataclass of `Measured` values --
+each a number, its units, **its source**, and the range that source reports.
+There is no way to add a value without saying where it came from;
+`source='ASSUMPTION'` marks a calibration target and `report()` counts them and
+flags any value outside its own reported range. Drop a module in the folder that
+defines `CELL_TYPE` and it is discovered; nothing else changes.
+
+Two types ship, and the second is the point -- an interface with one
+implementation is a guess. `fibroblast` is the only one through the review in
+`CodeLog/References/fibroblast_parameters.md`. `msc` is a starting point and
+says so in its own report.
+
+    python pipeline/step0_new_setup.py --list-cell-types
+    python pipeline/step0_new_setup.py --describe-cell-type fibroblast
+    python pipeline/step0_new_setup.py --preset pmma_well --cell-type fibroblast -o w.yaml
+    python pipeline/step1_config.py --setup w.yaml --cell-type msc --name run1
+
+`to_overrides()` emits dotted overrides in the same currency as a preset, so a
+preset states the **scaffold** and a cell type states the **cell**; applied after
+`--preset` and before `--set`, and recorded in `meta.cell_type` and `params.json`.
+
+**Traction as a stress over the contact area.** `F = sigma x A_adhesion` with
+`A_adhesion = cells.traction.adhesion_area_frac x A_projected(spread_fraction)`,
+so the ceiling GROWS as the cell spreads rather than being a number chosen per
+run. `F_max_per_cell` stays as an absolute backstop.
+
+The one thing the reference file explicitly forbids (section 2, item 3) is a
+**density-independent** adhesion stress: `sigma_FA = rho_bond F_b plog(gamma/e)`
+scales with engaged-bond density. So `cells.traction.stress_Pa` is the value at
+SATURATING ligand and the engine multiplies it by the Langmuir gain `g` and the
+clutch engagement fraction before use.
+
+The self-consistency check every type must pass: `sigma x A` has to reproduce the
+INDEPENDENTLY measured whole-cell traction. Fibroblast: 4 nN/um^2 (Stricker 2011,
+and the reference file names that number for exactly this purpose) x 0.08 x
+1257 um^2 = **366 nN** against Gaudet 2003's ~400 nN, ratio 0.91. That check is
+what sets the adhesion area fraction, otherwise the weakest number in the type --
+and it caught the first `msc` draft at a ratio of **2.85**.
+
+**Negative result, pinned as a test: at the fibroblast's own numbers the ceiling
+never binds.** On 10 kPa, 50 kPa and PMMA, at 1, 2, 4 and 8 h, `F_mean` is
+bit-identical with it on and off. The two ramp together -- the motor-clutch force
+carries `fa_maturity`, the ceiling carries `spread_fraction` -- and at full
+spread the adhesion holds 366 nN while the motors deliver at most 182 nN even on
+a rigid granule:
+
+| granule | motor-clutch force | rounded-cell adhesion ceiling |
+|---|---|---|
+| 10 kPa | 30 nN | 91 nN |
+| 50 kPa | 90 nN | 91 nN |
+| PMMA | 182 nN | 91 nN |
+
+That is not a wasted model. It says `F_max_per_cell = 150-200 nN` is a
+PHYSICALLY REASONABLE cap rather than an arbitrary one -- the cell pulls at about
+half its adhesion's capacity -- and it identifies `adhesion_area_frac` as the
+knob that would make the adhesion the limit (at 0.01 it binds, and the run
+changes).
+
+**Cell strain energy.** A loaded cell is a spring in series with what it grips:
+`1/k = 1/k_cell + 1/k_sub`, and a BRIDGING cell grips two, so its series
+includes both granules; `U = F^2/2k`. One pass over the per-cell force arrays
+the force evaluation already fills, and no kernel change.
+
+This is the quantity **traction force microscopy reports**, so it is a direct
+comparison with experiment the model did not previously offer. `energy_cell`
+joins the V3.5 audit: it is real stored energy, so leaving it out charged it to
+the residual. It does NOT make the system conservative -- a bridge is an actuator
+and changes its own rest length -- what it does is separate the recoverable part,
+leaving `energy_residual` measuring the myosin work, which is the quantity this
+model exists to report.
+
+A prediction that could have been wrong and was not: on a granule stiffer than
+~50 kPa the CELL is the soft element, so `U` barely moves with granule modulus
+(8203 vs 8001 nN.um between 10 kPa and rigid). `cells.traction.k_cell_nN_per_um`
+is therefore what sets the reported strain energy, not the granule.
+
+**What the instrumentation says about the model.** Recorded, not tuned away. A
+24 h 2D bed with `--cell-type fibroblast`:
+
+| | model | fibroblast on flat TFM |
+|---|---|---|
+| strain energy per loaded cell | **0.044 pJ** | 0.1-10 pJ |
+| footprint traction stress | **21.8 Pa** | ~300 Pa (Gaudet 2003) |
+| adhesion traction stress | 272 Pa | 0.5-2 kPa mean at adhesions |
+
+About 10x low, consistently, and now visible. That is the first thing this phase
+hands to the next round of work.
+
+And the abstraction does something: fibroblast vs MSC on the same bed gives
+`disp_func` 54.4 vs 39.0 um and 90 vs 107 bridges.
+
+New: `gels/celltypes/` (base, fibroblast, msc, registry),
+`tests/test_celltypes.py` (30 tests). New `Params`: `cell_type`,
+`cell_traction_stress_Pa` (0 = off, the V3.5 behaviour), `cell_adhesion_area_frac`,
+`cell_series_stiffness`. New config section `cells.traction` and key `cells.type`.
+New metric keys (both twins): `energy_cell`, `cell_strain_energy`,
+`cell_strain_energy_pJ`, `cell_strain_energy_per_cell_pJ`,
+`traction_stress_mean_Pa`, `traction_stress_footprint_Pa`,
+`traction_ceiling_mean_nN`, `n_cells_loaded`. Baseline unchanged -- the ceiling
+is off by default, so the four reference runs are bit-identical and only gain
+keys.
+
 ### Phase 2 - `dynamics.substep`: dt is a coupling interval, not an integration step
 
 Not in the version as planned. Added after the question "dt = 0.5 h may be too

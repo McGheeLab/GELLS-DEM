@@ -48,9 +48,31 @@ def main():
                              '--preset pmma_well,fibroblast_realistic (repeatable; later ones win)')
     parser.add_argument('--list-presets', action='store_true',
                         help='List the available presets and exit')
+    parser.add_argument('--cell-type', default='',
+                        help='Cell type from gels/celltypes/ (e.g. fibroblast). Applied '
+                             'AFTER --preset and before --set, so a preset states the '
+                             'scaffold and the cell type states the cell (V3.6)')
+    parser.add_argument('--list-cell-types', action='store_true',
+                        help='List the available cell types and exit')
+    parser.add_argument('--describe-cell-type', default='',
+                        help='Print a cell type with every value, its source and the '
+                             'derived checks, and exit')
     parser.add_argument('--force', action='store_true', help='Overwrite an existing file')
     args = parser.parse_args()
 
+    if args.list_cell_types:
+        from gels.celltypes import available
+        print("\nCell types (--cell-type NAME):\n")
+        for name, disp in available().items():
+            print(f"  {name:<14} {disp}")
+        print("\n  --describe-cell-type NAME prints every value with its source.\n")
+        return 0
+    if args.describe_cell_type:
+        from gels.celltypes import get
+        print()
+        print(get(args.describe_cell_type).report())
+        print()
+        return 0
     if args.list_presets:
         from gels.presets import PRESET_DESCRIPTIONS
         print("\nPresets (--preset NAME[,NAME]; applied in order, later ones win):\n")
@@ -123,6 +145,25 @@ def main():
         header += [f"{n}: {path}: {old!r} -> {new!r}" for n, path, old, new in deltas]
         save_setup(setup, out, header=header)
         print(f"  Presets: {', '.join(names)} ({len(deltas)} values changed)")
+
+    # ── V3.6 cell type: applied AFTER any preset, so the cell has the last word
+    # on the cell and the preset keeps the last word on the scaffold. ──
+    if args.cell_type:
+        from gels.celltypes import apply_cell_type, get
+        if setup is None:
+            print("\n  ERROR: --cell-type needs PyYAML (the setup has to be parsed to be edited)")
+            return 1
+        ct = get(args.cell_type)
+        apply_cell_type(setup, args.cell_type)
+        save_setup(setup, out, header=[
+            f"GELS setup written by step0 with cell type: {ct.name}"
+            + (f" and presets: {', '.join(setup.meta.presets)}" if setup.meta.presets else ''),
+            "Per-key documentation: gels/config.py TEMPLATE_YAML "
+            "(PyYAML cannot emit comments, so this file has none).",
+            "Provenance for every cell value: "
+            "python pipeline/step0_new_setup.py --describe-cell-type " + ct.name,
+            ""])
+        print(f"  Cell:    {ct.display_name} ({len(ct.to_overrides())} values)")
 
     print(f"  Wrote:   {os.path.abspath(out)}")
     if setup is not None:

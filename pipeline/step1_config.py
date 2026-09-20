@@ -56,6 +56,9 @@ def main():
     parser.add_argument('--preset', action='append', default=[],
                         help='Named preset(s) of setup overrides, applied after the setup file '
                              'and before --set (see gels/presets.py; step0 --list-presets)')
+    parser.add_argument('--cell-type', default='',
+                        help='Cell type from gels/celltypes/ (e.g. fibroblast), applied after '
+                             '--preset and before --set (step0 --list-cell-types) (V3.6)')
     parser.add_argument('--set', dest='overrides', action='append', default=[],
                         metavar='PATH=VALUE',
                         help='Override a setup value by dotted path, e.g. '
@@ -103,6 +106,9 @@ def main():
         if args.preset:
             from gels.presets import apply_presets
             setup = apply_presets(setup, args.preset)     # presets, then --set: --set wins
+        if args.cell_type:                                 # V3.6: cell type after presets
+            from gels.celltypes import apply_cell_type
+            setup = apply_cell_type(setup, args.cell_type)
         setup = apply_overrides(setup, args.overrides)
         p = setup.to_params()
         print(f"  Setup file:    {args.setup} ({len(setup.granules.species)} species)")
@@ -133,6 +139,9 @@ def main():
             if args.preset:
                 from gels.presets import apply_presets
                 setup = apply_presets(setup, args.preset)
+            if args.cell_type:                             # V3.6
+                from gels.celltypes import apply_cell_type
+                setup = apply_cell_type(setup, args.cell_type)
             setup = apply_overrides(setup, args.overrides)
             p = setup.to_params()
 
@@ -155,6 +164,9 @@ def main():
     if args.preset:
         from gels.presets import preset_names
         print(f"  Presets:       {', '.join(preset_names(args.preset))}")
+    if args.cell_type:
+        from gels.celltypes import get
+        print(f"  Cell type:     {get(args.cell_type).display_name} ({args.cell_type})")
     if args.overrides:
         print(f"  --set:         {len(args.overrides)}")
         for item in args.overrides:

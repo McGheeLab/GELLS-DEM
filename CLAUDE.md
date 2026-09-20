@@ -23,6 +23,11 @@ GELS/
 │   ├── lsdem.py                 # LS-DEM deformable particle module (Henzel 2026)
 │   ├── division.py              # Cell division pass (doubling time, contact inhibition) (V3.1)
 │   ├── presets.py               # Named bundles of setup overrides (V3.1)
+│   ├── celltypes/               # Instantiable cell types, each value with its source (V3.6)
+│   │   ├── base.py              # Measured + CellType: geometry, traction, kinetics, report()
+│   │   ├── fibroblast.py        # the default; the only type through the literature review
+│   │   ├── msc.py               # second type, NOT reviewed -- keeps the abstraction honest
+│   │   └── __init__.py          # folder IS the registry: get / available / apply_cell_type
 │   ├── live/                    # Observer hook, frame builder, TkAgg viewer, tail/replay (V3.0)
 │   ├── io/                      # SnapshotWriter (background, atomic, np.load-compatible) (V3.0)
 │   └── kernels/                 # V3.0 compute layer (numba, parallel, thread-count independent)
@@ -398,6 +403,43 @@ percolation).
   Related fix: `wall_contact_fraction` took the gap to the two **x** faces only in 3D, so it
   read 0.0 on a bed demonstrably resting on the floor; it now enumerates every face that is
   a wall and excludes the V3.1 free top in both dimensions.
+- **Cell types are objects, in `gels/celltypes/`** (V3.6). A `CellType` is a frozen
+  dataclass of `Measured` values — a number, its units, **its source**, and the range that
+  source reports — so no value can be added without saying where it came from, and
+  `report()` counts the `ASSUMPTION`s and flags anything outside its own range. Drop a
+  module defining `CELL_TYPE` in the folder and it is discovered. `fibroblast` is the only
+  type through `CodeLog/References/fibroblast_parameters.md`; **`msc` has not been
+  reviewed** and says so. `--cell-type` on step0/step1, applied after `--preset` and before
+  `--set`: a preset states the scaffold, a cell type states the cell. Recorded in
+  `meta.cell_type` and `params.json`. `--list-cell-types` / `--describe-cell-type NAME`.
+- **Traction is a stress over the contact area** (V3.6): `F = σ·A_adhesion` with
+  `A_adhesion = cells.traction.adhesion_area_frac × A_projected(spread_fraction)`, so the
+  ceiling **grows as the cell spreads**. `cells.traction.stress_Pa` is σ at *saturating*
+  ligand and is multiplied by the Langmuir gain and the clutch engagement before use —
+  a density-independent adhesion stress is the one thing the reference file's section 2
+  forbids, since `σ_FA = ρ_bond·F_b·plog(γ/e)` scales with engaged-bond density. Every
+  type must pass `σ·A ≈ the independently measured whole-cell traction` (fibroblast
+  366 vs 400 nN); that check is what sets the area fraction, and it caught the first `msc`
+  draft at 2.85×. **Negative result, pinned: at the fibroblast's own numbers the ceiling
+  never binds** — motor-clutch 30/90/182 nN on 10 kPa/50 kPa/PMMA against a 91 nN
+  rounded-cell ceiling that reaches 366 nN once spread, and the two ramp together. That
+  makes `F_max_per_cell = 150–200 nN` a *reasonable* cap rather than an arbitrary one, and
+  points at `adhesion_area_frac` as the knob. Off by default (`stress_Pa = 0`).
+- **Cell strain energy is the TFM-comparable observable** (V3.6). A loaded cell is a spring
+  in series with what it grips (`1/k = 1/k_cell + 1/k_sub`; a bridging cell grips two), so
+  `U = F²/2k` — one pass over the per-cell force arrays, no kernel change. `energy_cell`
+  joins the V3.5 audit because it is real stored energy that was otherwise charged to the
+  residual; it does **not** make the system conservative (a bridge is an actuator and moves
+  its own rest length), it separates the recoverable part so `energy_residual` measures the
+  myosin work. On a granule above ~50 kPa the **cell** is the soft element, so `U` barely
+  moves with granule modulus (8203 vs 8001 nN·µm) and
+  `cells.traction.k_cell_nN_per_um` is what sets it. **The model currently reads ~10× below
+  a fibroblast on flat TFM** — 0.044 pJ per loaded cell against 0.1–10 pJ, and 21.8 Pa
+  footprint traction against ~300 Pa (Gaudet 2003). That is a calibration target, and the
+  point of computing it is that it is now visible. Quote
+  `traction_stress_footprint_Pa` against TFM maps and `traction_stress_mean_Pa` against
+  focal-adhesion stresses; they differ by `adhesion_area_frac` and mixing them up is the
+  mistake the pair exists to stop.
 - **`dt` is a coupling interval, not an integration step** (V3.6).
   `dynamics.substep` = `auto` (default) | `off` | `always`. `contact_semi_implicit` takes
   `vel = F/(γ + dt·k)`: the fixed point is exact for any `dt`, which is what makes it

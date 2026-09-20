@@ -57,6 +57,7 @@ class Domain:
 @dataclass
 class Meta:
     presets: List[str] = field(default_factory=list)   # names applied by --preset (provenance)
+    cell_type: str = ''                                # name applied by --cell-type (V3.6)
     notes: str = ''
 
 
@@ -164,6 +165,21 @@ class Kinetics:
 
 
 @dataclass
+class Traction:
+    """V3.6: the cell's traction as a STRESS over its adhesion area.
+
+    `stress_Pa` is sigma_FA at saturating ligand and full clutch engagement; the
+    engine scales it by the Langmuir gain and the engagement fraction, because a
+    density-independent adhesion stress is what
+    CodeLog/References/fibroblast_parameters.md section 2 says not to implement.
+    0 leaves `motor_clutch.F_max_per_cell_nN` as the only ceiling (V3.5).
+    """
+    stress_Pa: float = _P.cell_traction_stress_Pa
+    adhesion_area_frac: float = _P.cell_adhesion_area_frac
+    k_cell_nN_per_um: float = _P.cell_series_stiffness
+
+
+@dataclass
 class MotorClutch:
     n_motors: int = _P.n_motors
     F_motor_stall_nN: float = _P.F_motor_stall
@@ -235,6 +251,8 @@ class Cells:
     ligand: Ligand = field(default_factory=Ligand)
     kinetics: Kinetics = field(default_factory=Kinetics)
     motor_clutch: MotorClutch = field(default_factory=MotorClutch)
+    traction: Traction = field(default_factory=Traction)
+    type: str = _P.cell_type        # V3.6: which gels/celltypes entry, provenance only
     migration: Migration = field(default_factory=Migration)
     sensing: Sensing = field(default_factory=Sensing)
     bridging: Bridging = field(default_factory=Bridging)
@@ -452,6 +470,10 @@ FLAT_MAP = [
     ('cells.motor_clutch.k_on_per_s', 'k_on_clutch'),
     ('cells.motor_clutch.k_off_per_s', 'k_off_clutch'),
     ('cells.motor_clutch.F_max_per_cell_nN', 'F_max_per_cell'),
+    ('cells.traction.stress_Pa', 'cell_traction_stress_Pa'),
+    ('cells.traction.adhesion_area_frac', 'cell_adhesion_area_frac'),
+    ('cells.traction.k_cell_nN_per_um', 'cell_series_stiffness'),
+    ('cells.type', 'cell_type'),
     ('cells.motor_clutch.traction_f_law', 'traction_f_law'),
     ('cells.motor_clutch.traction_f_rule', 'traction_f_rule'),
     ('cells.motor_clutch.traction_exponent', 'traction_exponent'),
@@ -1309,6 +1331,11 @@ cells:                             # human dermal fibroblasts
     traction_f_law: langmuir       # traction vs coating: langmuir (ligand.K_traction) | power (traction_exponent)
     traction_f_rule: target        # which f a bridging cell grips with: target | min | product
     traction_exponent: 1.0         # power law only
+  traction:                      # V3.6: traction as a STRESS over the adhesion area
+    stress_Pa: 0.0               # sigma_FA at saturating ligand; 0 = cap by F_max alone.
+                                 # `--cell-type fibroblast` sets 4000 (Stricker 2011)
+    adhesion_area_frac: 0.08     # focal-adhesion area / projected footprint
+    k_cell_nN_per_um: 10.0       # the cell's own series elasticity; sets the strain energy
   migration:
     speed_um_per_h: 30.0           # 12-60 um/h on collagen (0.2-1 um/min)
     directed_speed_mult: 2.0       # crawl speed multiplier toward a bridge target

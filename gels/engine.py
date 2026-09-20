@@ -164,6 +164,23 @@ class Params:
     k_off_clutch: float = 0.1      # 1/s, baseline clutch unbinding rate
     F_bond: float = 0.002          # nN (2 pN), characteristic bond rupture force
 
+    # ── Cell type and traction stress (V3.6) ──
+    # `cell_type` is provenance only -- the name of the gels/celltypes entry a
+    # run was configured from, so a results directory says which cell it modelled.
+    cell_type: str = ''
+    # sigma_FA at SATURATING ligand and full clutch engagement, Pa. The engine
+    # scales it by the Langmuir gain g and the engagement fraction before use,
+    # because a density-independent adhesion stress is the one thing
+    # CodeLog/References/fibroblast_parameters.md section 2 says not to
+    # implement: sigma = rho_bond F_b plog(gamma/e) scales with ENGAGED-bond
+    # density. 0 leaves the ceiling as `F_max_per_cell` alone (V3.5 behaviour).
+    cell_traction_stress_Pa: float = 0.0
+    cell_adhesion_area_frac: float = 0.08   # focal-adhesion area / projected footprint
+    # The cell's own series elasticity (stress fibres + adhesions), nN/um. On a
+    # granule stiffer than ~50 kPa this is the SOFT element, so it is what sets
+    # the stored strain energy that traction force microscopy reports.
+    cell_series_stiffness: float = 10.0
+
     # ── Cell migration ──
     cell_migration_speed: float = 5.0  # µm/h, random walk speed on granule surface
 
@@ -645,6 +662,7 @@ class GranuleSystem:
         self.energy_contact = 0.0
         self.energy_wall = 0.0
         self.energy_gravity = 0.0
+        self.energy_cell = 0.0
         self.energy_noise_expected = 0.0
         self.energy_delta = 0.0
         self.energy_work = 0.0
@@ -3521,7 +3539,7 @@ def cell_capacity(gs, i, p, A_cell=None):
     return int(round(float(gs.activity[i]) * n_full))
 
 
-def motor_clutch_force(E_kPa, p: Params, fa_maturity_val, nu=None, g=1.0):
+def motor_clutch_force(E_kPa, p: Params, fa_maturity_val, nu=None, g=1.0, F_adh=None):
     """
     Steady-state traction force per cell from the motor-clutch model.
 
@@ -3561,7 +3579,143 @@ def motor_clutch_force(E_kPa, p: Params, fa_maturity_val, nu=None, g=1.0):
     # Motor-clutch force with ligand gain
     F_mc = F_stall * (k_sub / (k_sub + g * k_opt)) * engagement * fa_maturity_val * g
 
-    return min(F_mc, p.F_max_per_cell)
+    cap = p.F_max_per_cell
+    if F_adh is not None and F_adh > 0.0:       # V3.6: the ADHESION's capacity
+        cap = min(cap, F_adh * g)
+    return min(F_mc, cap)
+
+
+def cell_substrate_stiffness(gs, p):
+    """Each granule's substrate spring at cell scale, nN/um (V3.6).
+
+    ``k = pi E a / (1 - nu^2)`` -- the identical expression `motor_clutch_force`
+    uses for its stiffness term, lifted out so the strain energy and the force
+    cannot disagree about what the cell is standing on.
+    """
+    N = gs.N
+    a_cell = p.cell_diameter / 2.0
+    nu = np.asarray(gs.nu_gran[:N], dtype=float)
+    return np.pi * np.asarray(gs.E_gran[:N], dtype=float) * a_cell / (1.0 - nu ** 2)
+
+
+def adhesion_force_ceiling(gs, p):
+    """Per-granule traction ceiling from stress x area, nN, AT g = 1 (V3.6).
+
+    The cell can only pull as hard as its adhesion can hold, and the adhesion is
+    a patch of the cell's footprint -- so the ceiling is ``sigma * A``, which
+    GROWS as the cell spreads rather than being a number chosen per run.
+    ``F_max_per_cell`` remains as an absolute backstop.
+
+    Returned at ``g = 1``; the caller multiplies by its own pair's Langmuir gain,
+    because ligand coverage is a property of the granule the cell is gripping and
+    the stress scales with engaged-bond density.
+
+    ``Pa * um^2 = 1e-12 N = 1e-3 nN``.
+
+    None when `cells.traction.stress_Pa` is 0, which is the V3.5 behaviour: the
+    absolute cap alone.
+    """
+    sigma = float(getattr(p, 'cell_traction_stress_Pa', 0.0) or 0.0)
+    if sigma <= 0.0 or gs.N == 0:
+        return None
+    frac = float(getattr(p, 'cell_adhesion_area_frac', 0.0) or 0.0)
+    if frac <= 0.0:
+        return None
+    eng = p.k_on_clutch / (p.k_on_clutch + p.k_off_clutch)
+    A = cell_projected_area(np.asarray(gs.spread_fraction[:gs.N], dtype=float),
+                            p.cell_diameter, p.cell_height_spread)
+    return sigma * eng * frac * A * 1e-3
+
+
+def cell_strain_energy(gs, p):
+    """Elastic energy stored in the cells' own elasticity, nN.um (V3.6).
+
+    A loaded cell is a spring in series with the substrate it grips:
+    ``1/k = 1/k_cell + 1/k_sub``, and a BRIDGING cell grips two, so its series
+    includes both granules. ``U = F^2 / 2k``.
+
+    This is the quantity traction force microscopy reports (usually in pJ;
+    1 pJ = 1000 nN.um), which is what makes it worth computing: it is a direct
+    comparison with experiment that the model did not previously offer. On a
+    granule stiffer than about 50 kPa the cell is the soft element, so the
+    number is set by `cells.traction.k_cell_nN_per_um` and barely moves with the
+    granule modulus -- which is itself a testable claim.
+
+    Costs one pass over the per-cell force arrays the force evaluation already
+    filled, and no kernel change.
+    """
+    N = gs.N
+    off = getattr(gs, 'cell_offset', None)
+    C = int(off[N]) if off is not None and len(off) > N else 0
+    k_cell = float(getattr(p, 'cell_series_stiffness', 0.0) or 0.0)
+    if C == 0 or k_cell <= 0.0:
+        return 0.0
+    k_sub = cell_substrate_stiffness(gs, p)
+    if not np.all(np.isfinite(k_sub)) or np.any(k_sub <= 0):
+        k_sub = np.maximum(k_sub, 1e-12)
+    gid = np.asarray(gs.cell_granule_id[:C], dtype=np.int64)
+    tgt = np.asarray(gs.cell_bridge_target[:C], dtype=np.int64)
+    F = np.sqrt(np.asarray(gs.cell_fx[:C]) ** 2 + np.asarray(gs.cell_fy[:C]) ** 2
+                + np.asarray(gs.cell_fz[:C]) ** 2)
+    inv = 1.0 / k_cell + 1.0 / k_sub[gid]
+    bridged = tgt >= 0
+    if np.any(bridged):
+        inv = inv + np.where(bridged, 1.0 / k_sub[np.where(bridged, tgt, 0)], 0.0)
+    return float(np.sum(0.5 * F ** 2 * inv))
+
+
+def traction_metrics(gs, p):
+    """What the cells are pulling with, and what they have stored (V3.6).
+
+    `cell_strain_energy_pJ` is directly comparable with a TFM measurement.
+    Two stresses, because the literature reports two and they differ by ~1/frac:
+
+    * `traction_stress_mean_Pa` is over the ADHESION area -- compare with
+      0.5-2 kPa mean and 2-5 kPa peak at focal adhesions (Balaban 2001,
+      Stricker 2011);
+    * `traction_stress_footprint_Pa` is over the whole footprint, which is what
+      a TFM map integrates -- compare with Gaudet 2003's ~300 Pa.
+
+    Quoting one against the other's number is the mistake this pair exists to
+    stop.
+    """
+    out = {'cell_strain_energy': 0.0, 'cell_strain_energy_pJ': 0.0,
+           'cell_strain_energy_per_cell_pJ': 0.0,
+           'traction_stress_mean_Pa': 0.0, 'traction_stress_footprint_Pa': 0.0,
+           'traction_ceiling_mean_nN': 0.0, 'n_cells_loaded': 0}
+    N = gs.N
+    off = getattr(gs, 'cell_offset', None)
+    C = int(off[N]) if off is not None and len(off) > N else 0
+    if C == 0:
+        return out
+    U = cell_strain_energy(gs, p)
+    out['cell_strain_energy'] = U
+    out['cell_strain_energy_pJ'] = U / 1000.0      # nN.um = 1e-15 J
+    F = np.sqrt(np.asarray(gs.cell_fx[:C]) ** 2 + np.asarray(gs.cell_fy[:C]) ** 2
+                + np.asarray(gs.cell_fz[:C]) ** 2)
+    loaded = F > 0.0
+    out['n_cells_loaded'] = int(np.sum(loaded))
+    frac = float(getattr(p, 'cell_adhesion_area_frac', 0.0) or 0.0)
+    if np.any(loaded) and frac > 0.0:
+        gid = np.asarray(gs.cell_granule_id[:C], dtype=np.int64)
+        A = cell_projected_area(np.asarray(gs.spread_fraction[:N], dtype=float),
+                                p.cell_diameter, p.cell_height_spread)[gid] * frac
+        good = loaded & (A > 0)
+        if np.any(good):
+            out['traction_stress_mean_Pa'] = float(np.mean(F[good] / A[good]) * 1e3)
+            # Over the whole footprint, which is what a TFM map integrates:
+            # ~10x lower, because focal adhesions are a small part of it.
+            out['traction_stress_footprint_Pa'] = float(
+                np.mean(F[good] / (A[good] / frac)) * 1e3)
+    # Per LOADED cell is the TFM-comparable figure (0.1-10 pJ for a fibroblast);
+    # the total is dragged down by the many cells carrying almost nothing.
+    if out['n_cells_loaded']:
+        out['cell_strain_energy_per_cell_pJ'] = (out['cell_strain_energy_pJ']
+                                                 / out['n_cells_loaded'])
+    ceil = adhesion_force_ceiling(gs, p)
+    if ceil is not None and ceil.size:
+        out['traction_ceiling_mean_nN'] = float(np.mean(ceil))
+    return out
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -5916,7 +6070,17 @@ def system_energy(gs, p, contacts):
     e_c = contact_potential_energy(contacts)
     e_w = wall_potential_energy(gs, p)
     e_g = gravity_potential_energy(gs, p)
-    return e_c + e_w + e_g, {'contact': e_c, 'wall': e_w, 'gravity': e_g}
+    # V3.6: the elastic energy the cells are holding. It is real stored energy in
+    # the system, so leaving it out made the audit charge it to the residual.
+    # Note it is NOT a potential of the granule positions alone -- a bridge is an
+    # actuator and changes its own rest length -- so including it does not make
+    # the system conservative. What it does is separate the RECOVERABLE part
+    # from the myosin work, and the myosin work is then what `energy_residual`
+    # measures, which is the quantity this model exists to report.
+    # Zero during packing (no cell has a force yet), so FIRE is untouched.
+    e_cell = cell_strain_energy(gs, p)
+    return (e_c + e_w + e_g + e_cell,
+            {'contact': e_c, 'wall': e_w, 'gravity': e_g, 'cell': e_cell})
 
 
 def _energy_audit(gs, p, mode, E0, parts, work):
@@ -5946,6 +6110,7 @@ def _energy_audit(gs, p, mode, E0, parts, work):
     gs.energy_contact = parts['contact']
     gs.energy_wall = parts['wall']
     gs.energy_gravity = parts['gravity']
+    gs.energy_cell = parts.get('cell', 0.0)             # V3.6
     gs.energy_noise_expected = active_noise_power(gs, p)
     prev = gs.energy_prev
     if prev is None:
@@ -6009,6 +6174,7 @@ def energy_metrics(gs):
         'energy_contact': float(getattr(gs, 'energy_contact', 0.0)),
         'energy_wall': float(getattr(gs, 'energy_wall', 0.0)),
         'energy_gravity': float(getattr(gs, 'energy_gravity', 0.0)),
+        'energy_cell': float(getattr(gs, 'energy_cell', 0.0)),
         'energy_delta': float(getattr(gs, 'energy_delta', 0.0)),
         'energy_work': float(getattr(gs, 'energy_work', 0.0)),
         'energy_residual': float(getattr(gs, 'energy_residual', 0.0)),

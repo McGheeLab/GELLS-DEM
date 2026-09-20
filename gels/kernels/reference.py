@@ -1410,6 +1410,7 @@ def compute_forces(gs: GranuleSystem, p: Params, rng):
     _law = law_code(p.traction_f_law)
     _rule = rule_code(p.traction_f_rule)
     _kappa = p.K_sigma_traction / p.sigma_ligand_max if p.sigma_ligand_max > 0 else 0.0
+    _adh = adhesion_force_ceiling(gs, p)   # V3.6: sigma x A ceiling, at g = 1
     _mu = float(getattr(p, 'friction_mu', 0.0))     # V3.1 Coulomb friction term
     _cell_adh = float(getattr(p, 'cell_contact_adhesion', 0.0))   # V3.2 cell grip at the contact
     _R_cap = float(getattr(p, 'curvature_R_cap', 0.0))            # V3.2 curvature cap
@@ -1499,10 +1500,12 @@ def compute_forces(gs: GranuleSystem, p: Params, rng):
                         gap = 0.0
                 F_cell_i = motor_clutch_force(
                     gs.E_gran[i], p, gs.fa_maturity[i], nu=gs.nu_gran[i],
-                    g=traction_gain(gs.f[i], gs.f[j], _law, _rule, p.traction_exponent, _kappa))
+                    g=traction_gain(gs.f[i], gs.f[j], _law, _rule, p.traction_exponent, _kappa),
+                    F_adh=(_adh[i] if _adh is not None else None))
                 F_cell_j = motor_clutch_force(
                     gs.E_gran[j], p, gs.fa_maturity[j], nu=gs.nu_gran[j],
-                    g=traction_gain(gs.f[j], gs.f[i], _law, _rule, p.traction_exponent, _kappa))
+                    g=traction_gain(gs.f[j], gs.f[i], _law, _rule, p.traction_exponent, _kappa),
+                    F_adh=(_adh[j] if _adh is not None else None))
                 n_ci, n_cj, _fac = _service_committed_bridges(
                     gs, i, j, gap, p, F_cell_i, F_cell_j, nx, ny, 0.0, F)
                 n_existing = n_ci + n_cj
@@ -1643,10 +1646,12 @@ def compute_forces(gs: GranuleSystem, p: Params, rng):
             # Motor-clutch force per cell (stiffness + FA maturity)
             F_cell_i = motor_clutch_force(
                 gs.E_gran[i], p, gs.fa_maturity[i], nu=gs.nu_gran[i],
-                g=traction_gain(gs.f[i], gs.f[j], _law, _rule, p.traction_exponent, _kappa))
+                g=traction_gain(gs.f[i], gs.f[j], _law, _rule, p.traction_exponent, _kappa),
+                F_adh=(_adh[i] if _adh is not None else None))
             F_cell_j = motor_clutch_force(
                 gs.E_gran[j], p, gs.fa_maturity[j], nu=gs.nu_gran[j],
-                g=traction_gain(gs.f[j], gs.f[i], _law, _rule, p.traction_exponent, _kappa))
+                g=traction_gain(gs.f[j], gs.f[i], _law, _rule, p.traction_exponent, _kappa),
+                F_adh=(_adh[j] if _adh is not None else None))
 
             # 1) Service committed bridges (apply force with maturity ramp)
             n_ci, n_cj, _fac = _service_committed_bridges(
@@ -1797,6 +1802,7 @@ def compute_forces_3d(gs: GranuleSystem, p: Params, rng):
     _law = law_code(p.traction_f_law)
     _rule = rule_code(p.traction_f_rule)
     _kappa = p.K_sigma_traction / p.sigma_ligand_max if p.sigma_ligand_max > 0 else 0.0
+    _adh = adhesion_force_ceiling(gs, p)   # V3.6: sigma x A ceiling, at g = 1
     _mu = float(getattr(p, 'friction_mu', 0.0))     # V3.1 Coulomb friction term
     _cell_adh = float(getattr(p, 'cell_contact_adhesion', 0.0))   # V3.2 cell grip at the contact
     _R_cap = float(getattr(p, 'curvature_R_cap', 0.0))            # V3.2 curvature cap
@@ -1884,10 +1890,12 @@ def compute_forces_3d(gs: GranuleSystem, p: Params, rng):
                     if gap < 0: gap = 0.0
                 F_cell_i = motor_clutch_force(
                     gs.E_gran[i], p, gs.fa_maturity[i], nu=gs.nu_gran[i],
-                    g=traction_gain(gs.f[i], gs.f[j], _law, _rule, p.traction_exponent, _kappa))
+                    g=traction_gain(gs.f[i], gs.f[j], _law, _rule, p.traction_exponent, _kappa),
+                    F_adh=(_adh[i] if _adh is not None else None))
                 F_cell_j = motor_clutch_force(
                     gs.E_gran[j], p, gs.fa_maturity[j], nu=gs.nu_gran[j],
-                    g=traction_gain(gs.f[j], gs.f[i], _law, _rule, p.traction_exponent, _kappa))
+                    g=traction_gain(gs.f[j], gs.f[i], _law, _rule, p.traction_exponent, _kappa),
+                    F_adh=(_adh[j] if _adh is not None else None))
                 n_ci, n_cj, _fac = _service_committed_bridges(
                     gs, i, j, gap, p, F_cell_i, F_cell_j, nv[0], nv[1], nv[2], F)
                 n_existing = n_ci + n_cj
@@ -2004,10 +2012,12 @@ def compute_forces_3d(gs: GranuleSystem, p: Params, rng):
 
             F_cell_i = motor_clutch_force(
                 gs.E_gran[i], p, gs.fa_maturity[i], nu=gs.nu_gran[i],
-                g=traction_gain(gs.f[i], gs.f[j], _law, _rule, p.traction_exponent, _kappa))
+                g=traction_gain(gs.f[i], gs.f[j], _law, _rule, p.traction_exponent, _kappa),
+                F_adh=(_adh[i] if _adh is not None else None))
             F_cell_j = motor_clutch_force(
                 gs.E_gran[j], p, gs.fa_maturity[j], nu=gs.nu_gran[j],
-                g=traction_gain(gs.f[j], gs.f[i], _law, _rule, p.traction_exponent, _kappa))
+                g=traction_gain(gs.f[j], gs.f[i], _law, _rule, p.traction_exponent, _kappa),
+                F_adh=(_adh[j] if _adh is not None else None))
 
             # 1) Service committed bridges (apply force with maturity ramp)
             n_ci, n_cj, _fac = _service_committed_bridges(
@@ -3032,6 +3042,7 @@ def compute_metrics(gs, p, phi_f, phi_i, phi_v, t, forces, phi_s=None):
     m.update(projection_metrics(gs))            # V3.2: is the rail or the contact law in charge?
     m.update(energy_metrics(gs))                # V3.5: is the force law a gradient?
     m.update(substep_metrics(gs))               # V3.6: what the substep controller did
+    m.update(traction_metrics(gs, p))           # V3.6: what the cells pull with, and store
     ar_mean = float(np.mean(np.maximum(gs.a, gs.b) /
                             np.minimum(gs.a, gs.b))) if gs.N > 0 else 1.0
     phi_rcp = rcp_fraction_superellipsoid(ar_mean)
