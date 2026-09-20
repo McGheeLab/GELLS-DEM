@@ -6,10 +6,13 @@
 is a 2D/3D overdamped particle dynamics simulator for modelling cell-driven rearrangement
 of hydrogel granular scaffolds. The primary simulation engine is `gels/engine.py`.
 
-**Current version: V3.8 — all three phases landed. See `CodeLog/Updates/CHANGELOG.md`.**
+**Current version: V3.9 (open). V3.3–V3.8 all landed in 18–20 Sep 2026 — see
+`CodeLog/Updates/REVIEW_V3.3-V3.8.md` for the two-day review, and
+`CodeLog/Updates/CHANGELOG.md` for the per-version detail.**
 
-`CodeLog/Architecture/ARCHITECTURE.md` and `CodeLog/Readme/README.md` were swept for
-V3.6 and are current. This file remains the authority on defaults and *why* they are
+`CodeLog/Architecture/ARCHITECTURE.md` was swept for V3.6;
+`CodeLog/Architecture/MATHEMATICAL_MODEL.md` and `CodeLog/Readme/README.md` are current
+to V3.8. This file remains the authority on defaults and *why* they are
 what they are; the architecture document is the authority on shape and data flow.
 
 **Runs are local only.** HPC execution was retired in V2.7; simulations are driven
@@ -121,7 +124,7 @@ GELS/
 │   ├── Paper/                   # Publication manuscript (LaTeX)
 │   ├── Readme/                  # README documents
 │   ├── References/              # Literature references
-│   └── Updates/                 # Changelog / update log
+│   └── Updates/                 # CHANGELOG.md + REVIEW_V3.3-V3.8.md (two-day review)
 ├── old code/                    # RETIRED (V2.7) — archived, imports NOT updated
 │   ├── hpc/                     # SLURM templates, Alex.json, sync_results.py
 │   ├── run_all_trials.py        # Batch trial runner (local / SLURM)
