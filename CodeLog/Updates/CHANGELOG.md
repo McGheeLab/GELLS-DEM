@@ -14,6 +14,86 @@ Plan: `CodeLog/ClaudesPlan/3.6.md`. Two things the engine models but the solver
 never feels, and they are the same defect twice: a substrate the force law knows
 about and the numerics never asks about.
 
+### Phase 5 - `gels/convergence.py`: has the run arrested?
+
+New `gels/convergence.py`, ported from `robotsim/code/convergence.py`. It
+consumes the flat metrics dict and a position array and imports nothing from
+`gels.engine`, so `pipeline/`, `tests/` and the engine all use the same code --
+which is what makes the shadow harness's calibration valid live.
+
+**The design claim, measured rather than asserted.** Coarsening slows as a power
+law `t^-alpha`, and a flatness detector on FIXED windows fires on it -- stopping
+a run that is still evolving. Proportional windows (`[t/2, 3t/4)` against
+`[3t/4, t]`) see a change that decays one power of `t` more slowly.
+
+The usual phrasing -- "a power law never goes flat under proportional windows" --
+is **too strong**, and measuring it gives the honest version:
+
+| `x(t) = 1 - 0.5 t^-alpha` | proportional first passes | fixed window goes flat |
+|---|---|---|
+| alpha = 0.3 | **t = 635 h** | t = 58 h |
+| alpha = 0.5 | t = 203 h | t = 50 h |
+
+A GELS run is 24-72 h. So a fixed-window detector would falsely stop a still
+coarsening run INSIDE it, and the proportional one does not come near -- an 11x
+margin at alpha = 0.3. That ratio is what the tests pin, with a control that
+shows the window SHAPE is doing the work rather than the tolerances.
+
+**Signals.** Five flatness tests -- path length, `n_bridges`, `gran_lf_func`,
+(`demix_phi_loc`, `n_contacts_if/n_contacts`), `F_mean` -- and two guards.
+`gran_lf_func`, **not** `func_lf`: the latter is `scipy.ndimage.label` on a tanh
+field, so it moves with the interface halo and with `Ngrid` and its flatness is
+partly a rendering artefact.
+
+**Path length, because displacement cannot do it.** `disp_func` is NET
+displacement and cancels under creep: a bed churning in place reads the same as
+one that has stopped. The monitor sums `|dx|` between SAVED frames. Save
+resolution is deliberate -- it makes the live detector and the shadow harness
+compute the IDENTICAL signal. Flat if **quiet or steady**: a prestressed bed can
+sustain a constant-rate creep that never changes its structure, and steady
+residual motion with every structural signal flat is converged, while real
+coarsening shows a DECAYING rate and still blocks.
+
+**Two guards that refuse rather than pass.** A constant division rate is not a
+steady state however flat everything else looks. And the compaction guard is
+`compaction_func >= 0.97` AND `|d phi_loc_func|` small -- at the ceiling *and*
+not still rising -- which needs `output.metrics_laguerre`; without those keys the
+monitor **declines to converge** rather than quietly dropping a guard.
+`compaction_ratio` is not a substitute: it is halo-inflated ~1.5x, so a 0.97
+threshold against it means nothing.
+
+**Two ways it would silently never fire, both now errors.** `validate()` refuses
+`convergence.enable` without `metrics_laguerre`, and refuses
+`save_every_h > t_min_h/8` -- the windows are quarters of `t`, so with coarser
+saves the detector never has two rows per window and simply never decides.
+
+**Resume.** `history.json` carries no positions, so the path-length signal
+cannot be reconstructed from it. The monitor persists its own row buffer to
+`convergence.json` and a resumed run re-ingests it, so the proportional windows
+continue instead of restarting.
+
+**Observer composition.** `CompositeObserver` runs the detector and the live
+viewer on one run. `on_step` **or-accumulates and does not short-circuit** --
+`any(genexpr)` would stop calling children after the first `True` and leave the
+viewer's pause loop undrained. `run()` now prefers the observer's `stop_reason`,
+so `metadata.json` distinguishes `converged` from a viewer stop.
+
+**`pipeline/shadow_check.py`** replays finished runs through the identical code
+and reports `t_stop`, `saved`, `damage` (how much `gran_lf_func` /
+`phi_loc_func` / `n_bridges` would have moved after the stop) and -- not in
+robotsim's version, and the most useful column -- **`blocking`**, the last
+signal to fail. `--sweep NAME=v1,v2,...` prints the saved-vs-damage frontier.
+Runs predating the Laguerre metrics are reported as **not calibratable** rather
+than scored with a guard missing.
+
+Off by default. New `Params`: `conv_enable`, `conv_shadow`, `conv_t_min_h`; new
+config section `convergence`. The dozen tolerances are module constants in
+`gels/convergence.py` with an `overrides` escape hatch, because they are
+calibrated together by the sweep rather than chosen one at a time. New metric
+keys (13, constant set on every frame so `csv.DictWriter` cannot break):
+`conv_pass`, `conv_converged`, `conv_streak_t0`, `conv_path_*`, `conv_d*`,
+`conv_div`, `conv_compaction`. New: `tests/test_convergence.py` (28 tests).
+
 ### Phase 4 - `cells.stacking`: cells crawl on cells
 
 Carried from the V3.3 plan's Phase 5, whose analysis stood.

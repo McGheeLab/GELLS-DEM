@@ -325,6 +325,21 @@ class Dynamics:
 
 
 @dataclass
+class Convergence:
+    """V3.6: stop a run that has stopped evolving.
+
+    Off by default. Calibrate with `pipeline/shadow_check.py` against finished
+    runs BEFORE enabling -- every stop writes a restart-complete frame, so a
+    wrong tolerance costs compute, never data. The dozen tolerances are module
+    constants in `gels/convergence.py`, not fields: they are calibrated together
+    by the shadow sweep, not chosen one at a time.
+    """
+    enable: bool = _P.conv_enable
+    shadow: bool = _P.conv_shadow      # evaluate and record, never stop
+    t_min_h: float = _P.conv_t_min_h   # never stop before this
+
+
+@dataclass
 class Packing:
     gap_um: float = _P.packing_gap
     settle_steps: int = _P.packing_settle_steps
@@ -403,6 +418,7 @@ class Setup:
     cells: Cells = field(default_factory=Cells)
     contact: Contact = field(default_factory=Contact)
     dynamics: Dynamics = field(default_factory=Dynamics)
+    convergence: Convergence = field(default_factory=Convergence)
     packing: Packing = field(default_factory=Packing)
     time: Time = field(default_factory=Time)
     output: Output = field(default_factory=Output)
@@ -559,6 +575,9 @@ FLAT_MAP = [
     ('dynamics.substep_target', 'dynamics_substep_target'),
     ('dynamics.substep_max', 'dynamics_substep_max'),
     ('dynamics.outlier_speed', 'dynamics_outlier_speed'),
+    ('convergence.enable', 'conv_enable'),
+    ('convergence.shadow', 'conv_shadow'),
+    ('convergence.t_min_h', 'conv_t_min_h'),
     ('packing.gap_um', 'packing_gap'),
     ('packing.settle_steps', 'packing_settle_steps'),
     ('packing.relax_substeps', 'packing_relax_substeps'),
@@ -1081,6 +1100,23 @@ def validate(setup: Setup) -> None:
         errs.append('dynamics.substep_target must be in (0, 10]')
     if int(setup.dynamics.substep_max) < 1:
         errs.append('dynamics.substep_max must be at least 1')
+    # V3.6 convergence: two ways it would silently never fire, both errors.
+    if setup.convergence.enable or setup.convergence.shadow:
+        if not setup.output.metrics_laguerre:
+            errs.append('convergence.enable/shadow needs output.metrics_laguerre: the '
+                        'compaction guard is compaction_func = phi_loc_func / phi_RCP, and '
+                        'compaction_ratio is halo-inflated ~1.5x so a 0.97 threshold '
+                        'against it is meaningless')
+        t_min = float(setup.convergence.t_min_h)
+        save = float(setup.time.save_every_h)
+        if save > t_min / 8.0:
+            errs.append(f'convergence needs save_every_h <= t_min_h/8 '
+                        f'({t_min / 8.0:g} h here): the proportional windows are quarters '
+                        f'of t, so with fewer rows the detector never has two per window '
+                        f'and SILENTLY never fires')
+        if float(setup.time.t_total_h) < t_min:
+            errs.append('convergence.t_min_h is beyond time.t_total_h: the detector can '
+                        'never fire')
     if not (0.0 <= float(setup.cells.stacking.f_cell_cell) <= 1.0):
         errs.append('cells.stacking.f_cell_cell must be in [0, 1]')
     if float(setup.cells.stacking.substrate_E_kPa) <= 0.0:
@@ -1445,6 +1481,11 @@ dynamics:
                                    # first, substep_budget_bound says the run is NOT dt-converged
   outlier_speed: 8.0               # cap a granule at this many x the median speed of its own
                                    # coordination class; 0 = off (V3.6)
+
+convergence:                       # V3.6: stop a run that has stopped evolving
+  enable: false                    # calibrate with pipeline/shadow_check.py BEFORE enabling
+  shadow: false                    # evaluate and record every signal, never stop
+  t_min_h: 24.0                    # never stop before this, whatever the signals say
 
 packing:
   gap_um: 0.0

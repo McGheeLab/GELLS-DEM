@@ -23,6 +23,7 @@ GELS/
 │   ├── lsdem.py                 # LS-DEM deformable particle module (Henzel 2026)
 │   ├── division.py              # Cell division pass (doubling time, contact inhibition) (V3.1)
 │   ├── presets.py               # Named bundles of setup overrides (V3.1)
+│   ├── convergence.py           # Has the run arrested? proportional-window detector (V3.6)
 │   ├── celltypes/               # Instantiable cell types, each value with its source (V3.6)
 │   │   ├── base.py              # Measured + CellType: geometry, traction, kinetics, report()
 │   │   ├── fibroblast.py        # the default; the only type through the literature review
@@ -56,6 +57,7 @@ GELS/
 │   ├── step4_postprocess.py     # Drive viz2 (default) and/or viz suites
 │   ├── step5_analysis.py        # Run analysis/ on one run → analysis/summary.json
 │   ├── live_view.py             # Watch a running step 3, replay a run, or dump PNGs (V3.0)
+│   ├── shadow_check.py          # Replay finished runs through the convergence detector (V3.6)
 │   ├── run_showcase.py          # Nine V3.0 showcase conditions in parallel + comparison (V3.0)
 │   ├── _common.py               # Step state, guards, Params/trial-JSON loading
 │   └── README.md                # Pipeline guide
@@ -425,6 +427,27 @@ percolation).
   rounded-cell ceiling that reaches 366 nN once spread, and the two ramp together. That
   makes `F_max_per_cell = 150–200 nN` a *reasonable* cap rather than an arbitrary one, and
   points at `adhesion_area_frac` as the knob. Off by default (`stress_Pa = 0`).
+- **Convergence detector** (V3.6): `convergence.enable` / `.shadow` / `.t_min_h`, all off by
+  default, in `gels/convergence.py` (imports nothing from `gels.engine`, so the engine, the
+  pipeline and the tests run the same code). **Proportional windows** — `[t/2, 3t/4)` against
+  `[3t/4, t]` — are the whole design: a coarsening power law goes flat under fixed windows
+  and a detector fires on a run that is still evolving. The usual claim that a power law
+  *never* goes flat under proportional windows is **too strong**; measured, `t^-0.3` first
+  passes at **635 h** against **58 h** for a fixed window. A run is 24–72 h, so the honest
+  statement is an 11× margin, not an absolute. Five flatness signals (path length,
+  `n_bridges`, `gran_lf_func` — **not** `func_lf`, which moves with the tanh halo and with
+  `Ngrid` — `demix_phi_loc`/`z_if`, `F_mean`) and two guards that **refuse rather than
+  pass**: a constant division rate is not a steady state, and without
+  `output.metrics_laguerre` the compaction guard has no input so the monitor declines to
+  converge at all. **Path length, not `disp_func`** — net displacement cancels under creep;
+  it is accumulated from SAVED frames so the live detector and `pipeline/shadow_check.py`
+  compute the identical signal. Flat if **quiet or steady**: a prestressed bed can creep at
+  a constant rate without changing structure. `validate()` errors on the two ways it would
+  silently never fire (no Laguerre; `save_every_h > t_min_h/8`). Resume reads
+  `convergence.json`, because history has no positions. **Calibrate with
+  `pipeline/shadow_check.py --sweep` before enabling** — every stop writes a
+  restart-complete frame, so a wrong tolerance costs compute, never data; its `blocking`
+  column names the last signal to fail.
 - **Cells crawl on cells** (V3.6): `cells.stacking.enabled` (default off). A cell's anchorage
   is the *same* motor-clutch expression evaluated on whatever it stands on — layer 0 on the
   granule, layer ≥ 1 on `substrate_E_kPa` / `substrate_poisson` with the ligand gain times a

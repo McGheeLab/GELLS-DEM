@@ -64,6 +64,100 @@ def as_observer(obj):
     raise TypeError("observer must be an Observer, a callable or None")
 
 
+class CompositeObserver(Observer):
+    """Several observers on one run, in order (V3.6).
+
+    ``on_step`` **or-accumulates and must not short-circuit**: ``any(genexpr)``
+    stops calling children after the first ``True``, which would leave the
+    viewer's pause loop undrained and desynchronise it from the engine. The
+    convergence monitor goes first and the viewer second, so a stop request is
+    still seen by the viewer.
+    """
+
+    def __init__(self, *children):
+        self.children = [as_observer(c) for c in children if c is not None]
+
+    def on_start(self, gs, p, seed, n_steps, resume_step):
+        for c in self.children:
+            c.on_start(gs, p, seed, n_steps, resume_step)
+
+    def on_step(self, s, t, gs, F, contacts):
+        stop = False
+        for c in self.children:
+            stop = bool(c.on_step(s, t, gs, F, contacts)) or stop   # no short circuit
+        return stop
+
+    def on_save(self, snap_idx, s, t, snap, m):
+        for c in self.children:
+            c.on_save(snap_idx, s, t, snap, m)
+
+    def on_end(self, hist, gs, reason):
+        for c in self.children:
+            c.on_end(hist, gs, reason)
+
+    @property
+    def stop_reason(self):
+        """The first child that owns a reason gets to name the stop."""
+        for c in self.children:
+            r = getattr(c, 'stop_reason', None)
+            if r:
+                return r
+        return None
+
+
+class ConvergenceObserver(Observer):
+    """Runs `gels.convergence.ConvergenceMonitor` on a live run (V3.6).
+
+    The path-length signal needs positions, which `history.json` does not carry,
+    so it is accumulated here from the SAVED frames -- the same resolution
+    `pipeline/shadow_check.py` replays at, deliberately, so a tolerance
+    calibrated in shadow is valid live.
+
+    The monitor's own row buffer is written to ``convergence.json`` in the run
+    directory, so a resumed run re-ingests its windows instead of restarting
+    them.
+    """
+
+    def __init__(self, monitor, out_dir=None):
+        self.monitor = monitor
+        self.out_dir = out_dir
+        self.records = []
+        self.stop_reason = None
+
+    def on_save(self, snap_idx, s, t, snap, m):
+        if snap is None:
+            return
+        import numpy as _np
+        xs = [snap['x'], snap['y']] + ([snap['z']] if 'z' in snap else [])
+        pos = _np.stack([_np.asarray(v, dtype=float) for v in xs], axis=1)
+        func = _np.asarray(snap.get('gtype', _np.zeros(len(pos)))) == 0
+        self.monitor.observe_positions(pos, func)
+        rec = self.monitor.update(self.monitor.row_from_metrics(t, m))
+        self.records.append(rec)
+        if isinstance(m, dict):
+            m.update({k: v for k, v in rec.items() if k != 'conv_blocking'})
+        if self.monitor.should_stop():
+            self.stop_reason = 'converged'
+        self._persist()
+
+    def on_step(self, s, t, gs, F, contacts):
+        return self.monitor.should_stop()
+
+    def _persist(self):
+        if not self.out_dir:
+            return
+        import json
+        import os
+        from gels.convergence import COLS
+        try:
+            with open(os.path.join(self.out_dir, 'convergence.json'), 'w',
+                      encoding='utf-8') as fh:
+                json.dump({'rows': [dict(zip(COLS, r)) for r in self.monitor.rows],
+                           'status': self.monitor.status()}, fh, default=float)
+        except OSError:
+            pass            # a full disk must never kill the run
+
+
 class RecordingObserver(Observer):
     """Counts callbacks (used by tests); optionally stops at a given step."""
 

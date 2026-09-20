@@ -181,6 +181,15 @@ class Params:
     # the stored strain energy that traction force microscopy reports.
     cell_series_stiffness: float = 10.0
 
+    # ── Convergence detector (V3.6) ──
+    # Off by default. Calibrate with `pipeline/shadow_check.py` against finished
+    # runs BEFORE enabling: every stop writes a restart-complete frame, so a
+    # wrong tolerance costs compute, never data. `conv_shadow` evaluates and
+    # records everything and never requests a stop.
+    conv_enable: bool = False
+    conv_shadow: bool = False
+    conv_t_min_h: float = 24.0
+
     # ── Cells standing on cells (V3.6) ──
     # A cell's anchorage is the SAME motor-clutch expression evaluated on
     # whatever it stands on. Layer 0 gets the granule's modulus, Poisson ratio
@@ -7628,6 +7637,26 @@ def _snapshot_dict(gs, F, pf, pi, pv, contacts):
     return snap
 
 
+def _load_convergence_rows(out_dir):
+    """The monitor's own row buffer from a previous run in this directory (V3.6).
+
+    `history.json` has no positions, so the path-length signal cannot be
+    reconstructed from it -- the monitor persists its buffer instead, and this
+    is what a resumed run reads back so its proportional windows continue rather
+    than restarting.
+    """
+    import json
+    import os
+    path = os.path.join(out_dir or '', 'convergence.json')
+    if not out_dir or not os.path.exists(path):
+        return []
+    try:
+        with open(path, encoding='utf-8') as fh:
+            return json.load(fh).get('rows', [])
+    except (OSError, ValueError):
+        return []
+
+
 def run(p=None, seed=None, observer=None):
     """Run a simulation.
 
@@ -7714,6 +7743,24 @@ def run(p=None, seed=None, observer=None):
         from gels.io.writer import SnapshotWriter
         writer = SnapshotWriter(depth=getattr(p, 'perf_io_queue_depth', 2),
                                 compresslevel=getattr(p, 'perf_io_compresslevel', 1))
+    # V3.6: the convergence monitor is an observer, composed with whatever the
+    # caller passed (the live viewer, typically). Detector first so the viewer
+    # still sees the step on which the run stops.
+    if getattr(p, 'conv_enable', False) or getattr(p, 'conv_shadow', False):
+        from gels.convergence import ConvergenceMonitor
+        from gels.live.observer import CompositeObserver, ConvergenceObserver
+        _mon = ConvergenceMonitor(enable=p.conv_enable, shadow=p.conv_shadow,
+                                  t_min_h=p.conv_t_min_h,
+                                  mean_r=float(np.mean(gs.r[:gs.N])) if gs.N else 20.0)
+        _prev = _load_convergence_rows(output_dir)
+        if _prev:
+            _mon.load_rows(_prev)
+        _conv_obs = ConvergenceObserver(_mon, out_dir=output_dir if p.save_data else None)
+        observer = CompositeObserver(_conv_obs, observer) if observer is not None else _conv_obs
+
+    # NOTE the monitor is attached ABOVE this line on purpose: the snapshot
+    # dict is only built when someone wants it, and the detector needs the
+    # positions for its path-length signal.
     keep_snap_dicts = bool(p.perf_keep_snaps_in_memory) or observer is not None
 
     def save(t, F, contacts=None):
@@ -7837,7 +7884,9 @@ def run(p=None, seed=None, observer=None):
 
             # V3.0: observer may request a graceful stop
             if observer is not None and observer.on_step(s, t, gs, F, contacts):
-                stop_reason = 'stopped'
+                # V3.6: let the observer name it, so metadata distinguishes
+                # `converged` from a viewer stop.
+                stop_reason = getattr(observer, 'stop_reason', None) or 'stopped'
                 break
     except KeyboardInterrupt:
         # V3.0: Ctrl+C keeps what was computed instead of losing the run
