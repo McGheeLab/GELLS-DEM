@@ -339,22 +339,79 @@ where $v_{\text{mig}}$ is the migration speed ($\mu$m/h).
 
 ### 3.1 Stress Tensor (Love-Weber)
 
-The volume-averaged Cauchy stress tensor for the granular assembly is computed via the
-Love-Weber formula:
+Implemented in `gels/stress.py` (V3.7) and reported every frame as `P_vir`,
+`P_contact`, `P_active`. The volume-averaged Cauchy stress is
 
-$$\sigma_{\alpha\beta} = \frac{1}{V} \sum_{\text{contacts}\; c} f_\alpha^c \, \ell_\beta^c$$
+$$\sigma_{\alpha\beta} = \frac{1}{V} \sum_{\text{interactions}\; c} f_\alpha^c \, \ell_\beta^c$$
 
-where $f_\alpha^c$ is the $\alpha$-component of the contact force and
-$\ell_\beta^c = x_\beta^j - x_\beta^i$ is the branch vector connecting the centers of
-the two granules in contact. The summation runs over all contacts within the averaging
-volume $V$.
+summed **once per interaction**, with $f^c$ the force on body $A$ and
+$\ell^c = x^A - x^B$ the branch vector, the *same* body playing $A$ in both factors.
+The convention is **compression positive** (the granular convention, not the
+solid-mechanics tension-positive one), and it then follows from the physics with no
+further choice:
+
+* a repulsive contact has $f$ along $+\hat n$ on $j$ and $\ell = x^j - x^i$ also along
+  $+\hat n$, so $\mathrm{tr}\,\sigma > 0$ — compression;
+* a **contracting cell bridge** pulls its host $g_i$ toward its target $g_j$, so $f$ is
+  along $+\hat n$ on $g_i$ while $\ell = x^{g_i} - x^{g_j}$ is along $-\hat n$, and
+  $\mathrm{tr}\,\sigma < 0$ — tension. A bridge *relieves* the compression the contacts
+  carry.
+
+The pressure is $P = \mathrm{tr}(\sigma)/d$ with $d$ the spatial dimension — **2 in
+2D**, and likewise the deviator is taken in $d$ dimensions. Taking either in the $3\times3$
+zero-padded embedding gives an isotropic 2D state a spurious $q/p = 1/\sqrt3 = 0.577$.
 
 The stress admits a decomposition into passive and active contributions:
 
 $$\boldsymbol{\sigma} = \boldsymbol{\sigma}^{\text{contact}} + \boldsymbol{\sigma}^{\text{active}}$$
 
-where $\boldsymbol{\sigma}^{\text{contact}}$ arises from Hertz, friction, and adhesion
-forces, and $\boldsymbol{\sigma}^{\text{active}}$ arises from cell traction bridges.
+where $\boldsymbol{\sigma}^{\text{contact}}$ arises from JKR contact, friction and
+adhesion, and $\boldsymbol{\sigma}^{\text{active}}$ from cell traction bridges.
+`stress_active_frac` $= |P_{\text{active}}|/(|P_{\text{contact}}|+|P_{\text{active}}|)$
+is the share of the bed's stress the cells are generating.
+
+#### 3.1.1 Validity: what Love-Weber does and does not assume
+
+Love-Weber is **exact for this model**, and it is worth saying why, because the formula
+is often quoted as a rigid-particle result. The particle-centred form
+$\sigma = \tfrac1V\sum_p\sum_{c\in p} f^c\otimes(x^c-x^p)$ telescopes to the
+branch-vector form *whatever the contact point is*, so a finite contact patch does not
+bias it; the Christoffersen–Mehrabadi–Nemat-Nasser (1981) terms beyond it — an
+unbalanced-moment term and a centripetal one — are **inertial**, and GELS is overdamped,
+so both vanish identically. Uniform gravity adds nothing either, since
+$\int_{V_p}(x-x^p)\,dV = 0$ about the centroid.
+
+What is not exact at large deformation is the layer *underneath*: Hertz and JKR are
+small-strain contact theories, valid while the contact patch is small against the
+particle. The engine therefore measures the flag rather than assuming it:
+
+$$\text{stress\_patch\_p95} = \mathrm{p95}\!\left[\,a^c / \min(r_i, r_j)\,\right]$$
+
+Measured: **0.05–0.12** on the 2D hydrogel beds (comfortable), but **0.22 at p95, 0.28
+max** on a gravity-loaded 3D bed — the edge of where the *contact law* should be
+trusted. That is a statement about the forces going into the stress, not about the
+stress formula.
+
+#### 3.1.2 Stress-force-fabric (upscaling)
+
+Rothenburg & Bathurst (1989). The deviatoric stress ratio of a granular assembly is
+carried by the anisotropy of the contact network and of the forces on it:
+
+$$q/p \;\simeq\; \tfrac12 (a_c + a_n + a_t) \quad (2\text{D}), \qquad
+  \tfrac25 (a_c + a_n + a_t) \quad (3\text{D})$$
+
+with $a_c$ from the fabric tensor $F_{ij} = \langle n_i n_j\rangle$ and $a_n$ from the
+normal-force-weighted fabric $\chi_{ij} = \langle f_n n_i n_j\rangle / \bar f_n$. Two
+scalars a continuum model can consume, instead of a full tensor.
+
+$a_t$ is **not** available — the tangential force is applied but not stored on the
+contact record — so `sff_closure` (predicted / measured $q/p$) is reported rather than
+quietly absorbed. Measured **0.82–1.04** across four reference beds, and the distance
+from 1 is the tangential plus higher-order share. The closure is checked against the
+**contact** stress, not the total: $a_c$ and $a_n$ are built from contact normals and
+contact forces, so the only shear they can explain is the contact network's own. Paired
+against the total it reads 0.15–0.64 once cells pull, which is a statement about the
+pairing, not the packing.
 
 ### 3.2 Strain Rate Tensor
 

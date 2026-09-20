@@ -8,6 +8,166 @@ MINOR tracks feature additions and improvements.
 
 ---
 
+## [V3.7] - 2026-09-19
+
+Plan: `CodeLog/ClaudesPlan/3.7.md`. A sweep of `viz/`, `viz2/` and `analysis/`
+for machinery stronger than the engine's, which ran in **two directions at
+once**: one thing the visualization code had that the engine did not, and three
+things it was computing for itself that the engine already knew and it was
+getting wrong.
+
+### Phase 1 - `gels/stress.py`: the Love-Weber virial stress
+
+Every mechanical number the engine reported was a **force** -- `F_mean`,
+`F_max`, `F_func_mean`. A force is extensive, so it cannot be compared with a
+measurement and two runs at different N cannot be compared with each other.
+`grep -rn "virial\|stress_tensor\|pressure" gels/` returned **zero hits**
+across all 130 metric keys; `analysis/coarse_grain.py` had a Love-Weber tensor,
+post-hoc and loop-based.
+
+New leaf module (numpy only at import, engine helpers deferred into the function
+bodies), so the engine, the pipeline and the tests share one implementation --
+the same arrangement as `convergence.py`, `laguerre.py` and `pore.py`.
+
+**The decomposition is the point.** `P_contact` is what the granular skeleton
+carries and `P_active` is what the cells generate; `stress_active_frac` is the
+share that is cell-derived. Measured on a soft-gel dish slice with fibroblasts:
+`P_contact` **+0.271 kPa**, `P_active` **-0.412 kPa**, `stress_active_frac`
+**0.60**. The sign is physics, not bookkeeping -- a contracting bridge puts the
+bed in **tension** and *relieves* the compression the contacts carry, while
+simultaneously raising `P_contact` (0.015 -> 0.271 kPa over 4 h) by pulling the
+granules into closer contact.
+
+**Conventions, both pinned by tests.** Compression positive (the granular
+convention, and robotsim's `P_vir`). `P = tr(sigma)/d` with **d = 2 in 2D**.
+
+**On the formulation** -- Love-Weber is quoted as a rigid-particle result, so
+why it is exact here:
+
+* the particle-centred form `sum_p sum_c f (x_c - x_p)` telescopes to the
+  branch-vector form **whatever the contact point is**, so a finite contact
+  patch does not bias it;
+* the Christoffersen-Mehrabadi-Nemat-Nasser (1981) terms beyond it are an
+  unbalanced-moment term and a centripetal one -- both **inertial**, hence
+  identically zero in an overdamped run;
+* uniform gravity adds nothing, since `int (x - x_p) dV = 0` about the centroid.
+
+What is *not* exact at large deformation is the layer underneath: Hertz and JKR
+are small-strain theories. So the flag is measured rather than assumed --
+`stress_patch_p95 = p95[a_contact / min(r_i, r_j)]` reads **0.05-0.12** on the
+2D hydrogel beds but **0.22 at p95, 0.28 max** on a gravity-loaded 3D bed, which
+is the edge of where the *contact law* should be trusted. That is a statement
+about the forces going into the stress, not about the stress formula.
+
+**Stress-force-fabric** (Rothenburg & Bathurst 1989) as the upscaling: `a_c`
+from the fabric tensor and `a_n` from the normal-force-weighted fabric, two
+scalars a continuum model can consume instead of a tensor. `a_t` is not
+available -- the tangential force is applied but never stored on the contact
+record -- so `sff_closure` is **reported rather than absorbed**. It lands at
+**0.82-1.04** across four reference beds, and its distance from 1 is the
+tangential plus higher-order share. Checked against the **contact** stress, not
+the total: `a_c` and `a_n` are built from contact normals and contact forces, so
+the only shear they can explain is the contact network's own. Paired against the
+total it reads 0.15-0.64 once cells pull, which is a fact about the pairing and
+not about the packing.
+
+Cost: one vectorised pass over columns the contact list already carries, so no
+flag. Measured ~6 % of a force evaluation, of which half was `bed_surface`, so
+`advance` records it only on the **final** substep -- at 256x subdivision the
+other 255 would be pure waste.
+
+`stress_volume` is the bed envelope when the top is free and the container
+otherwise, and is **reported as a metric** so the denominator is never hidden:
+`pmma_well` is about 1.4x headroom, which would dilute the pressure by that
+ratio.
+
+### Phase 2 - the contact columns the energy needs reach the snapshot
+
+`a_contact`, `E_star`, `W` and `kappa` were computed every step, held in
+`ContactSoA`, and **never serialized**. Without them nothing downstream *could*
+compute the engine's own JKR energy, which takes exactly `(a, R*, E*, W)` -- so
+three modules each guessed instead. Cost measured at about **+2 %** of a
+snapshot, since the contact block is ~5 % of the file.
+
+`gels.stress.snapshot_contact_energy` and `snapshot_cell_strain_energy` are the
+shared accessors, with `has_exact_contact_physics` so a pre-V3.7 run still plots
+and **says** it is on the fallback.
+
+### Phase 3 - the visualization suite uses the engine's physics
+
+`viz2/energy_stress.py`'s contact-energy field was **790x too large**, verified
+against a numerical `int F dd` (which the engine's `jkr_contact_energy` matches
+to **1.00000**). Three compounding errors:
+
+| | |
+|---|---|
+| missing the Pa -> nN/um^2 conversion (`E_star` is in Pa; every engine force expression carries an explicit `1e-3`) | x1000 |
+| Hertz prefactor `(2/5)` where integrating `F = (4/3) E* sqrt(R) d^{3/2}` gives `(8/15)` | x0.75 |
+| Hertz where the contact is JKR, at shallow overlap where most contacts live | x0.73 |
+
+and a fourth that is worse on a mixed bed: a global `p.E_modulus` ignores the
+per-species value and `contact.E_cap`. On the PMMA preset it assumes
+E* = 1.74e9 kPa where the stored per-pair value is 5.79e4 -- **3e4x**.
+
+The traction panel used `0.5 * |F| * bridge_length`, the work of dragging a
+granule the whole length of a bridge, which scales with how far apart the
+granules happen to be. It is now V3.6's `U = F^2/2k` with
+`1/k = 1/k_cell + 1/k_sub`, the quantity TFM reports.
+
+The six panels were in **four different unit systems** -- nN um (traction,
+frustration), nN um/h (friction, a *power*), um^-2 (osmotic, no energy scale at
+all) and 750 x nN um (contact) -- and `plot_energy_timeseries` summed all six on
+one axis labelled "Total Energy (nN*um)". The figure exists to show which mode
+dominates and what it plotted could not answer that. Now: every panel states its
+own units, the timeseries carries only the two genuine independent energies, and
+frustration is exactly the contact energy restricted to inert-involving pairs --
+an honest subset of the contact panel rather than a sixth mode double-counting
+it. Osmotic and interfacial are relabelled **indicators**; their coefficient
+`gamma = E_modulus * interface_width * 0.01` has no source, and inventing one is
+a modelling decision rather than an engineering fix.
+
+### Bug Fixes
+
+* **The deviator was taken in the 3x3 embedding** (found by verifying the SFF
+  identity, which is why it was worth verifying). A 2D stress is stored
+  zero-padded as `diag(P, P, 0)`; subtracting `tr/3` from *that* leaves
+  `diag(P/3, P/3, -2P/3)`, whose magnitude is `P/sqrt(3)`. So **every isotropic
+  2D state reported a shear of 0.577 P** that was invented entirely by the
+  padding. Three 2D beds read `q/p` = 0.579, 0.581 and 0.652 before the fix, the
+  first two being the artefact almost neat. Same class as `coarse_grain`
+  dividing the trace by 3 in 2D.
+* **`analysis/coarse_grain.py`'s active stress had the wrong sign.** It used
+  `l = x_target - x_host` for the cell term while using `l = x_j - x_i` for the
+  contact term, so cell contraction read as *adding* to the compression it
+  actually relieves -- inverting the one number the function exists to produce.
+* **Its `pressure` was doubly negated.** `sigma` was built with the
+  compression-positive pairing and then `p = -tr(sigma)/3` applied, so the
+  "Total pressure" curve came out negative for a bed in compression. Now
+  compression positive and equal to `P_vir`; the two agree to **0.13 %** on the
+  same frame, the residual being that a snapshot stores post-step positions
+  against the same step's contact forces.
+* **No minimum image in the branch vector.** A contact across a periodic face
+  got a branch vector nearly a box long, of the wrong sign, dominating the sum.
+* **`coarse_grain`'s contact reconstruction used Hertz + DMT** -- replaced by
+  JKR in V2.3 -- with a global modulus and sphere-only geometry. Removed; the
+  per-pair columns are on the snapshot now. `viz/stress.py`'s reconstruction
+  likewise moved to JKR.
+
+### Tests
+
+`tests/test_stress.py`, 21 tests. The load-bearing ones pin conventions, because
+a stress tensor is only useful if its sign and trace mean what the docstring
+says: an analytic single contact, compression positive, tension for a
+contracting bridge, the 2D trace, the 2D deviator, the minimum image, twin
+parity, and the isotropic identity `P = (Nc/V)<f_n |l|>/d` (which checks the
+trace convention and the volume by a route that never touches the tensor).
+
+Phases 1 and 2 add keys and arrays and change no trajectory, so
+`tests/test_identity.py` is green **without re-blessing** -- that is the
+checkpoint saying the new physics is inert.
+
+---
+
 ## [V3.6] - 2026-09-19
 
 Plan: `CodeLog/ClaudesPlan/3.6.md`. Two things the engine models but the solver

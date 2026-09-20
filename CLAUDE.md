@@ -6,7 +6,7 @@
 is a 2D/3D overdamped particle dynamics simulator for modelling cell-driven rearrangement
 of hydrogel granular scaffolds. The primary simulation engine is `gels/engine.py`.
 
-**Current version: V3.6 — all six phases landed. See `CodeLog/Updates/CHANGELOG.md`.**
+**Current version: V3.7 — all three phases landed. See `CodeLog/Updates/CHANGELOG.md`.**
 
 `CodeLog/Architecture/ARCHITECTURE.md` and `CodeLog/Readme/README.md` were swept for
 V3.6 and are current. This file remains the authority on defaults and *why* they are
@@ -28,6 +28,7 @@ GELS/
 │   ├── division.py              # Cell division pass (doubling time, contact inhibition) (V3.1)
 │   ├── presets.py               # Named bundles of setup overrides (V3.1)
 │   ├── convergence.py           # Has the run arrested? proportional-window detector (V3.6)
+│   ├── stress.py                # Love-Weber virial stress + SFF; snapshot energy accessors (V3.7)
 │   ├── celltypes/               # Instantiable cell types, each value with its source (V3.6)
 │   │   ├── base.py              # Measured + CellType: geometry, traction, kinetics, report()
 │   │   ├── fibroblast.py        # the default; the only type through the literature review
@@ -431,6 +432,64 @@ percolation).
   rounded-cell ceiling that reaches 366 nN once spread, and the two ramp together. That
   makes `F_max_per_cell = 150–200 nN` a *reasonable* cap rather than an arbitrary one, and
   points at `adhesion_area_frac` as the knob. Off by default (`stress_Pa = 0`).
+- **The engine reports a STRESS, not just a force** (V3.7, `gels/stress.py`).
+  Everything mechanical before this was extensive — `F_mean`, `F_max` — so it was
+  comparable to nothing. Love-Weber, **compression positive**, `P = tr(σ)/d` with
+  **d = 2 in 2D**, split into `P_contact` (what the skeleton carries) and `P_active`
+  (what the cells generate); `stress_active_frac` is the cell-derived share. **The sign
+  of `P_active` is physics**: a contracting bridge puts the bed in TENSION and relieves
+  the contacts' compression while simultaneously *raising* `P_contact` by pulling
+  granules together (0.015 → 0.271 kPa over 4 h on a dish slice, `P_active` −0.412,
+  frac 0.60). `analysis/coarse_grain.py` had this backwards — it used
+  `l = x_target − x_host` for the cell term and `l = x_j − x_i` for the contact term —
+  and doubly negated its `pressure`, so its "Total pressure" read negative for a bed in
+  compression. It now delegates and the two agree to 0.13 %.
+  **Love-Weber is exact for this model and it is worth knowing why**, since it is
+  usually quoted as a rigid-particle result: the particle-centred form
+  `Σ_p Σ_c f⊗(x_c − x_p)` telescopes to the branch-vector form *whatever the contact
+  point*, so a finite patch does not bias it, and the CMN (1981) terms beyond it are an
+  unbalanced-moment and a centripetal term — both **inertial**, hence identically zero
+  overdamped. What is NOT exact at large deformation is the layer underneath: Hertz/JKR
+  are small-strain theories. So **`stress_patch_p95` = p95[`a_contact`/min(r)] is
+  measured, not assumed** — 0.05–0.12 on the 2D beds, but **0.22 p95 / 0.28 max on a
+  gravity-loaded 3D bed**, the edge of where the contact law should be trusted. That is
+  a flag on the forces, not on the stress formula.
+  Recorded on the **final substep only** (~6 % of a force evaluation, half of it
+  `bed_surface`; at 256× the other 255 would be waste). `stress_volume` is the bed
+  envelope under a free top and is reported, because `pmma_well` is ~1.4× headroom.
+- **SFF is the upscaling** (V3.7, Rothenburg & Bathurst 1989): `fabric_a_c` from
+  `⟨n⊗n⟩` and `fabric_a_n` from the normal-force-weighted fabric — two scalars a
+  continuum model can consume instead of a tensor. **`a_t` is not on the contact
+  record**, so `sff_closure` is *reported rather than absorbed*: 0.82–1.04 across four
+  beds, and its distance from 1 is the tangential plus higher-order share. **Check it
+  against `sigma_contact`, never the total** — `a_c`/`a_n` are built from contact
+  normals and contact forces, so the only shear they can explain is the contact
+  network's own; paired with the total it reads 0.15–0.64 once cells pull.
+- **Take the deviator in d dimensions** (V3.7 bug, found by verifying the SFF identity).
+  A 2D stress is stored zero-padded as `diag(P, P, 0)`; subtracting `tr/3` from *that*
+  leaves `diag(P/3, P/3, −2P/3)`, magnitude `P/√3`. **Every isotropic 2D state reported
+  q/p = 0.577**, a shear invented by the padding — three beds read 0.579, 0.581, 0.652.
+  Same class as dividing the trace by 3 in 2D.
+- **The snapshot carries the contact law** (V3.7): `a_contact`, `E_star`, `W`, `kappa`
+  are now serialized (~+2 % of a snapshot). They were computed every step, held in
+  `ContactSoA` and never written, so nothing downstream *could* compute the engine's own
+  JKR energy — which takes exactly `(a, R*, E*, W)` — and `viz2/energy_stress.py`,
+  `viz/stress.py` and `analysis/coarse_grain.py` each fell back to Hertz with the global
+  `p.E_modulus`. That made the contact-energy field **790× too large** (×1000 for the
+  missing Pa→nN/µm² factor — `E_star` is in Pa and every engine force expression carries
+  an explicit `1e-3` — × 0.75 for a `(2/5)` prefactor where the integral gives `(8/15)`,
+  × 0.73 for Hertz-not-JKR), and on the PMMA preset assumed an E\* **3e4×** off because a
+  global modulus ignores per-species values and `contact_E_cap`. Use
+  `gels.stress.snapshot_contact_energy` / `snapshot_cell_strain_energy`;
+  `has_exact_contact_physics` tells you whether a run predates V3.7.
+- **The energy-mode figure's six panels were in four unit systems** (V3.7) — nN·µm
+  (traction, frustration), nN·µm/h (friction is a *power*), µm⁻² (osmotic has no energy
+  scale) and 750×nN·µm (contact) — and the timeseries summed all six on one axis labelled
+  "Total Energy". Now each panel states its units, the timeseries carries only the two
+  genuine independent energies, and frustration is the contact energy restricted to
+  inert-involving pairs (an honest subset, not a sixth mode double-counting it). Osmotic
+  and interfacial are **indicators**: `gamma = E_modulus * interface_width * 0.01` has no
+  source, and giving it one is a modelling decision, not an engineering fix.
 - **Convergence detector** (V3.6): `convergence.enable` / `.shadow` / `.t_min_h`, all off by
   default, in `gels/convergence.py` (imports nothing from `gels.engine`, so the engine, the
   pipeline and the tests run the same code). **Proportional windows** — `[t/2, 3t/4)` against

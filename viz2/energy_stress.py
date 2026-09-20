@@ -473,8 +473,18 @@ def plot_energy_modes(snaps, hist, p, indices=None, Ngrid=30, outdir=None,
     indices = select_indices(len(snaps), indices, n_panels=3)
     modes = ['traction', 'contact', 'friction', 'osmotic', 'frustration',
              'interfacial']
-    mode_labels = ['Cell Traction', 'Hertz/JKR Contact', 'Granular Friction',
-                   'Osmotic Pressure', 'Inert Frustration', 'Interfacial Tension']
+    # V3.7: each panel carries its own units. Three of these six are not
+    # energies at all -- friction is a dissipation RATE, and osmotic and
+    # interfacial have no energy scale (their coefficient is
+    # `E_modulus * interface_width * 0.01`, which has no source). They are
+    # informative maps and stay, but the figure no longer implies that the
+    # reader may compare their magnitudes.
+    mode_labels = ['Cell strain energy\n(nN*um)',
+                   'JKR contact energy\n(nN*um)',
+                   'Friction dissipation RATE\n(nN*um/h)',
+                   'Osmotic indicator\n(|grad phi_v|^2/phi_v, um^-2)',
+                   'Contact energy at inert pairs\n(nN*um, subset of panel 2)',
+                   'Interfacial indicator\n(arbitrary scale)']
     cmaps = ['Greens', 'Blues', 'Reds', 'Purples', 'YlOrBr', 'Oranges']
 
     per_snap = pmap(_energy_fields, [(snaps[si], p, Ngrid) for si in indices],
@@ -503,7 +513,8 @@ def plot_energy_modes(snaps, hist, p, indices=None, Ngrid=30, outdir=None,
             ax.set_xlim(0, p.Lx)
             ax.set_ylim(0, p.Ly)
 
-        fig.suptitle(f"Energy Mode Spatial Maps | t = {t:.1f} h",
+        fig.suptitle(f"Energy Mode Spatial Maps | t = {t:.1f} h"
+                     "   (panels are in DIFFERENT units -- see each title)",
                      fontsize=13, y=1.02)
         plt.tight_layout()
         figs.append(fig)
@@ -541,10 +552,13 @@ def _coarse_grained(args):
 
 def plot_energy_timeseries(snaps, hist, p, Ngrid=30, outdir=None, workers=None):
     """Total energy per mode vs time."""
-    modes = ['traction', 'contact', 'friction', 'osmotic', 'frustration',
-             'interfacial']
-    mode_labels = ['Cell Traction', 'Hertz/JKR', 'Friction',
-                   'Osmotic', 'Inert Frust.', 'Interfacial']
+    # V3.7: only the two genuine, independent energies go on the energy axis.
+    # Before this, a power (friction), a um^-2 indicator (osmotic), an
+    # unscaled one (interfacial) and a double count of the contact energy
+    # (frustration) were plotted on a single axis labelled 'Total Energy
+    # (nN*um)', which cannot answer the question the figure exists to ask.
+    modes = ['traction', 'contact']
+    mode_labels = ['Cell strain energy', 'JKR contact energy']
 
     times = [get_snap_time(hist, si) for si in range(len(snaps))]
     totals = {m: [] for m in modes}
@@ -565,8 +579,9 @@ def plot_energy_timeseries(snaps, hist, p, Ngrid=30, outdir=None, workers=None):
         ax.plot(t, totals[mode], '-', color=c, lw=2, label=label)
 
     ax.set_xlabel('Time (h)')
-    ax.set_ylabel('Total Energy (nN*um)')
-    ax.set_title('Energy Mode Evolution', fontweight='bold')
+    ax.set_ylabel('Total energy (nN*um)')
+    ax.set_title('Stored elastic energy: cells vs granule contacts',
+                 fontweight='bold')
     ax.legend(fontsize=9)
     ax.grid(True, alpha=0.2)
     ax.set_ylim(bottom=0)

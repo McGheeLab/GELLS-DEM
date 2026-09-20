@@ -148,21 +148,22 @@ def _tensor_to_3x3(t, D):
     return out
 
 
-def _von_mises(sigma):
-    """Von Mises equivalent stress from 3x3 stress tensor.
+def _von_mises(sigma, D=3):
+    """Von Mises equivalent stress, sqrt(3 J2), with J2 taken in D dimensions.
 
-    sigma_vm = sqrt(3/2 * s_ij s_ij) where s = sigma - (tr(sigma)/3)*I
+    V3.7: ``D`` is not optional in spirit. Taking the deviator in the 3x3
+    zero-padded embedding of a 2D tensor gives an isotropic 2D state a shear of
+    ``P/sqrt(3) = 0.577 P`` that is not there -- see `gels.stress._deviator`.
+    Delegated so there is one definition in the codebase.
     """
-    p = np.trace(sigma) / 3.0
-    s = sigma - p * np.eye(3)
-    return np.sqrt(1.5 * np.sum(s * s))
+    from gels.stress import _von_mises as _vm
+    return _vm(np.asarray(sigma), int(D))
 
 
-def _dev_magnitude(t):
-    """Magnitude of deviatoric part: sqrt(t_dev : t_dev / 2)."""
-    p = np.trace(t) / 3.0
-    dev = t - p * np.eye(3)
-    return np.sqrt(0.5 * np.sum(dev * dev))
+def _dev_magnitude(t, D=3):
+    """Magnitude of the deviatoric part, sqrt(J2), in D dimensions (V3.7)."""
+    from gels.stress import _dev_magnitude as _dm
+    return _dm(np.asarray(t), int(D))
 
 
 # ======================================================================
@@ -286,126 +287,112 @@ def _get_contacts(snap, p):
 
 
 def compute_stress_tensor(snap, p):
-    """Compute the Cauchy stress tensor from contact forces (Love-Weber).
+    """Cauchy stress from contact forces -- delegated to `gels.stress` (V3.7).
 
-    The stress tensor is decomposed into contributions from Hertzian contact
-    forces and cell bridging (active) forces.
+    This used to carry its own Love-Weber implementation. Three things were
+    wrong with it, and all three are fixed by having ONE implementation that
+    the engine, the pipeline and this module share:
 
-    Parameters
-    ----------
-    snap : dict
-        Snapshot dict with granule positions, forces, and (optionally)
-        per-contact arrays.
-    p : Params
-        Simulation parameters.
+      * **the active stress had the wrong sign.** It used
+        ``l = x_target - x_host`` for the cell term while using
+        ``l = x_j - x_i`` for the contact term. A contracting bridge pulls its
+        granules together -- tension -- so with the contact term's convention
+        it must be ``x_host - x_target``. As written, cell contraction read as
+        ADDING to the compression it actually relieves, which inverts the one
+        number this function exists to produce.
+      * **the pressure divided the trace by 3 even in 2D**, so every 2D
+        pressure was 2/3 of its value. (And the deviator was taken in the 3x3
+        embedding, which invents a shear of 0.577 P in an isotropic 2D state.)
+      * **no minimum image.** A contact across a periodic face got a branch
+        vector nearly a box long, which dominates the sum outright.
 
-    Returns
-    -------
-    dict
-        sigma_total : (3, 3) ndarray  -- total stress tensor (kPa)
-        sigma_contact : (3, 3) ndarray -- contact contribution (kPa)
-        sigma_active : (3, 3) ndarray  -- cell bridging contribution (kPa)
-        pressure : float  -- mean normal stress = -tr(sigma)/3 (kPa)
-        deviatoric_stress : (3, 3) ndarray -- sigma - pressure*I
-        von_mises : float  -- von Mises equivalent stress (kPa)
+    A fourth, which is why ``pressure`` changes sign: the old code built
+    ``sigma`` with the compression-positive pairing and THEN applied
+    ``p = -tr(sigma)/3``, so its "Total pressure" curve came out negative for a
+    bed in compression. That is not a convention, it is a double negation.
+    ``pressure`` is now compression positive and equal to the engine's
+    ``P_vir``, so the two can finally be plotted against each other.
+
+    The Hertz+DMT contact reconstruction is gone too: DMT was replaced by JKR
+    in V2.3, and since V3.7 the snapshot carries the per-pair ``E_star`` and
+    ``W``, so there is nothing left to guess.
     """
+    from gels.stress import virial_stress, _pressure, _von_mises, _deviator
+
     is_3d = _is_3d(snap, p)
-    D = 3 if is_3d else 2
-    V = _inner_volume(p, is_3d)
+    dim = 3 if is_3d else 2
+    gs = _snap_as_gs(snap, p)
+    contacts = _contacts_from_snap(snap)
+    sigma_total, parts = virial_stress(gs, p, contacts)
 
-    pos = _positions(snap, is_3d)
-    mask = _inner_mask(snap, p)
-
-    # --- Contact stress (Love-Weber) ---
-    ci, cj, cx, cy, cz, nx, ny, nz, F_normal, gtype_i, gtype_j = \
-        _get_contacts(snap, p)
-
-    sigma_contact = np.zeros((D, D))
-    sigma_active = np.zeros((D, D))
-
-    # Filter contacts: at least one granule in inner region
-    if len(ci) > 0:
-        contact_inner = mask[ci] | mask[cj]
-
-        for k in range(len(ci)):
-            if not contact_inner[k]:
-                continue
-
-            i, j = ci[k], cj[k]
-
-            # Force vector (contact normal * F_normal)
-            f = np.zeros(D)
-            if D == 3:
-                f[0] = F_normal[k] * nx[k]
-                f[1] = F_normal[k] * ny[k]
-                f[2] = F_normal[k] * nz[k]
-            else:
-                f[0] = F_normal[k] * nx[k]
-                f[1] = F_normal[k] * ny[k]
-
-            # Branch vector: center-to-center (i -> j)
-            l = pos[j, :D] - pos[i, :D]
-
-            # sigma_ab += f_a * l_b / V
-            sigma_contact += np.outer(f, l)
-
-    if V > 0:
-        sigma_contact /= V
-
-    # --- Active stress from cell bridges ---
-    # Reconstruct bridging forces from per-cell data if available
-    if 'cell_bridge_target' in snap and 'cell_fx' in snap:
-        cell_bt = snap['cell_bridge_target']
-        cell_fx = snap['cell_fx']
-        cell_fy = snap['cell_fy']
-        cell_fz = snap.get('cell_fz', np.zeros(len(cell_fx)))
-        cell_gid = snap['cell_granule_id']
-        cell_offset = snap.get('cell_offset', None)
-
-        # For each bridging cell, the force vector is cell_f and the branch
-        # vector goes from the host granule to the bridge target granule
-        bridging = cell_bt >= 0
-        bridge_indices = np.where(bridging)[0]
-
-        for ci_cell in bridge_indices:
-            gi = int(cell_gid[ci_cell])
-            gj = int(cell_bt[ci_cell])
-            if gi >= len(snap['x']) or gj >= len(snap['x']):
-                continue
-            if not (mask[gi] or mask[gj]):
-                continue
-
-            f = np.zeros(D)
-            f[0] = cell_fx[ci_cell]
-            f[1] = cell_fy[ci_cell]
-            if D == 3:
-                f[2] = cell_fz[ci_cell]
-
-            l = pos[gj, :D] - pos[gi, :D]
-            sigma_active += np.outer(f, l)
-
-        if V > 0:
-            sigma_active /= V
-
-    # Embed into 3x3
-    sigma_contact_3 = _tensor_to_3x3(sigma_contact, D)
-    sigma_active_3 = _tensor_to_3x3(sigma_active, D)
-    sigma_total = sigma_contact_3 + sigma_active_3
-
-    pressure = -np.trace(sigma_total) / 3.0
-    dev = sigma_total - (-pressure) * np.eye(3)  # dev = sigma - (tr/3)*I
-    # Correct: deviatoric = sigma - (tr(sigma)/3)*I
-    dev = sigma_total - (np.trace(sigma_total) / 3.0) * np.eye(3)
-    vm = _von_mises(sigma_total)
-
+    sigma_total = np.asarray(sigma_total)
+    sigma_contact = np.asarray(parts['contact'])
+    sigma_active = np.asarray(parts['active'])
+    pressure = _pressure(sigma_total, dim)          # compression positive
+    dev3 = np.zeros((3, 3))
+    d = _deviator(sigma_total, dim)
+    dev3[:dim, :dim] = d
     return {
         'sigma_total': sigma_total,
-        'sigma_contact': sigma_contact_3,
-        'sigma_active': sigma_active_3,
+        'sigma_contact': sigma_contact,
+        'sigma_active': sigma_active,
         'pressure': pressure,
-        'deviatoric_stress': dev,
-        'von_mises': vm,
+        'deviatoric_stress': dev3,
+        'von_mises': _von_mises(sigma_total, dim),
     }
+
+
+class _SnapGS:
+    """The handful of attributes `gels.stress` reads, backed by a snapshot."""
+
+    __slots__ = ('N', 'is_3d', 'mode', 'x', 'y', 'z', 'r', 'cell_offset',
+                 'cell_granule_id', 'cell_bridge_target', 'cell_fx', 'cell_fy',
+                 'cell_fz', 'fixed', 'r_bound')
+
+
+def _snap_as_gs(snap, p):
+    """Adapt a snapshot dict to the attribute set `virial_stress` reads."""
+    g = _SnapGS()
+    g.N = int(len(snap['x']))
+    g.is_3d = bool(_is_3d(snap, p))
+    g.mode = getattr(p, 'mode', '3D' if g.is_3d else '2D')
+    g.x = np.asarray(snap['x'], dtype=float)
+    g.y = np.asarray(snap['y'], dtype=float)
+    g.z = np.asarray(snap.get('z', np.zeros(g.N)), dtype=float)
+    g.r = np.asarray(snap['r'], dtype=float)
+    g.r_bound = np.asarray(snap.get('r_bound', snap['r']), dtype=float)
+    g.fixed = np.asarray(snap.get('fixed', np.zeros(g.N, dtype=bool)))
+    n_cells = int(len(snap.get('cell_fx', [])))
+    if n_cells:
+        g.cell_offset = np.asarray(snap.get(
+            'cell_offset', np.array([0, n_cells])), dtype=np.int64)
+        g.cell_granule_id = np.asarray(snap['cell_granule_id'], dtype=np.int64)
+        g.cell_bridge_target = np.asarray(snap['cell_bridge_target'], dtype=np.int64)
+        g.cell_fx = np.asarray(snap['cell_fx'], dtype=float)
+        g.cell_fy = np.asarray(snap['cell_fy'], dtype=float)
+        g.cell_fz = np.asarray(snap.get('cell_fz', np.zeros(n_cells)), dtype=float)
+    else:
+        g.cell_offset = np.zeros(g.N + 1, dtype=np.int64)
+        for nm in ('cell_granule_id', 'cell_bridge_target'):
+            setattr(g, nm, np.zeros(0, dtype=np.int64))
+        for nm in ('cell_fx', 'cell_fy', 'cell_fz'):
+            setattr(g, nm, np.zeros(0))
+    return g
+
+
+def _contacts_from_snap(snap):
+    """The stored per-contact records, as the list-of-dicts form."""
+    ci = np.asarray(snap.get('contact_i', np.zeros(0)), dtype=np.int64)
+    if ci.size == 0:
+        return []
+    n = ci.size
+    cj = np.asarray(snap['contact_j'], dtype=np.int64)
+    nx = np.asarray(snap.get('contact_nx', np.zeros(n)), dtype=float)
+    ny = np.asarray(snap.get('contact_ny', np.zeros(n)), dtype=float)
+    nz = np.asarray(snap.get('contact_nz', np.zeros(n)), dtype=float)
+    fn = np.asarray(snap.get('contact_F_normal', np.zeros(n)), dtype=float)
+    return [{'i': int(ci[k]), 'j': int(cj[k]), 'nx': nx[k], 'ny': ny[k],
+             'nz': nz[k], 'F_normal': fn[k]} for k in range(n)]
 
 
 # ======================================================================
@@ -480,7 +467,7 @@ def compute_strain_rate(snap, p):
 
     eps_3 = _tensor_to_3x3(eps_dot, D)
     vol_rate = np.trace(eps_3)
-    shear_rate = _dev_magnitude(eps_3)
+    shear_rate = _dev_magnitude(eps_3, D)
 
     return {
         'eps_dot': eps_3,
@@ -843,11 +830,13 @@ def coarse_grain_field(snap, p, quantity='stress', Ngrid=20):
     vm_flat = np.zeros(C)
     for c in range(C):
         t3 = _tensor_to_3x3(tensors[c], D)
-        pressure_flat[c] = -np.trace(t3) / 3.0
-        vm_flat[c] = _von_mises(t3)
+        # V3.7: /D, not /3 -- and compression positive, matching `P_vir` and
+        # `compute_stress_tensor`, which had the opposite sign until V3.7.
+        pressure_flat[c] = np.trace(t3) / D
+        vm_flat[c] = _von_mises(t3, D)
         if vol_sr is not None:
             vol_sr[c] = np.trace(t3)
-            shear_sr[c] = _dev_magnitude(t3)
+            shear_sr[c] = _dev_magnitude(t3, D)
 
     result = {
         'grid_x': gx_c,

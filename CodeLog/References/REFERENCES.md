@@ -1658,3 +1658,41 @@ Provides experimental context for GELLS-DEM parameter choices.
 | k_frust | 1.5·σ_cell | kPa | Inert frustration prefactor | §12 |
 | γ_surface | 2.5·σ_cell·(0.3+mismatch) | kPa·µm | Interfacial tension | §14, §12 |
 | η_eff | ~1 | kPa·h | Effective viscosity for compaction | §6, §15 |
+
+---
+
+## Granular stress: micromechanics and upscaling (added V3.7)
+
+**Weber, J. (1966).** *Recherches concernant les contraintes intergranulaires dans
+les milieux pulverulents.* Bulletin de Liaison des Ponts et Chaussees 20.
+The original branch-vector expression for the intergranular stress.
+
+**Christoffersen, J., Mehrabadi, M. M. & Nemat-Nasser, S. (1981).** *A
+micromechanical description of granular material behavior.* Journal of Applied
+Mechanics 48(2), 339-344.
+The statics-based derivation of the average stress tensor from contact forces and
+branch vectors. Used in GELS to justify `gels/stress.py`: for a STATIC assembly the
+CMN result reduces to the Love-Weber form, and the additional terms in the dynamic
+case -- an unbalanced-moment term and a centripetal term -- are inertial, so they are
+identically zero in an overdamped run. The particle-centred form telescopes to the
+branch-vector form regardless of where the contact point sits, so a finite contact
+patch does not bias the result either; what degrades at large deformation is the
+Hertz/JKR contact law feeding it, which is why `stress_patch_p95` is measured.
+
+**Rothenburg, L. & Bathurst, R. J. (1989).** *Analytical study of induced anisotropy
+in idealized granular materials.* Geotechnique 39(4), 601-614.
+The stress-force-fabric relation: the deviatoric stress ratio is carried by the
+anisotropy of the contact network (`a_c`) and of the normal and tangential contact
+forces (`a_n`, `a_t`), with `q/p ~ (a_c + a_n + a_t)/2` in 2D and `2(...)/5` in 3D.
+Implemented as the upscaling in `gels/stress.py`; GELS does not store the tangential
+force, so `sff_closure` is reported rather than absorbed and measures the missing
+share (0.82-1.04 across the reference beds).
+
+**Cantor, D., Azema, E., Preechawuttipong, I. et al.**  Work on the compaction of
+highly deformable particle assemblies (e.g. *Compaction model for highly deformable
+particle assemblies*, PRL 2020; *Three-dimensional compaction of soft granular
+packings*, Soft Matter 2022). Relevant to GELS because it establishes that the
+micromechanical (branch-vector) stress tensor remains the right object well beyond
+jamming for soft grains -- what changes is the statistics of branch vectors and
+contact facets, not the formula -- which is the basis for keeping Love-Weber here and
+flagging the contact-law regime separately.

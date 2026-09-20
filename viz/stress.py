@@ -261,11 +261,18 @@ def reconstruct_contacts(snap, p):
         if result is not None:
             _, overlap, nx, ny, nz, cx, cy, cz, R_eff = result
             if overlap > 0:
-                from gels.engine import hertz_contact_force
+                # V3.7: JKR, and the per-pair E*/W where the snapshot has them.
+                # The global `p.E_modulus` ignores per-species moduli and
+                # `contact.E_cap`; on the PMMA preset it is 3e4x the real
+                # per-pair value. This branch only runs when a snapshot has no
+                # stored contacts at all, so it is a last resort -- but it is
+                # now the same contact law the engine used, not Hertz.
+                from gels.engine import jkr_force_from_overlap
                 nu = getattr(p, 'poisson_ratio', 0.49)
                 E_star = (p.E_modulus * 1e3) / (2.0 * (1.0 - nu**2))
-                Fc = hertz_contact_force(E_star, R_eff, overlap)
-                A_contact = np.pi * R_eff * overlap
+                W_adh = float(getattr(p, 'W_adh_cc', getattr(p, 'W_adh_ff', 0.0)) or 0.0)
+                Fc, a_c = jkr_force_from_overlap(overlap, R_eff, E_star, W_adh)
+                A_contact = np.pi * a_c ** 2
                 contacts.append({
                     'i': int(i), 'j': int(j),
                     'cx': cx, 'cy': cy, 'cz': cz,

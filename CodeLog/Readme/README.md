@@ -37,6 +37,46 @@ over 24--72 hours.
 
 ---
 
+## What's New in V3.7
+
+The engine now reports a **stress**, not just a force.
+
+Everything mechanical it reported before — `F_mean`, `F_max` — was extensive, so it
+was comparable to nothing: not to a measurement, and not even to another run at a
+different N. `gels/stress.py` adds the Love-Weber virial stress in kPa, split into
+the part the granular skeleton carries and the part the cells are generating:
+
+```
+P_contact   +0.271 kPa      the skeleton
+P_active    -0.412 kPa      the cells  (negative = TENSION)
+stress_active_frac  0.60    the cell-derived share
+```
+
+The sign is the physics. A contracting bridge puts the bed in tension and *relieves*
+the compression the contacts carry — while simultaneously raising `P_contact`
+(0.015 → 0.271 kPa over 4 h) by pulling granules into closer contact.
+
+Alongside it, the **stress-force-fabric** decomposition (Rothenburg & Bathurst 1989):
+`fabric_a_c` and `fabric_a_n`, two scalars that say how much of the shear comes from
+the anisotropy of the contact network rather than from the forces on it — the form a
+continuum model can consume. `sff_closure` reports how much of `q/p` those two
+explain (0.82–1.04 measured), because the tangential force is not stored and pretending
+otherwise would be the easy mistake.
+
+And `stress_patch_p95` says when to stop believing any of it: Hertz and JKR are
+small-strain theories, and on a gravity-loaded 3D bed the contact patch reaches 22 % of
+the granule radius. That is a flag on the *contact law*, not on the stress formula —
+Love-Weber itself is exact for this model.
+
+**The visualization suite now uses the engine's physics rather than its own.** Three
+modules were each rebuilding the contact law from the global `E_modulus`, because the
+snapshot did not carry the per-pair values. It does now, and the correction is not
+subtle: the contact-energy field was **790× too large**, and on the PMMA preset the
+assumed stiffness was off by **3e4×**. The six-panel energy figure turned out to be
+plotting four different unit systems on one axis; each panel now states its own.
+
+See `CodeLog/Updates/CHANGELOG.md` for the full entry.
+
 ## What's New in V3.6
 
 Three things the engine modelled but the solver never *felt*, plus the machinery
