@@ -398,6 +398,39 @@ percolation).
   Related fix: `wall_contact_fraction` took the gap to the two **x** faces only in 3D, so it
   read 0.0 on a bed demonstrably resting on the floor; it now enumerates every face that is
   a wall and excludes the V3.1 free top in both dimensions.
+- **`dt` is a coupling interval, not an integration step** (V3.6).
+  `dynamics.substep` = `auto` (default) | `off` | `always`. `contact_semi_implicit` takes
+  `vel = F/(γ + dt·k)`: the fixed point is exact for any `dt`, which is what makes it
+  unconditionally stable, but the **rate** is wrong by `(1 + S)` with `S = dt·k/γ`. At the
+  shipped `dt = 0.5 h` on a cell-seeded bed **S averages 41 and reaches 88**, 90 % of
+  granules are above 1, and the 24 h answer is off by ~4× (`F_mean` 136 vs 29 nN,
+  `disp_func` 11 vs 48 µm) with `max_overlap_ratio` pinned at `0.150 ± 3e-16` — exactly
+  `max_overlap_frac`, i.e. on the geometric rail. `auto` therefore makes `dt` the interval at
+  which the run is *sampled* and advances the mechanics inside it in `n_sub` substeps sized
+  so `S ≈ dynamics.substep_target` (0.2). **A substep is an ordinary `step` with a smaller
+  `dt`** — everything inside is already a rate × dt (`1 − exp(−rate·dt)`, `+= dt`,
+  `speed·dt`, `sqrt(2γT/dt)`), so subdivision composes. **`auto` declines a passive run**,
+  and that is measured, not assumed: a gravity bed at `dt = 0.5` is within 0.05 % of
+  `dt = 0.005` because it ends *at* a fixed point, where a compaction run's whole answer is a
+  rate. **The controller is not the energy, deliberately**: where `dt` matters is exactly
+  where the V3.5 audit is invalid (bridges are actuators, so descent is not monotone), and
+  where the audit is exact `dt = 0.5` is already fine. `k` is already computed each step for
+  the semi-implicit denominator, so `k/γ` is free. Cost is `n_sub ×` the dynamics —
+  measured 93 s (2D, N=322), 11 min (3D spheres, N=3215), 29 min (3D shapes) for 72 h at
+  256×. When `dynamics.substep_max` (512) binds before the target,
+  **`substep_budget_bound` is set and the run warns that it is not converged in `dt`**.
+  Watch `stiffness_number` and `n_substeps`.
+- **Two velocity rails, and they mean different things** (V3.6). `v_max` is **scaled with
+  the subdivision**, so it caps displacement per coupling interval rather than speed per
+  substep — without that, substepping silently trades the overlap rail for the velocity rail
+  (a fixed small `dt` clips 49 % of granules where `dt = 0.5` clips none, purely because the
+  semi-implicit damping is no longer suppressing the velocity). `dynamics.outlier_speed`
+  (default 8, 0 = off) is the *relative* rail: a granule is capped at 8× the median speed of
+  **its own coordination class** (contact count capped at 6; a class with fewer than 8
+  members is not a population and is left to `v_max`). It is a guard, not a modeller — it is
+  bit-identically inert on all four reference runs and on a stiff PMMA bed, and fires on
+  1–11 % of a loose shaped bed or a noisy one, where the absolute cap fires on 0 %.
+  `frac_velocity_clipped` and `frac_outlier_clipped` never double-count.
 - **Packer handoff** (V3.5): `packing.relax` = `auto` (default) | `none` | `fire`.
   `auto` is `fire` exactly when something drives the run (gravity on, or cells seeded) and
   `none` otherwise — a bed with no load has a genuinely loose equilibrium under JKR (a

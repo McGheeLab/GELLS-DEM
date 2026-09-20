@@ -330,6 +330,25 @@ class Params:
                                                # projection). `damped` additionally divides
                                                # gamma by a controller that halves on an
                                                # ascending step -- the fixed point is untouched.
+    dynamics_substep: str = 'auto'             # V3.6: off | auto. `dt` is then the COUPLING
+                                               # interval (saving, history, the cell clock the
+                                               # user asked for) and the mechanics is advanced
+                                               # in `n_sub` substeps chosen so the semi-implicit
+                                               # damping number S = dt k/gamma stays near
+                                               # `dynamics_substep_target`. At S >> 1 the step
+                                               # is stable and its FIXED POINT is exact, but the
+                                               # RATE is (1+S)x too slow -- and a compaction
+                                               # run's whole answer is a rate. See `substep_count`.
+    dynamics_substep_target: float = 0.2       # V3.6: the S the controller aims for.
+    dynamics_substep_max: int = 512            # V3.6: ceiling on n_sub, so a pathological
+                                               # configuration costs time, not unbounded time.
+    dynamics_outlier_speed: float = 8.0        # V3.6: cap a granule's speed at this many times
+                                               # the median of granules in ITS OWN coordination
+                                               # class (0 = off). A population rail, not an
+                                               # absolute one: we do not expect a granule to
+                                               # differ much from granules in its own condition,
+                                               # and V3.5 measured one wedged granule reading
+                                               # 132x the load while the second-worst read 0.97x.
 
     # ── Packing ──
     boundary_wall_clamp: str = 'contact'   # V3.5: contact | force | legacy. Where the position
@@ -605,6 +624,20 @@ class GranuleSystem:
         # never reach the pair contact list, so this is the only route by which
         # the semi-implicit step can learn that a granule is held by a wall.
         self.wall_stiffness = np.zeros(self.N)
+
+        # V3.6 substep controller. `stiffness_rate_*` is k/gamma in 1/h, recorded
+        # by the step just taken and read by `substep_count` to size the next --
+        # free of dt, so measuring it on one step and using it on another is
+        # sound. `frac_outlier_clipped` is the population speed rail's own
+        # diagnostic, kept separate from `frac_velocity_clipped` so the absolute
+        # rail and the relative one are never confused for each other.
+        self.stiffness_rate_p95 = 0.0
+        self.stiffness_rate_max = 0.0
+        self.n_substeps = 1
+        self.dt_substep = 0.0
+        self.substep_budget_bound = False
+        self.substep_rate_used = 0.0
+        self.frac_outlier_clipped = 0.0
 
         # V3.5 gradient-flow audit (set by `step` when dynamics.gradient_flow
         # is on; `energy_metrics` reads them and they stay zero when it is off)
@@ -4874,6 +4907,195 @@ def contact_stiffness_per_granule(gs, contacts):
     return k
 
 
+# ── V3.6: the substep controller ──────────────────────────────────────────
+#
+# `contact_semi_implicit` takes the step vel = F/(gamma + dt k). At the fixed
+# point F = 0, so the equilibrium is exact for any dt -- which is what makes the
+# scheme unconditionally stable and why V3.2 adopted it. But the RATE it gives
+# is F/(gamma + dt k) where the overdamped rate is F/gamma, so with
+#
+#     S = dt k / gamma
+#
+# every granule moves (1 + S)x too slowly. A packing or a sedimentation run ends
+# at a fixed point and does not care. A cell-driven compaction run's entire
+# answer is a rate, and it cares a great deal: measured on a 2D bed at the
+# shipped dt = 0.5 h, S averages 41 and reaches 88, and `disp_func` over 24 h is
+# a factor of 4 below its dt -> 0 value (and still moving at dt = 0.005 h).
+#
+# S is free: `k` is already computed every step for the semi-implicit
+# denominator. `k/gamma` has units of 1/h and does not depend on dt, so the
+# controller reads it from the step just taken and sizes the next one.
+#
+# NOTE this is deliberately NOT the energy. Where dt matters is exactly where
+# the V3.5 energy audit is invalid -- with cells seeded, monotone descent is
+# false because bridges are actuators, so `energy_delta` cannot separate "dt too
+# large" from "the cells did work". In the passive case, where the audit IS
+# exact, dt = 0.5 h is already accurate to 0.05 % on the bulk observables. The
+# energy monitor stays the verifier; S is the controller.
+OUTLIER_MIN_CLASS = 8       # a coordination class smaller than this is not a population
+OUTLIER_MAD_SCALE = 1.4826  # MAD -> sigma for a normal
+
+
+def stiffness_rate(gs, p, contacts):
+    """k_i / gamma_i in 1/h -- the inverse of each granule's stiff timescale.
+
+    Free of dt by construction, so it can be measured on one step and used to
+    size the next.
+    """
+    N = gs.N
+    if N == 0:
+        return np.zeros(0)
+    gamma = p.drag_scale * gs.r[:N]
+    return contact_stiffness_per_granule(gs, contacts) / np.maximum(gamma, 1e-12)
+
+
+def substep_mode(gs, p):
+    """Resolve `dynamics.substep` for this system: 'off' or 'always' (V3.6).
+
+    `auto` substeps when the run is DRIVEN by something that is not the contact
+    law -- in practice, when cells are seeded, because bridges are actuators and
+    the bed therefore never reaches a fixed point, so the answer the run reports
+    is a rate.
+
+    It declines otherwise, and that is a measurement rather than a guess. A
+    packing, a sedimentation or a relaxation ends AT a fixed point, and the
+    semi-implicit step puts the fixed point in exactly the right place for any
+    dt -- the rate it takes to get there is wrong but nobody reads it. Measured:
+    a 2D gravity bed run to 6 h at dt = 0.5 h has a bed height 0.22 um out of
+    444 from the same bed at dt = 0.005 h (0.05 %) and a phi_bed 0.0003 from it,
+    whether or not the packer handed it over pre-loaded. Substepping that would
+    be 256x the cost for a fifth of a micron.
+
+    `always` is the unconditional form, for a passive run whose PATH is the
+    subject rather than its endpoint.
+    """
+    mode = str(getattr(p, 'dynamics_substep', 'off'))
+    if mode in ('off', 'always'):
+        return mode
+    if mode != 'auto':
+        return 'off'
+    off = getattr(gs, 'cell_offset', None)
+    n_cells = int(off[gs.N]) if off is not None and len(off) > gs.N else 0
+    return 'always' if n_cells > 0 else 'off'
+
+
+def substep_count(gs, p):
+    """How many mechanical substeps this outer step should be advanced in (V3.6).
+
+    Read from the stiffness rate the LAST step recorded, so it costs no force
+    evaluation, and seeded from the t = 0 evaluation so the first interval is
+    already sized. There is deliberately no ramp: the rate is a **p95**, not a
+    max, so one transient contact cannot move it and there is nothing for a
+    growth clamp to protect against. `dynamics_substep_max` is the only ceiling.
+
+    When the budget `dynamics_substep_max` binds before the target is met, the
+    run is NOT converged in dt and `substep_budget_bound` says so -- the same
+    contract as V3.5's warning that the settle ended on its step cap rather than
+    on its tolerance.
+    """
+    if substep_mode(gs, p) != 'always':
+        gs.substep_budget_bound = False
+        return 1
+    rate = float(getattr(gs, 'stiffness_rate_p95', 0.0))
+    if not np.isfinite(rate) or rate <= 0.0:
+        gs.substep_budget_bound = False
+        return 1
+    target = max(float(getattr(p, 'dynamics_substep_target', 0.2)), 1e-6)
+    n_max = max(int(getattr(p, 'dynamics_substep_max', 64)), 1)
+    want = int(np.ceil(p.dt * rate / target))
+    gs.substep_rate_used = rate     # what the decision was made on, for the console
+    gs.substep_budget_bound = bool(want > n_max)
+    return int(min(max(1, want), n_max))
+
+
+def coordination_class(gs, contacts):
+    """Per-granule contact count, bucketed -- "granules in the same condition".
+
+    A rattler really does move faster than a jammed granule, and comparing the
+    two would be comparing different physics. Buckets are the raw count capped
+    at 6, which separates free / singly-held / weakly-held / jammed without
+    inventing thresholds.
+    """
+    N = gs.N
+    z = np.zeros(N, dtype=np.int64)
+    if contacts is not None and len(contacts):
+        col = getattr(contacts, 'column', None)
+        if col is not None:
+            i = np.asarray(col('i'), dtype=np.int64)
+            j = np.asarray(col('j'), dtype=np.int64)
+        else:
+            i = np.array([c['i'] for c in contacts], dtype=np.int64)
+            j = np.array([c['j'] for c in contacts], dtype=np.int64)
+        z += np.bincount(i, minlength=N)[:N]
+        z += np.bincount(j, minlength=N)[:N]
+    return np.minimum(z, 6)
+
+
+def population_speed_cap(gs, p, speed, contacts):
+    """A speed ceiling from the population a granule belongs to (V3.6).
+
+    ``v_max`` is an absolute ceiling and therefore has to be set for the fastest
+    thing the model can produce; at the shipped 20 um/h against 180-440 nN
+    bridge forces on a drag of ~1 nN.h/um it is a FORCE ceiling for most of the
+    bed, discarding magnitude information wholesale (V3.2's
+    ``frac_velocity_clipped`` is what makes that visible).
+
+    This is the relative rail instead: we do not expect a granule to differ much
+    from granules in its own condition, so a granule moving many times the
+    median of its own coordination class is a numerical outlier -- the single
+    wedged granule V3.5 measured at 132x the load while the second-worst read
+    0.97x -- not a physical one.
+
+    Returns the per-granule ceiling, or None when the rail is off or the
+    population is too small to have a median worth trusting.
+    """
+    K = float(getattr(p, 'dynamics_outlier_speed', 0.0))
+    if K <= 0.0 or gs.N == 0:
+        return None
+    klass = coordination_class(gs, contacts)
+    fixed = getattr(gs, 'fixed', None)
+    mob = (np.ones(gs.N, dtype=bool) if fixed is None
+           else ~np.asarray(fixed[:gs.N], dtype=bool))
+    cap = np.full(gs.N, np.inf)
+    for c in np.unique(klass[mob]) if mob.any() else ():
+        m = mob & (klass == c)
+        n = int(m.sum())
+        if n < OUTLIER_MIN_CLASS:
+            continue                      # not a population; leave it to v_max
+        v = speed[m]
+        med = float(np.median(v))
+        mad = float(np.median(np.abs(v - med))) * OUTLIER_MAD_SCALE
+        # `med` floors the spread so a class that is uniformly slow (mad ~ 0)
+        # does not get a cap of zero, and a class at rest is never clipped.
+        cap[m] = med + K * max(mad, med)
+    return cap
+
+
+def _speed_rails(gs, p, speed, contacts, over):
+    """The per-granule velocity scale factor, and the two diagnostics (V3.6).
+
+    Two ceilings, reported separately because they mean different things:
+
+    * ``v_max`` -- the absolute rail. Unchanged, and still what catches a
+      genuine blowup. `frac_velocity_clipped` counts it.
+    * the population rail -- `population_speed_cap`. `frac_outlier_clipped`
+      counts granules the population rail caught that ``v_max`` did not, so the
+      two never double-count.
+
+    With the population rail off this is exactly the V3.5 expression: the scale
+    is 1.0 where the granule is under the cap and ``v_max / speed`` where it is
+    not.
+    """
+    gs.frac_velocity_clipped = float(np.mean(over)) if over.size else 0.0
+    ceil_v = np.full(speed.shape, float(p.v_max))
+    ocap = population_speed_cap(gs, p, speed, contacts)
+    if ocap is not None:
+        ceil_v = np.minimum(ceil_v, ocap)
+    hit = speed > ceil_v
+    gs.frac_outlier_clipped = float(np.mean(hit & ~over)) if hit.size else 0.0
+    return np.where(hit, ceil_v / np.maximum(speed, 1e-300), 1.0)
+
+
 def projection_metrics(gs):
     """How much of the dynamics is the numerical rail rather than the contact law (V3.2).
 
@@ -6310,6 +6532,8 @@ def step(gs: GranuleSystem, p: Params, rng, t: float):
     # `contacts` is the one the force evaluation just produced -- never recompute
     # it for this. Off by default and then costs nothing.
     _gf = getattr(p, 'dynamics_gradient_flow', 'off')
+    _substep_on = str(getattr(p, 'dynamics_substep', 'off')) != 'off'    # V3.6
+    gs.dt_substep = float(p.dt)      # `advance` has already narrowed p.dt if substepping
     _E0 = 0.0
     _parts = None
     _work = 0.0
@@ -6329,14 +6553,19 @@ def step(gs: GranuleSystem, p: Params, rng, t: float):
     if gs.is_3d:
         # ── 3D integration (vectorized translational, per-granule quaternion) ──
         gamma = p.drag_scale * gs.r[:gs.N]         # (N,)
-        if p.contact_semi_implicit:                 # V3.2
-            gamma = gamma + p.dt * contact_stiffness_per_granule(gs, contacts)
+        if p.contact_semi_implicit or _substep_on:  # V3.2; V3.6 also feeds the controller
+            _k = contact_stiffness_per_granule(gs, contacts)
+            _rate = _k / np.maximum(gamma, 1e-12)   # 1/h, free of dt
+            gs.stiffness_rate_p95 = float(np.percentile(_rate, 95)) if _rate.size else 0.0
+            gs.stiffness_rate_max = float(np.max(_rate)) if _rate.size else 0.0
+            if p.contact_semi_implicit:
+                gamma = gamma + p.dt * _k
         if _gf == 'damped':                         # V3.5: see `_energy_audit`
             gamma = gamma / gs.energy_step_scale
         vel = F[:gs.N] / gamma[:, None]             # (N, 3)
         speed = np.sqrt(np.sum(vel**2, axis=1))     # (N,)
         over = speed > p.v_max
-        vel[over] *= (p.v_max / speed[over])[:, None]
+        vel *= _speed_rails(gs, p, speed, contacts, over)[:, None]
         # V3.2 diagnostic: the cap is an effective per-granule force ceiling
         # F_cap = v_max * drag_scale * r (20-60 nN against 180 nN bridges), so a
         # run with many clipped granules has lost force-magnitude information.
@@ -6377,14 +6606,19 @@ def step(gs: GranuleSystem, p: Params, rng, t: float):
     else:
         # ── 2D integration (vectorized) ──
         gamma = p.drag_scale * gs.r[:gs.N]         # (N,)
-        if p.contact_semi_implicit:                 # V3.2
-            gamma = gamma + p.dt * contact_stiffness_per_granule(gs, contacts)
+        if p.contact_semi_implicit or _substep_on:  # V3.2; V3.6 also feeds the controller
+            _k = contact_stiffness_per_granule(gs, contacts)
+            _rate = _k / np.maximum(gamma, 1e-12)   # 1/h, free of dt
+            gs.stiffness_rate_p95 = float(np.percentile(_rate, 95)) if _rate.size else 0.0
+            gs.stiffness_rate_max = float(np.max(_rate)) if _rate.size else 0.0
+            if p.contact_semi_implicit:
+                gamma = gamma + p.dt * _k
         if _gf == 'damped':                         # V3.5: see `_energy_audit`
             gamma = gamma / gs.energy_step_scale
         vel = F[:gs.N] / gamma[:, None]             # (N, 2)
         speed = np.sqrt(vel[:, 0]**2 + vel[:, 1]**2)
         over = speed > p.v_max
-        vel[over] *= (p.v_max / speed[over])[:, None]
+        vel *= _speed_rails(gs, p, speed, contacts, over)[:, None]
         # V3.2 diagnostic: the cap is an effective per-granule force ceiling
         # F_cap = v_max * drag_scale * r (20-60 nN against 180 nN bridges), so a
         # run with many clipped granules has lost force-magnitude information.
@@ -6421,6 +6655,68 @@ def step(gs: GranuleSystem, p: Params, rng, t: float):
 
     _sync_unwrapped(gs, p, pos_before)
     return F, contacts
+
+
+def advance(gs: GranuleSystem, p: Params, rng, t: float):
+    """One COUPLING interval, advanced in as many mechanical substeps as it needs.
+
+    V3.6. With ``dynamics.substep = 'auto'``, ``p.dt`` stops being the
+    integration step and becomes the interval at which the run is sampled --
+    history rows, snapshots, the console. The mechanics inside it is advanced in
+    ``n_sub`` equal substeps chosen by `substep_count` from the stiffness number
+    ``S = dt k / gamma``.
+
+    **Everything inside `step` is already a rate times dt** -- the bridge
+    formation probability is ``1 - exp(-rate dt)``, the cell clocks are
+    ``+= dt``, migration is ``speed dt``, the active noise is
+    ``sqrt(2 gamma T / dt)``, a new bridge's maturity is ``dt / t_form``. Every
+    one of those composes correctly under subdivision, which is why a substep is
+    an ordinary `step` with a smaller ``dt`` rather than a special mechanics-only
+    path. The substeps are therefore not an approximation of the outer step;
+    the outer step was the approximation.
+
+    ``v_max`` is scaled with the subdivision, so it limits DISPLACEMENT PER
+    COUPLING INTERVAL rather than speed per substep. Without that, subdividing
+    would silently tighten the absolute rail -- the cap clips 36 % of granules at
+    dt = 0.02 h and 49 % at dt = 0.005 h where it clips none at 0.5 h, purely
+    because the semi-implicit damping is no longer suppressing the velocity --
+    and the run would trade the overlap rail for the velocity rail without
+    anyone being told. Scaled, subdividing cannot change how much force
+    magnitude the cap discards; it can only improve the accuracy of the path.
+    """
+    n_sub = substep_count(gs, p)
+    gs.n_substeps = n_sub
+    if n_sub <= 1:
+        return step(gs, p, rng, t)
+    dt0, v0 = p.dt, p.v_max
+    t0 = t - dt0
+    try:
+        p.dt = dt0 / n_sub
+        p.v_max = v0 * n_sub          # a displacement cap, not a speed cap
+        F = contacts = None
+        for k in range(n_sub):
+            F, contacts = step(gs, p, rng, t0 + (k + 1) * p.dt)
+    finally:
+        p.dt, p.v_max = dt0, v0
+    return F, contacts
+
+
+def substep_metrics(gs):
+    """What the V3.6 controller did, for both twins (flat, finite floats)."""
+    n = max(int(getattr(gs, 'n_substeps', 1)), 1)
+    dt_sub = float(getattr(gs, 'dt_substep', 0.0))
+    return {
+        'n_substeps': n,
+        'dt_substep': dt_sub,
+        # S = dt_sub * k/gamma: the factor by which the semi-implicit step is
+        # slowing the granule down. Below ~0.2 the rate is the contact law's;
+        # at 41 (the V3.5 default) it is the integrator's.
+        'stiffness_number': float(getattr(gs, 'stiffness_rate_p95', 0.0)) * dt_sub,
+        'stiffness_number_max': float(getattr(gs, 'stiffness_rate_max', 0.0)) * dt_sub,
+        'stiffness_rate_p95': float(getattr(gs, 'stiffness_rate_p95', 0.0)),
+        'substep_budget_bound': bool(getattr(gs, 'substep_budget_bound', False)),
+        'frac_outlier_clipped': float(getattr(gs, 'frac_outlier_clipped', 0.0)),
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -7243,6 +7539,13 @@ def run(p=None, seed=None, observer=None):
         else:
             F0, _, contacts0 = compute_forces(gs, p, rng)
         handoff_force_balance(gs, p, F0)                 # V3.4
+        # V3.6: seed the substep controller from the bed it is about to be
+        # handed, so step 1 is already sized. Without this it ramps from 1 under
+        # SUBSTEP_GROWTH and a short run never reaches its target at all.
+        _rate0 = stiffness_rate(gs, p, contacts0)
+        gs.stiffness_rate_p95 = float(np.percentile(_rate0, 95)) if _rate0.size else 0.0
+        gs.stiffness_rate_max = float(np.max(_rate0)) if _rate0.size else 0.0
+        gs.n_substeps = substep_count(gs, p)
         if getattr(p, 'dynamics_gradient_flow', 'off') != 'off':   # V3.5
             _energy_audit(gs, p, p.dynamics_gradient_flow,
                           *system_energy(gs, p, contacts0), 0.0)
@@ -7257,6 +7560,9 @@ def run(p=None, seed=None, observer=None):
         print(_hdr)
 
     wall_t0 = timer.time()
+    _sub_said = [False]          # V3.6 substep reporting
+    _sub_bound = [False]
+    _sub_n = []
     t = resume_t
     stop_reason = None
     s_last = resume_step
@@ -7266,8 +7572,19 @@ def run(p=None, seed=None, observer=None):
         for s in range(resume_step + 1, n_steps + 1):
             t += p.dt
             s_cur[0] = s
-            F, contacts = step(gs, p, rng, t)
+            F, contacts = advance(gs, p, rng, t)      # V3.6: substeps if asked
             s_last = s
+
+            if gs.n_substeps > 1 and not _sub_said[0]:
+                _sub_said[0] = True                       # V3.6: say it once, not 144 times
+                _r = float(getattr(gs, 'substep_rate_used', 0.0))
+                print(f"  Substepping the mechanics: {gs.n_substeps} x "
+                      f"{p.dt / gs.n_substeps:.4g} h per {p.dt:g} h interval "
+                      f"(S = {_r * p.dt / gs.n_substeps:.2f}, "
+                      f"target {p.dynamics_substep_target:g}); at dt alone S would be "
+                      f"{_r * p.dt:.0f}, and the contact rate wrong by that factor")
+            _sub_bound[0] = _sub_bound[0] or bool(getattr(gs, 'substep_budget_bound', False))
+            _sub_n.append(gs.n_substeps)
 
             if s % p.save_every == 0:
                 m = save(t, F, contacts)
@@ -7291,6 +7608,16 @@ def run(p=None, seed=None, observer=None):
         io_errors = writer.close()
         for path, err in io_errors:
             print(f"  WARNING: snapshot write failed for {path}: {err}")
+
+    if _sub_n and max(_sub_n) > 1:
+        print(f"  Substeps: mean {float(np.mean(_sub_n)):.0f}, max {max(_sub_n)} "
+              f"per {p.dt:g} h interval")
+        if _sub_bound[0]:
+            print(f"  WARNING: the substep budget (dynamics.substep_max="
+                  f"{p.dynamics_substep_max}) bound before the target S="
+                  f"{p.dynamics_substep_target:g} was reached, so this run is NOT converged "
+                  f"in dt. Raise substep_max, or accept a rate error of about the reported "
+                  f"stiffness_number.")
 
     elapsed = timer.time() - wall_t0
     if stop_reason is None:

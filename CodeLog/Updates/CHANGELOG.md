@@ -14,6 +14,136 @@ Plan: `CodeLog/ClaudesPlan/3.6.md`. Two things the engine models but the solver
 never feels, and they are the same defect twice: a substrate the force law knows
 about and the numerics never asks about.
 
+### Phase 2 - `dynamics.substep`: dt is a coupling interval, not an integration step
+
+Not in the version as planned. Added after the question "dt = 0.5 h may be too
+large in some conditions, can we make dt variable based on the expected energy
+in the system" -- and the measurement changed the answer in two ways.
+
+**The finding.** `contact_semi_implicit` takes `vel = F/(gamma + dt k)`. At the
+fixed point `F = 0`, so the equilibrium is exact for any dt; that is what makes
+it unconditionally stable and why V3.2 adopted it. But the RATE it gives is
+`F/(gamma + dt k)` where the overdamped rate is `F/gamma`, so with
+
+    S = dt k / gamma
+
+every granule moves `(1+S)x` too slowly. At the shipped `dt = 0.5 h` on a 2D
+cell-seeded bed, **S averages 41 and reaches 88, with 90 % of granules above 1**.
+Over 24 h, 3 seeds, with the velocity cap lifted so it cannot confound:
+
+| dt (h) | `F_mean` (nN) | `disp_func` (um) | `overlap_clip_fraction` |
+|---|---|---|---|
+| 0.5 | 136 +- 21 | 11.3 +- 1.3 | 0.062 |
+| 0.1 | 85.7 +- 3.9 | 25.2 +- 2.0 | 0.038 |
+| 0.02 | 40.1 +- 5.1 | 36.8 +- 0.2 | 0.000 |
+| 0.005 | 29.7 +- 2.3 | 48.4 +- 3.7 | 0.000 |
+
+Monotone, far outside the seed spread, and not converged even at 0.005. At
+`dt = 0.25` and `0.1`, `max_overlap_ratio` reads `0.150 +- 3e-16` -- **exactly**
+`max_overlap_frac`, i.e. the bed is pinned on the geometric rail.
+
+**The equally important negative result.** A PASSIVE run does not need any of
+this. A 2D gravity bed at `dt = 0.5 h` has a bed height 0.22 um out of 444 from
+the same bed at `dt = 0.005 h` (0.05 %) and a `phi_bed` 0.0003 from it, whether
+the packer handed it over FIRE-relaxed or pre-loaded. With
+`contact_semi_implicit` **off** the same comparison is 13 um and 0.019, so V3.2's
+scheme is doing exactly the job it was added for. A run that ends AT a fixed
+point does not care that the rate was wrong; a compaction run, whose whole answer
+IS a rate, cares enormously. So `auto` substeps **when cells are seeded and not
+otherwise**, and that is a measurement, not a guess.
+
+**Why the controller is not the energy.** Where dt matters is exactly where the
+V3.5 energy audit is invalid: with cells seeded, monotone descent is false
+because bridges are actuators, so `energy_delta` cannot separate "dt too large"
+from "the cells did work". And in the passive case, where the audit IS exact,
+`dt = 0.5` is already accurate to 0.05 %. The energy monitor stays the verifier;
+`S` is the controller -- and `k` is already computed every step for the
+semi-implicit denominator, so `k/gamma` (1/h, free of dt) costs nothing.
+
+**The design.** `dt` becomes the interval at which the run is SAMPLED -- history,
+snapshots, console -- and `advance()` advances the mechanics inside it in `n_sub`
+substeps sized so S stays near `dynamics.substep_target` (0.2). A substep is an
+**ordinary `step` with a smaller dt**, not a special mechanics-only path,
+because everything inside `step` is already a rate times dt: bridge formation is
+`1 - exp(-rate dt)`, the cell clocks are `+= dt`, migration is `speed dt`, the
+active noise is `sqrt(2 gamma T / dt)`, a new bridge's maturity is
+`dt / t_form`. All compose under subdivision. The substeps are not an
+approximation of the outer step; the outer step was the approximation.
+
+No ramp: the rate is a **p95**, not a max, so one transient contact cannot move
+it. Seeded from the `t = 0` evaluation so the first interval is already sized.
+
+**`v_max` is scaled with the subdivision**, and this is load-bearing. Shrinking
+dt exposes a different rail: the absolute cap `v_max = 20 um/h` clips **36 % of
+granules at dt = 0.02 and 49 % at dt = 0.005** where it clips none at 0.5,
+because the semi-implicit damping is no longer suppressing the velocity (bridge
+forces of 180-440 nN on a drag of ~1 nN.h/um want 180-440 um/h). A clipped
+granule has its force magnitude discarded. So the cap limits DISPLACEMENT PER
+COUPLING INTERVAL rather than speed per substep, and subdividing cannot change
+how much force information it discards. Measured: `frac_velocity_clipped` is
+**0.000** at every substep count, against 0.49 at the equivalent fixed dt.
+
+**Result.** `dt = 0.5 h` with the controller reproduces the converged answer:
+
+| case | `F_mean` | `disp_func` | `overlap_clip` | `frac_velocity_clipped` | S |
+|---|---|---|---|---|---|
+| dt=0.5, substep off (V3.5) | 136 +- 21 | 11.3 +- 1.3 | 0.062 | 0.00 | **84** |
+| dt=0.005 fixed | 33.0 +- 4.0 | 13.1 +- 3.4 | 0.000 | **0.49** | 0.62 |
+| dt=0.5, auto, max 64 | 38.2 +- 5.4 | 39.3 +- 4.5 | 0.000 | 0.00 | 1.06 |
+| dt=0.5, auto, max 256 | 28.7 +- 1.7 | 51.1 +- 1.9 | 0.000 | 0.00 | 0.23 |
+| dt=0.5, auto, max 512 | 28.4 +- 1.1 | 50.4 +- 3.5 | 0.000 | 0.00 | **0.200** |
+
+The last two agree within the seed spread, and both match the cap-lifted fixed
+`dt = 0.005` run (29.7, 48.4) reached by a completely different route. The
+controller settles at `n_sub = 298 +- 18`, i.e. a substep of 6 s -- which is the
+real stiff timescale, `gamma/k = 1/119 h = 30 s`.
+
+**Cost**, measured per mechanical step, for a 72 h run at `dt = 0.5 h`:
+
+| | N | ms/step | 1x | 64x | 256x |
+|---|---|---|---|---|---|
+| 2D spheres | 322 | 2.5 | 0 s | 23 s | 93 s |
+| 3D spheres | 3215 | 17.6 | 3 s | 162 s | 648 s |
+| 3D shapes | 3223 | 47.3 | 7 s | 436 s | 1745 s |
+
+`dynamics.substep_max` defaults to **512** so the shipped configuration actually
+reaches its target; when the budget binds first, `substep_budget_bound` is set,
+the metric is recorded and the run prints a warning saying it is NOT converged in
+dt -- the same contract as V3.5's warning that the settle ended on its step cap
+rather than on its tolerance.
+
+**Second rail: the population speed cap** (`dynamics.outlier_speed`, default 8).
+`v_max` is absolute and so has to be set for the fastest thing the model can
+produce, which makes it a force ceiling for everything slower. This is the
+relative rail instead: a granule is capped at 8x the median speed of **its own
+coordination class** (contact count capped at 6; a class with fewer than 8
+members is not a population and is left to `v_max`). We do not expect a granule
+to differ much from granules in its own condition -- and V3.5 measured one wedged
+granule at 132x the load while the second-worst read 0.97x. It is a guard, and
+it behaves like one:
+
+| | outlier rail | `v_max` |
+|---|---|---|
+| all four reference runs | **never fires** (bit-identical) | -- |
+| stiff PMMA cell bed | 0 % | 0 % |
+| loose shaped bed, no FIRE | up to 5.7 % (mean 1.3 %), `F_max` 3783 -> 3005 nN | 37 % |
+| noisy cell bed, `T_active = 5` | up to 11.4 % (mean 2.3 %) | **0 %** |
+
+The last row is the case for it -- it catches granules the absolute cap misses
+entirely. On the reference runs it declines because those beds are too small for
+any coordination class to be a population, which is the right answer.
+
+**Baseline re-blessed. All four reference runs changed**, because all four seed
+cells and therefore all four were running at S = 7 to 50. `n_substeps` settles at
+219 / 71 / 36 / 253 and S at 0.20 in every one. Their reported forces and
+displacements move by the factors in the table above; that is the correction, not
+a regression. The outlier rail is separately confirmed bit-identical on all four,
+so the whole change is attributable to the substep controller.
+
+New: `tests/test_substep.py` (25 tests). New metric keys (both twins):
+`n_substeps`, `dt_substep`, `stiffness_number`, `stiffness_number_max`,
+`stiffness_rate_p95`, `substep_budget_bound`, `frac_outlier_clipped`.
+
 ### Phase 1 - the wall contact reaches the semi-implicit step
 
 `contact_stiffness_per_granule` sums `dF/d(delta) = 2 E_s a` over the **pair**

@@ -284,6 +284,10 @@ class Dynamics:
     omega_max_rad_per_h: float = _P.omega_max
     omega_max_3d_rad_per_h: float = _P.omega_max_3d
     gradient_flow: str = _P.dynamics_gradient_flow   # V3.5: off | monitor | damped
+    substep: str = _P.dynamics_substep               # V3.6: off | auto
+    substep_target: float = _P.dynamics_substep_target   # V3.6: the S = dt k/gamma aimed for
+    substep_max: int = _P.dynamics_substep_max       # V3.6: ceiling on the substep count
+    outlier_speed: float = _P.dynamics_outlier_speed # V3.6: population speed rail (0 = off)
 
 
 @dataclass
@@ -509,6 +513,10 @@ FLAT_MAP = [
     ('dynamics.omega_max_rad_per_h', 'omega_max'),
     ('dynamics.omega_max_3d_rad_per_h', 'omega_max_3d'),
     ('dynamics.gradient_flow', 'dynamics_gradient_flow'),
+    ('dynamics.substep', 'dynamics_substep'),
+    ('dynamics.substep_target', 'dynamics_substep_target'),
+    ('dynamics.substep_max', 'dynamics_substep_max'),
+    ('dynamics.outlier_speed', 'dynamics_outlier_speed'),
     ('packing.gap_um', 'packing_gap'),
     ('packing.settle_steps', 'packing_settle_steps'),
     ('packing.relax_substeps', 'packing_relax_substeps'),
@@ -841,6 +849,8 @@ def load_setup(path: str) -> Setup:
     # spelling is the natural one and the trap is PyYAML's, not the user's.
     if isinstance(setup.dynamics.gradient_flow, bool):
         setup.dynamics.gradient_flow = 'off' if not setup.dynamics.gradient_flow else 'monitor'
+    if isinstance(setup.dynamics.substep, bool):     # V3.6: same YAML 1.1 trap
+        setup.dynamics.substep = 'off' if not setup.dynamics.substep else 'always'
     validate(setup)
     return setup
 
@@ -1023,6 +1033,17 @@ def validate(setup: Setup) -> None:
         errs.append("contact.overlap_model must be 'fixed' or 'elastic'")
     if setup.dynamics.gradient_flow not in ('off', 'monitor', 'damped'):
         errs.append("dynamics.gradient_flow must be 'off', 'monitor' or 'damped'")
+    if setup.dynamics.substep not in ('off', 'auto', 'always'):
+        errs.append("dynamics.substep must be 'off', 'auto' or 'always'")
+    if not (0.0 < float(setup.dynamics.substep_target) <= 10.0):
+        errs.append('dynamics.substep_target must be in (0, 10]')
+    if int(setup.dynamics.substep_max) < 1:
+        errs.append('dynamics.substep_max must be at least 1')
+    if float(setup.dynamics.outlier_speed) < 0.0:
+        errs.append('dynamics.outlier_speed must be >= 0 (0 disables the population rail)')
+    elif 0.0 < float(setup.dynamics.outlier_speed) < 2.0:
+        errs.append('dynamics.outlier_speed below 2 would clip the ordinary spread of a '
+                    'coordination class, not its outliers')
     if setup.packing.overlap_tol_model not in ('fixed', 'elastic'):
         errs.append("packing.overlap_tol_model must be 'fixed' or 'elastic'")
     if setup.packing.relax not in ('auto', 'none', 'fire'):
@@ -1353,6 +1374,17 @@ dynamics:
   omega_max_rad_per_h: 1.0
   omega_max_3d_rad_per_h: 1.0
   gradient_flow: "off"             # off | monitor | damped -- audit dE/dt <= 0 (V3.5)
+  substep: "auto"                  # off | auto | always -- dt becomes the COUPLING interval
+                                   # and the mechanics is substepped so S = dt*k/gamma stays
+                                   # small. At S >> 1 the step is stable and its fixed point
+                                   # exact, but the RATE is (1+S)x too slow, and a compaction
+                                   # run's answer IS a rate. `auto` substeps only when cells
+                                   # are seeded: a run that ends at a fixed point does not
+                                   # need it (measured: 0.05 % on a gravity bed) (V3.6)
+  substep_target: 0.2              # the S the controller aims for
+  substep_max: 64                  # ceiling on substeps per coupling interval
+  outlier_speed: 8.0               # cap a granule at this many x the median speed of its own
+                                   # coordination class; 0 = off (V3.6)
 
 packing:
   gap_um: 0.0
