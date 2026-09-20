@@ -58,6 +58,9 @@ CELL_TYPE = CellType(
     k_cell_nN_per_um=M(8.0, 'nN/um', ASSUMPTION + ': hMSCs are softer than fibroblasts by '
                                      'AFM; scaled down from 10', (1.0, 50.0)),
 
+    modulus_kPa=M(0.8, 'kPa', 'ASSUMPTION: hMSCs are softer than fibroblasts by AFM', (0.3, 5.0)),
+    f_cell_cell=M(0.20, '-', ASSUMPTION + ': cadherin coverage relative to a fully '
+                          'collagen-coated granule -- calibrate first', (0.0, 1.0)),
     migration_speed_um_per_h=M(15.0, 'um/h', 'hMSC 10-25 um/h on 2D '
                                              '[typical reported range]', (10.0, 25.0)),
     contraction_speed_um_per_h=M(10.0, 'um/h', ASSUMPTION + ': fibroblast value, scaled',

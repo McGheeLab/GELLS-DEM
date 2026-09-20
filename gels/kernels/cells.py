@@ -37,7 +37,8 @@ Semantic differences from the reference, on purpose:
 
 import numpy as np
 
-from gels.engine import (CellState, adhesion_force_ceiling, capacity_coverage,
+from gels.engine import (CellState, adhesion_force_ceiling, cadherin_gain, capacity_coverage,
+                         stacking_enabled,
                          quat_rotate, quat_rotate_inv,
                          superellipse_point, superellipsoid_point)
 from gels.kernels import njit, prange
@@ -278,8 +279,9 @@ def cells_update_k(seed, do_walk, dt, is_3d, periodic, Lx, Ly, Lz,
                    adhesive, cell_offset, n_attached, n_over, spread, fa, r, r_bound, f, pos, theta, quat,
                    activity,
                    cell_state, cell_target, cell_bridge_age, cell_align, cell_locked, cell_fx, cell_fy, cell_fz,
-                   cell_area, cell_over_age, cell_theta, cell_eta, cell_omega,
+                   cell_area, cell_over_age, cell_theta, cell_eta, cell_omega, cell_layer,
                    cell_d, cell_h, cov_surface, cov, is_3d_like, foothold, stacking_max, over_sen_time,
+                   stack_on,
                    align_rate, align_min, lock_thr0, lock_scales, law, rule, gamma, kappa,
                    sen_time, sense, commit_angle, mig_speed, directed_mult):
     N = adhesive.shape[0]
@@ -301,9 +303,11 @@ def cells_update_k(seed, do_walk, dt, is_3d, periodic, Lx, Ly, Lz,
                         foothold)
         effective_cap = int(round(cap * stacking_max))
 
+        cap_g = max(1, int(round(cap)))     # V3.6: CSR rank is seniority
         for k in range(n_total):
             ci = c0 + k
             cell_area[ci] = A_cell if k < n_att else 0.0
+            cell_layer[ci] = min(k // cap_g, 127)
             st = cell_state[ci]
 
             if st == BRIDGING:
@@ -412,6 +416,16 @@ def cells_update_k(seed, do_walk, dt, is_3d, periodic, Lx, Ly, Lz,
                 if cell_over_age[ci] >= over_sen_time:
                     cell_state[ci] = SENESCENT
                     cell_over_age[ci] = 0.0
+                elif stack_on:
+                    # V3.6: see the reference twin -- a tolerated overcrowded
+                    # cell now has a substrate and follows the normal
+                    # progression instead of being frozen in ATTACHED.
+                    if sf >= 0.95 and fa_i >= 0.5:
+                        cell_state[ci] = PROLIFERATING
+                    elif sf > 0.0:
+                        cell_state[ci] = SPREADING
+                    else:
+                        cell_state[ci] = ATTACHED
             elif sf >= 0.95 and fa_i >= 0.5:
                 cell_state[ci] = PROLIFERATING
                 cell_over_age[ci] = 0.0
@@ -501,11 +515,12 @@ def bridge_pairs_k(cidx, pair_i, pair_j, hit, overlap, d_rec, dx, dy, dz, nx_rec
                    r, r_bound, f, E_gran, nu_gran, fa, pos,
                    cell_offset, cell_state, cell_target, off, nbr_pair, nbr_side,
                    law, rule, gamma, kappa, F_stall, a_cell, k_opt, engagement, F_max,
-                   F_adh_g1,
+                   F_adh_g1, stack_on, E_sub, nu_sub, cad_gain, cell_layer,
                    break_gap, sense, contact_factor, decay_len_raw, inert_factor,
                    cell_bridge_age, cell_align, cell_force_prev, cell_gap_prev,
                    model, dt, drag_scale, v0, f_ecc, gap_min, formation_time, align_min,
-                   out_gap, out_nx, out_ny, out_nz, out_Fi, out_Fj, out_pf, out_nexist, out_fac):
+                   out_gap, out_nx, out_ny, out_nz, out_Fi, out_Fj, out_pf, out_nexist, out_fac,
+                   out_Fi_up, out_Fj_up):
     M = cidx.shape[0]
     for q in prange(M):
         k = cidx[q]
@@ -546,6 +561,17 @@ def bridge_pairs_k(cidx, pair_i, pair_j, hit, overlap, d_rec, dx, dy, dz, nx_rec
                                engagement, F_max, F_adh_g1[i])
         out_Fj[q] = mc_force_k(E_gran[j], nu_gran[j], fa[j], g_j, F_stall, a_cell, k_opt,
                                engagement, F_max, F_adh_g1[j])
+        # V3.6: the same cells' traction if they are standing on CELLS. The
+        # cadherin factor is folded into g BEFORE the call -- g enters the
+        # expression twice, so multiplying it onto the result would be wrong.
+        if stack_on:
+            out_Fi_up[q] = mc_force_k(E_sub, nu_sub, fa[i], g_i * cad_gain, F_stall, a_cell,
+                                      k_opt, engagement, F_max, F_adh_g1[i])
+            out_Fj_up[q] = mc_force_k(E_sub, nu_sub, fa[j], g_j * cad_gain, F_stall, a_cell,
+                                      k_opt, engagement, F_max, F_adh_g1[j])
+        else:
+            out_Fi_up[q] = out_Fi[q]
+            out_Fj_up[q] = out_Fj[q]
         n_ex = 0
         # V3.1: the pair's isometric capacity, last step's force and last
         # step's gap drive one force-velocity factor for all of its bridges.
@@ -559,7 +585,8 @@ def bridge_pairs_k(cidx, pair_i, pair_j, hit, overlap, d_rec, dx, dy, dz, nx_rec
                     if model == 1:
                         mat = min(1.0, cell_bridge_age[ci] / max(0.1, formation_time))
                         al = max(cell_align[ci], align_min)
-                        F_iso += min(out_Fi[q] * mat * al, F_max)
+                        _s = out_Fi_up[q] if cell_layer[ci] > 0 else out_Fi[q]
+                        F_iso += min(_s * mat * al, F_max)
                         F_prev += cell_force_prev[ci]
                         if np.isnan(gap_prev):
                             gap_prev = cell_gap_prev[ci]
@@ -569,7 +596,8 @@ def bridge_pairs_k(cidx, pair_i, pair_j, hit, overlap, d_rec, dx, dy, dz, nx_rec
                     if model == 1:
                         mat = min(1.0, cell_bridge_age[cj] / max(0.1, formation_time))
                         al = max(cell_align[cj], align_min)
-                        F_iso += min(out_Fj[q] * mat * al, F_max)
+                        _s = out_Fj_up[q] if cell_layer[cj] > 0 else out_Fj[q]
+                        F_iso += min(_s * mat * al, F_max)
                         F_prev += cell_force_prev[cj]
                         if np.isnan(gap_prev):
                             gap_prev = cell_gap_prev[cj]
@@ -596,6 +624,7 @@ def bridge_pairs_k(cidx, pair_i, pair_j, hit, overlap, d_rec, dx, dy, dz, nx_rec
 def bridge_cells_k(seed, dt, is_3d, periodic, Lx, Ly, Lz,
                    cidx_of_pair, pair_i, pair_j, off, nbr_pair, nbr_side, dx, dy, dz,
                    out_gap, out_nx, out_ny, out_nz, out_Fi, out_Fj, out_pf, out_nexist, out_fac,
+                   out_Fi_up, out_Fj_up, cell_layer,
                    cell_force_prev, cell_gap_prev,
                    pos, r, r_bound, a, b, c, n1, n2, theta, quat, fa, adhesive,
                    cell_offset, cell_state, cell_target, cell_bridge_age, cell_align, cell_locked,
@@ -626,6 +655,7 @@ def bridge_cells_k(seed, dt, is_3d, periodic, Lx, Ly, Lz,
                 ny = out_ny[q]
                 nz = out_nz[q]
                 Fc = out_Fi[q]
+                Fc_up = out_Fi_up[q]
                 dpx = dx[k]
                 dpy = dy[k]
                 dpz = dz[k] if is_3d else 0.0
@@ -635,6 +665,7 @@ def bridge_cells_k(seed, dt, is_3d, periodic, Lx, Ly, Lz,
                 ny = -out_ny[q]
                 nz = -out_nz[q]
                 Fc = out_Fj[q]
+                Fc_up = out_Fj_up[q]
                 dpx = -dx[k]
                 dpy = -dy[k]
                 dpz = -dz[k] if is_3d else 0.0
@@ -658,7 +689,9 @@ def bridge_cells_k(seed, dt, is_3d, periodic, Lx, Ly, Lz,
                     else:
                         maturity = min(1.0, cell_bridge_age[ci] / max(0.1, formation_time))
                         alignment = max(cell_align[ci], align_min)
-                        F_cell = min(Fc * maturity * alignment, F_max) * fac
+                        # V3.6: what this cell is standing on
+                        _s = Fc_up if cell_layer[ci] > 0 else Fc
+                        F_cell = min(_s * maturity * alignment, F_max) * fac
                         cell_gap_prev[ci] = gap
                         cell_force_prev[ci] = F_cell
                         cell_fx[ci] += F_cell * nx
@@ -772,7 +805,8 @@ def bridge_cells_k(seed, dt, is_3d, periodic, Lx, Ly, Lz,
                             cell_state[ci] = BRIDGING
                             cell_align[ci] = align_min
                             maturity = min(1.0, dt / max(0.1, formation_time))
-                            F_cell = min(Fc * maturity * align_min, F_max) * fac
+                            _s = Fc_up if cell_layer[ci] > 0 else Fc     # V3.6
+                            F_cell = min(_s * maturity * align_min, F_max) * fac
                             cell_gap_prev[ci] = gap
                             cell_force_prev[ci] = F_cell
                             cell_fx[ci] += F_cell * nx
@@ -849,9 +883,11 @@ def update_cell_state_k(gs, p, t, rng=None):
                    gs.cell_state, gs.cell_bridge_target, gs.cell_bridge_age, gs.cell_alignment,
                    gs.cell_bridge_locked, gs.cell_fx, gs.cell_fy, gs.cell_fz, gs.cell_contact_area,
                    gs.cell_overcrowd_age, gs.cell_theta_local, gs.cell_eta_local, gs.cell_omega_local,
+                   gs.cell_layer,
                    float(p.cell_diameter), float(p.cell_height_spread), float(capacity_coverage(p)),
                    float(p.cell_coverage), bool(is_3d_like), foothold, float(p.cell_stacking_max),
-                   float(p.overcrowd_senescence_time), float(p.bridge_alignment_rate),
+                   float(p.overcrowd_senescence_time), stacking_enabled(p),
+                   float(p.bridge_alignment_rate),
                    float(p.bridge_alignment_min), float(p.bridge_lock_force_threshold),
                    bool(p.bridge_lock_scales_with_ligand), law, rule, float(p.traction_exponent), float(kappa),
                    float(p.bridge_senescence_time), float(p.cell_sense_distance), float(p.bridge_commit_angle),
@@ -890,6 +926,9 @@ def bridging_k(gs, p, rng, F, pair_i, pair_j, rec, pos, dim, csr):
     out_pf = np.empty(Mc)
     out_nexist = np.empty(Mc, dtype=np.int64)
     out_fac = np.empty(Mc)
+    out_Fi_up = np.empty(Mc)        # V3.6: the same cells, standing on cells
+    out_Fj_up = np.empty(Mc)
+    _stack = stacking_enabled(p)
     model = force_model_code(getattr(p, 'bridge_force_model', 'constant'))
     bridge_pairs_k(cidx, pair_i, pair_j, hit, rec['overlap'], rec['d'], rec['dx'], rec['dy'], dz,
                    rec['nx'], rec['ny'], is_3d, bool(gs.is_circle), periodic,
@@ -899,13 +938,16 @@ def bridging_k(gs, p, rng, F, pair_i, pair_j, rec, pos, dim, csr):
                    law, rule, float(p.traction_exponent), float(kappa), float(F_stall), float(a_cell),
                    float(k_opt), float(engagement), float(p.F_max_per_cell),
                    _adh_or_zeros(gs, p),                      # V3.6
+                   _stack, float(p.cell_substrate_E), float(p.cell_substrate_poisson),
+                   float(cadherin_gain(p)), gs.cell_layer,
                    float(p.bridge_break_gap), float(p.cell_sense_distance), float(p.bridge_contact_factor),
                    float(p.bridge_decay_length), float(p.bridge_inert_factor),
                    gs.cell_bridge_age, gs.cell_alignment, gs.cell_bridge_force, gs.cell_bridge_gap_prev,
                    int(model), float(p.dt), float(p.drag_scale),
                    float(p.cell_contraction_speed), float(p.bridge_eccentric_gain),
                    float(p.bridge_min_gap), float(p.bridge_formation_time), float(p.bridge_alignment_min),
-                   out_gap, out_nx, out_ny, out_nz, out_Fi, out_Fj, out_pf, out_nexist, out_fac)
+                   out_gap, out_nx, out_ny, out_nz, out_Fi, out_Fj, out_pf, out_nexist, out_fac,
+                   out_Fi_up, out_Fj_up)
 
     cidx_of_pair = np.full(pair_i.shape[0], -1, dtype=np.int64)
     cidx_of_pair[cidx] = np.arange(Mc, dtype=np.int64)
@@ -913,6 +955,7 @@ def bridging_k(gs, p, rng, F, pair_i, pair_j, rec, pos, dim, csr):
     bridge_cells_k(seed, float(p.dt), is_3d, periodic, float(p.Lx), float(p.Ly), float(p.Lz),
                    cidx_of_pair, pair_i, pair_j, off, nbr_pair, nbr_side, rec['dx'], rec['dy'], dz,
                    out_gap, out_nx, out_ny, out_nz, out_Fi, out_Fj, out_pf, out_nexist, out_fac,
+                   out_Fi_up, out_Fj_up, gs.cell_layer,
                    gs.cell_bridge_force, gs.cell_bridge_gap_prev,
                    pos3, gs.r, gs.r_bound, gs.a, gs.b, gs.c, gs.n1, gs.n2, gs.theta, quat,
                    gs.fa_maturity, gs.adhesive_mask,

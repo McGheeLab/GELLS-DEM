@@ -204,6 +204,20 @@ PRESETS: Dict[str, List[str]] = {
         'dynamics.v_max_um_per_h=30.0',
     ],
 
+    # ── V3.6: a bed seeded ABOVE the monolayer, so layer 1 exists at t = 0 ──
+    # `fibroblast_realistic` alone never overflows: it seeds at 0.8 of a
+    # capacity of 1.0. Without a second storey the stacking substitution has
+    # nothing to act on and the feature is untestable end to end.
+    'stacked_monolayer': [
+        'cells.stacking.enabled=true',
+        'cells.stacking.substrate_E_kPa=1.0',     # a cell is ~1 kPa to another cell
+        'cells.stacking.substrate_poisson=0.5',
+        'cells.stacking.f_cell_cell=0.15',        # ASSUMPTION -- calibrate first
+        'cells.seeding.surface_coverage=1.8',     # ~1.8 storeys at t = 0
+        'cells.seeding.capacity_coverage=1.0',    # capacity is still ONE monolayer
+        'cells.seeding.stacking_max=3.0',         # tolerate three before senescence
+    ],
+
     'fragmented_granules': [
         # Irregular cuboidal fragments rather than spheres. The two packing
         # flags belong together: the corrected bounding radius is LARGER, so on
@@ -267,6 +281,7 @@ PRESET_DESCRIPTIONS: Dict[str, str] = {
     'inert_wall': 'bare container (the default): the bed can detach from it',
     'fibroblast_realistic': 'Hill contraction, 80 um reach, rigid-substrate stall force, division (24 h)',
     'asynchronous_cells': 'cells spread through the cycle at seeding, with per-cell cycle lengths',
+    'stacked_monolayer': 'seed 1.8 storeys so cells stand on cells; layer >= 1 anchors to a cell (V3.6)',
     'fragmented_granules': 'irregular cuboidal fragments: shape-aware packing and contact (V3.2)',
     'hydrogel_box_legacy': 'the V3.0 defaults (closed box, no gravity, 10 kPa hydrogel, no division)',
 }

@@ -114,6 +114,10 @@ class CellType:
     # number that traction force microscopy reports.
     k_cell_nN_per_um: Measured
 
+    # ── the cell AS A SUBSTRATE, for cells standing on cells (V3.6) ──
+    modulus_kPa: Measured                 # what another cell feels standing on it
+    f_cell_cell: Measured                 # cadherin coverage; 1.0 = parity with a granule
+
     # ── kinetics ──────────────────────────────────────────────────────
     migration_speed_um_per_h: Measured
     contraction_speed_um_per_h: Measured
@@ -207,6 +211,8 @@ class CellType:
             f'cells.traction.stress_Pa={_v(self.traction_stress_Pa):g}',
             f'cells.traction.adhesion_area_frac={_v(self.adhesion_area_fraction):g}',
             f'cells.traction.k_cell_nN_per_um={_v(self.k_cell_nN_per_um):g}',
+            f'cells.stacking.substrate_E_kPa={_v(self.modulus_kPa):g}',
+            f'cells.stacking.f_cell_cell={_v(self.f_cell_cell):g}',
             f'cells.motor_clutch.F_max_per_cell_nN={_v(self.total_traction_nN):g}',
             f'cells.migration.speed_um_per_h={_v(self.migration_speed_um_per_h):g}',
             f'cells.bridging.contraction_speed_um_per_h={_v(self.contraction_speed_um_per_h):g}',

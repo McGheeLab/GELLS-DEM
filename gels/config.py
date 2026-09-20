@@ -180,6 +180,21 @@ class Traction:
 
 
 @dataclass
+class Stacking:
+    """V3.6: cells standing on cells.
+
+    A cell's anchorage is the SAME motor-clutch expression evaluated on whatever
+    it stands on -- layer 0 on the granule, layer >= 1 on `substrate_E_kPa` /
+    `substrate_poisson` with the ligand gain multiplied by a cadherin factor in
+    `f_cell_cell`. The preference for the granule is a consequence, not a rule.
+    """
+    enabled: bool = _P.cell_stacking_enabled
+    substrate_E_kPa: float = _P.cell_substrate_E
+    substrate_poisson: float = _P.cell_substrate_poisson
+    f_cell_cell: float = _P.f_cell_cell
+
+
+@dataclass
 class MotorClutch:
     n_motors: int = _P.n_motors
     F_motor_stall_nN: float = _P.F_motor_stall
@@ -252,6 +267,7 @@ class Cells:
     kinetics: Kinetics = field(default_factory=Kinetics)
     motor_clutch: MotorClutch = field(default_factory=MotorClutch)
     traction: Traction = field(default_factory=Traction)
+    stacking: Stacking = field(default_factory=Stacking)
     type: str = _P.cell_type        # V3.6: which gels/celltypes entry, provenance only
     migration: Migration = field(default_factory=Migration)
     sensing: Sensing = field(default_factory=Sensing)
@@ -473,6 +489,10 @@ FLAT_MAP = [
     ('cells.traction.stress_Pa', 'cell_traction_stress_Pa'),
     ('cells.traction.adhesion_area_frac', 'cell_adhesion_area_frac'),
     ('cells.traction.k_cell_nN_per_um', 'cell_series_stiffness'),
+    ('cells.stacking.enabled', 'cell_stacking_enabled'),
+    ('cells.stacking.substrate_E_kPa', 'cell_substrate_E'),
+    ('cells.stacking.substrate_poisson', 'cell_substrate_poisson'),
+    ('cells.stacking.f_cell_cell', 'f_cell_cell'),
     ('cells.type', 'cell_type'),
     ('cells.motor_clutch.traction_f_law', 'traction_f_law'),
     ('cells.motor_clutch.traction_f_rule', 'traction_f_rule'),
@@ -1061,6 +1081,12 @@ def validate(setup: Setup) -> None:
         errs.append('dynamics.substep_target must be in (0, 10]')
     if int(setup.dynamics.substep_max) < 1:
         errs.append('dynamics.substep_max must be at least 1')
+    if not (0.0 <= float(setup.cells.stacking.f_cell_cell) <= 1.0):
+        errs.append('cells.stacking.f_cell_cell must be in [0, 1]')
+    if float(setup.cells.stacking.substrate_E_kPa) <= 0.0:
+        errs.append('cells.stacking.substrate_E_kPa must be > 0')
+    if not (0.0 <= float(setup.cells.stacking.substrate_poisson) < 0.5 + 1e-12):
+        errs.append('cells.stacking.substrate_poisson must be in [0, 0.5]')
     if float(setup.dynamics.outlier_speed) < 0.0:
         errs.append('dynamics.outlier_speed must be >= 0 (0 disables the population rail)')
     elif 0.0 < float(setup.dynamics.outlier_speed) < 2.0:
@@ -1236,6 +1262,7 @@ TEMPLATE_YAML = """\
 #   inert_wall            bare container (the default): the bed can detach from it
 #   fibroblast_realistic  Hill contraction, 80 um reach, rigid-substrate stall force, division (24 h)
 #   asynchronous_cells    cells spread through the cycle at seeding, with per-cell cycle lengths
+#   stacked_monolayer     seed 1.8 storeys so cells stand on cells (V3.6)
 #   fragmented_granules   irregular cuboidal fragments: shape-aware packing and contact (V3.2)
 #   hydrogel_box_legacy   the V3.0 defaults (closed box, no gravity, 10 kPa hydrogel, no division)
 
@@ -1336,6 +1363,11 @@ cells:                             # human dermal fibroblasts
                                  # `--cell-type fibroblast` sets 4000 (Stricker 2011)
     adhesion_area_frac: 0.08     # focal-adhesion area / projected footprint
     k_cell_nN_per_um: 10.0       # the cell's own series elasticity; sets the strain energy
+  stacking:                      # V3.6: cells standing on cells
+    enabled: false               # layer >= 1 cells anchor to CELLS, not to the granule
+    substrate_E_kPa: 1.0         # a cell as a substrate (cortical ~1 kPa)
+    substrate_poisson: 0.5       # cells are essentially incompressible
+    f_cell_cell: 0.15            # cadherin coverage; 1.0 = parity with the granule
   migration:
     speed_um_per_h: 30.0           # 12-60 um/h on collagen (0.2-1 um/min)
     directed_speed_mult: 2.0       # crawl speed multiplier toward a bridge target
@@ -1409,7 +1441,8 @@ dynamics:
                                    # are seeded: a run that ends at a fixed point does not
                                    # need it (measured: 0.05 % on a gravity bed) (V3.6)
   substep_target: 0.2              # the S the controller aims for
-  substep_max: 64                  # ceiling on substeps per coupling interval
+  substep_max: 512                 # ceiling on substeps per coupling interval; when it binds
+                                   # first, substep_budget_bound says the run is NOT dt-converged
   outlier_speed: 8.0               # cap a granule at this many x the median speed of its own
                                    # coordination class; 0 = off (V3.6)
 

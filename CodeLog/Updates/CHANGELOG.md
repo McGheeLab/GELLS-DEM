@@ -14,6 +14,87 @@ Plan: `CodeLog/ClaudesPlan/3.6.md`. Two things the engine models but the solver
 never feels, and they are the same defect twice: a substrate the force law knows
 about and the numerics never asks about.
 
+### Phase 4 - `cells.stacking`: cells crawl on cells
+
+Carried from the V3.3 plan's Phase 5, whose analysis stood.
+
+**The physics, stated so it is falsifiable.** A cell's anchorage is the EXISTING
+motor-clutch expression evaluated on whatever it stands on -- layer 0 gets the
+granule's modulus, Poisson ratio and ligand gain; layer >= 1 gets
+`cells.stacking.substrate_E_kPa`, `substrate_poisson` and the ligand gain
+multiplied by a cadherin factor in `f_cell_cell`. That single substitution IS the
+feature; the preference for the granule is a consequence, not a rule.
+
+It reproduces the V3.3 plan's prediction to three figures:
+
+| granule | traction ratio cell/granule |
+|---|---|
+| 10 kPa | **0.178** |
+| 50 kPa | 0.109 |
+| PMMA | 0.091 |
+
+falling as granules stiffen, which is the motor-clutch story. **Stiffness does
+~91 % of the work**: `f_cell_cell = 1.0` alone moves the ratio only
+0.178 -> 0.196, so a parity test that sets the cadherin coverage and not the
+modulus proves nothing.
+
+**The trap, avoided and tested.** `g` enters `motor_clutch_force` TWICE -- as a
+prefactor and inside `k_sub/(k_sub + g k_opt)` -- so `F(g.h) != F.h`. The
+cadherin factor is folded into `g` BEFORE the call and never multiplied onto the
+result. `cadherin_gain` is exactly 1.0 at `f_cell_cell = 1`, which is what makes
+the parity run bit-identical rather than merely close.
+
+**State: one int8 array, `cell_layer`, and no host-cell pointer.** A pointer
+would hold an absolute cell index, which `add_cells` invalidates -- and no
+physics needs one: the substrate is a MATERIAL, not a particular neighbour, and
+bridge force already accumulates onto the host granule's row, so a stacked cell
+correctly pulls its granule THROUGH the cell beneath. The layer is DERIVED from
+CSR rank every step (`k // cap`), the same rank the overcrowding rule already
+uses, so the two cannot disagree and there is no stale-index trap. It is written
+whether or not stacking is on (the renderer and the snapshots want it either
+way) and survives a save/restore round trip.
+
+**Bug found while building it: stacked cells were frozen and never bridged.**
+Before V3.6 a tolerated overcrowded cell kept whatever state it was seeded in --
+ATTACHED -- so it never spread, never proliferated and never bridged.
+`cell_stacking_max = 3.0` was therefore a SENESCENCE DELAY, not a second storey:
+the cells existed, were counted, and did nothing. Freezing them was the honest
+thing while there was nothing for them to stand on. With stacking enabled they
+now follow the normal progression and the overcrowd clock keeps running.
+
+**What each half does.** Turning stacking on does two things, and the parity run
+separates them. A 2D bed seeded at 1.8 storeys, 6 h:
+
+| | n_bridges | F_mean (nN) | disp_func (um) |
+|---|---|---|---|
+| off (stacked cells frozen) | 109 | 40.6 | 15.7 |
+| on, at PARITY (unfrozen, granule-like substrate) | 117 | **61.2** | 9.1 |
+| on (unfrozen, cell substrate) | 110 | 41.4 | 14.7 |
+
+Unfreezing alone adds 8 bridges and raises the mean contact force by 51 %. The
+cell substrate then takes almost all of it back, because those bridges pull at
+18 % strength. The physical statement: **a second storey adds connectivity
+without adding much traction.** Note `disp_func` moves the other way -- it is NET
+displacement, so a more cross-linked bed reads lower even while doing more work;
+that is the limitation the convergence phase's path-length signal exists for.
+
+New: `tests/test_cell_stacking.py` (18 tests), preset `stacked_monolayer`
+(seeds 1.8 storeys so layer 1 exists at t = 0 -- `fibroblast_realistic` alone
+seeds at 0.8 of capacity and never overflows, so the feature would be untestable
+end to end). New `Params`: `cell_stacking_enabled` (False),
+`cell_substrate_E` (1.0 kPa), `cell_substrate_poisson` (0.5), `f_cell_cell`
+(0.15, an ASSUMPTION -- calibrate first). New config section `cells.stacking`.
+`CellType` gained `modulus_kPa` and `f_cell_cell`, so a cell type states what it
+is like to stand on. New metric keys: `n_cells_stacked`, `cell_layer_mean`,
+`cell_layer_max`, `stacked_traction_ratio`. New snapshot array `cell_layer`.
+
+Also fixed: the hybrid `perf_cells_backend='python'` path never received the
+Phase 3 adhesion ceiling, so it would have been a third force law rather than
+the exact V2.7 cell machinery on compiled contacts. It now takes both.
+
+Baseline unchanged -- stacking is off by default, the four reference runs are
+bit-identical and only gain keys.
+
 ### Phase 3 - `gels/celltypes/`: cell types as objects, traction as a stress, cell strain energy
 
 Not in the version as planned. Added on the request that cells should build

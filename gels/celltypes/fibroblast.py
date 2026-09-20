@@ -62,6 +62,9 @@ CELL_TYPE = CellType(
                                       'chosen so U = F^2/2k lands in the measured '
                                       '0.1-10 pJ TFM band', (1.0, 50.0)),
 
+    modulus_kPa=M(1.0, 'kPa', 'AFM cortical modulus of a fibroblast 0.5-3 kPa [typical reported range]', (0.3, 5.0)),
+    f_cell_cell=M(0.15, '-', ASSUMPTION + ': cadherin coverage relative to a fully '
+                          'collagen-coated granule -- calibrate first', (0.0, 1.0)),
     migration_speed_um_per_h=M(30.0, 'um/h', '12-60 um/h on 2D collagen '
                                              '[typical reported range]; 10-30 on curved 3D',
                                (12.0, 60.0)),

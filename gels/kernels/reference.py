@@ -193,6 +193,7 @@ def _update_individual_cells(gs: GranuleSystem, p: Params, rng=None):
     _rule = rule_code(p.traction_f_rule)
     _kappa = p.K_sigma_traction / p.sigma_ligand_max if p.sigma_ligand_max > 0 else 0.0
 
+    _stack_cells = stacking_enabled(p)      # V3.6
     for i in range(gs.N):
         if not gs.adhesive_mask[i]:
             continue
@@ -207,10 +208,17 @@ def _update_individual_cells(gs: GranuleSystem, p: Params, rng=None):
 
         # Compute per-cell contact area from current spread state
         A_cell = cell_projected_area(sf, p.cell_diameter, p.cell_height_spread)
+        # V3.6: which storey each cell stands on. CSR rank is seniority, so this
+        # reduces EXACTLY to the k >= cap rule the overcrowding test already
+        # uses -- layer 0 is the monolayer, layer 1 is the first storey above it.
+        # Written whether or not stacking is enabled: nothing reads it when it is
+        # off, and the renderer and the snapshots want it either way.
+        _cap_g = max(1, int(round(cell_capacity(gs, i, p, A_cell))))
 
         for k in range(n_total):
             ci = gs.cell_offset[i] + k
             gs.cell_contact_area[ci] = A_cell if k < n_att else 0.0
+            gs.cell_layer[ci] = min(k // _cap_g, 127)
 
             # ── Preserve committed bridges ──
             if gs.cell_state[ci] == int(CellState.BRIDGING):
@@ -339,7 +347,21 @@ def _update_individual_cells(gs: GranuleSystem, p: Params, rng=None):
                 if gs.cell_overcrowd_age[ci] >= p.overcrowd_senescence_time:
                     gs.cell_state[ci] = int(CellState.SENESCENT)
                     gs.cell_overcrowd_age[ci] = 0.0
-                # else: stay in current mobile state (crawling on other cells)
+                elif _stack_cells:
+                    # V3.6: it has a substrate now. Before V3.6 a tolerated
+                    # overcrowded cell was FROZEN in whatever state it was
+                    # seeded in -- ATTACHED -- so it never spread and never
+                    # bridged, and `cell_stacking_max` was a senescence delay
+                    # rather than a second storey. Freezing it was the honest
+                    # thing while there was nothing for it to stand on. The
+                    # overcrowd clock keeps running either way.
+                    if sf >= 0.95 and fa >= 0.5:
+                        gs.cell_state[ci] = int(CellState.PROLIFERATING)
+                    elif sf > 0.0:
+                        gs.cell_state[ci] = int(CellState.SPREADING)
+                    else:
+                        gs.cell_state[ci] = int(CellState.ATTACHED)
+                # else: stay in current mobile state (V3.1)
             elif sf >= 0.95 and fa >= 0.5:
                 gs.cell_state[ci] = int(CellState.PROLIFERATING)
                 gs.cell_overcrowd_age[ci] = 0.0
@@ -956,7 +978,7 @@ def _settle_packing_3d(gs, p):
 
 
 def _service_committed_bridges(gs, gi, gj, gap, p, F_cell_i, F_cell_j, nx, ny, nz, F,
-                               pair_fac=None):
+                               pair_fac=None, F_up_i=None, F_up_j=None):
     """Re-apply forces for cells already committed to a bridge between gi↔gj.
 
     F_cell_i / F_cell_j are the per-cell traction capacities of cells hosted
@@ -992,7 +1014,9 @@ def _service_committed_bridges(gs, gi, gj, gap, p, F_cell_i, F_cell_j, nx, ny, n
             else:
                 maturity = min(1.0, gs.cell_bridge_age[ci] / max(0.1, p.bridge_formation_time))
                 alignment = max(gs.cell_alignment[ci], p.bridge_alignment_min)
-                F_cell = min(F_cell_i * maturity * alignment, p.F_max_per_cell) * fac
+                _src = (F_cell_i if (F_up_i is None or gs.cell_layer[ci] == 0)
+                        else F_up_i)      # V3.6: what this cell is standing on
+                F_cell = min(_src * maturity * alignment, p.F_max_per_cell) * fac
                 gs.cell_bridge_gap_prev[ci] = gap
                 gs.cell_bridge_force[ci] = F_cell
                 gs.cell_fx[ci] += F_cell * nx
@@ -1019,7 +1043,9 @@ def _service_committed_bridges(gs, gi, gj, gap, p, F_cell_i, F_cell_j, nx, ny, n
             else:
                 maturity = min(1.0, gs.cell_bridge_age[cj] / max(0.1, p.bridge_formation_time))
                 alignment = max(gs.cell_alignment[cj], p.bridge_alignment_min)
-                F_cell = min(F_cell_j * maturity * alignment, p.F_max_per_cell) * fac
+                _src = (F_cell_j if (F_up_j is None or gs.cell_layer[ci] == 0)
+                        else F_up_j)      # V3.6: what this cell is standing on
+                F_cell = min(_src * maturity * alignment, p.F_max_per_cell) * fac
                 gs.cell_bridge_gap_prev[cj] = gap
                 gs.cell_bridge_force[cj] = F_cell
                 gs.cell_fx[cj] -= F_cell * nx
@@ -1106,6 +1132,7 @@ def _classify_bridge_path(gs, p, gi, gj, pos_i, pos_j, gap):
 
 
 def _attempt_new_bridges(gs, gi, gj, gap, p, rng, F_cell_i, F_cell_j, nx, ny, nz, F,
+                         F_up_i=None, F_up_j=None,
                          pair_fac=1.0,
                          n_existing_bridges=0, path_factor=1.0,
                          pos_i=None, pos_j=None):
@@ -1252,7 +1279,9 @@ def _attempt_new_bridges(gs, gi, gj, gap, p, rng, F_cell_i, F_cell_j, nx, ny, nz
                 gs.cell_state[ci] = int(CellState.BRIDGING)
                 gs.cell_alignment[ci] = p.bridge_alignment_min
                 maturity = min(1.0, p.dt / max(0.1, p.bridge_formation_time))
-                F_cell = min(F_cell_i * maturity * p.bridge_alignment_min,
+                _src = (F_cell_i if (F_up_i is None or gs.cell_layer[ci] == 0)
+                        else F_up_i)      # V3.6: what this cell is standing on
+                F_cell = min(_src * maturity * p.bridge_alignment_min,
                              p.F_max_per_cell) * pair_fac
                 gs.cell_bridge_gap_prev[ci] = gap
                 gs.cell_bridge_force[ci] = F_cell
@@ -1347,7 +1376,9 @@ def _attempt_new_bridges(gs, gi, gj, gap, p, rng, F_cell_i, F_cell_j, nx, ny, nz
                 gs.cell_state[cj] = int(CellState.BRIDGING)
                 gs.cell_alignment[cj] = p.bridge_alignment_min
                 maturity = min(1.0, p.dt / max(0.1, p.bridge_formation_time))
-                F_cell = min(F_cell_j * maturity * p.bridge_alignment_min,
+                _src = (F_cell_j if (F_up_j is None or gs.cell_layer[ci] == 0)
+                        else F_up_j)      # V3.6: what this cell is standing on
+                F_cell = min(_src * maturity * p.bridge_alignment_min,
                              p.F_max_per_cell) * pair_fac
                 gs.cell_bridge_gap_prev[cj] = gap
                 gs.cell_bridge_force[cj] = F_cell
@@ -1411,6 +1442,7 @@ def compute_forces(gs: GranuleSystem, p: Params, rng):
     _rule = rule_code(p.traction_f_rule)
     _kappa = p.K_sigma_traction / p.sigma_ligand_max if p.sigma_ligand_max > 0 else 0.0
     _adh = adhesion_force_ceiling(gs, p)   # V3.6: sigma x A ceiling, at g = 1
+    _stack = stacking_enabled(p)           # V3.6: cells standing on cells
     _mu = float(getattr(p, 'friction_mu', 0.0))     # V3.1 Coulomb friction term
     _cell_adh = float(getattr(p, 'cell_contact_adhesion', 0.0))   # V3.2 cell grip at the contact
     _R_cap = float(getattr(p, 'curvature_R_cap', 0.0))            # V3.2 curvature cap
@@ -1506,14 +1538,28 @@ def compute_forces(gs: GranuleSystem, p: Params, rng):
                     gs.E_gran[j], p, gs.fa_maturity[j], nu=gs.nu_gran[j],
                     g=traction_gain(gs.f[j], gs.f[i], _law, _rule, p.traction_exponent, _kappa),
                     F_adh=(_adh[j] if _adh is not None else None))
+                # V3.6: the same cell's traction if it is standing on CELLS rather
+                # than on the granule. Both computed properly; the service loop picks
+                # per cell by `cell_layer`, because a ratio applied afterwards would
+                # be the F(g.h) != F.h trap.
+                F_up_i = F_up_j = None
+                if _stack:
+                    F_up_i = stacked_traction_force(
+                        p, gs.fa_maturity[i], traction_gain(gs.f[i], gs.f[j], _law, _rule, p.traction_exponent, _kappa),
+                        F_adh=(_adh[i] if _adh is not None else None))
+                    F_up_j = stacked_traction_force(
+                        p, gs.fa_maturity[j], traction_gain(gs.f[j], gs.f[i], _law, _rule, p.traction_exponent, _kappa),
+                        F_adh=(_adh[j] if _adh is not None else None))
                 n_ci, n_cj, _fac = _service_committed_bridges(
-                    gs, i, j, gap, p, F_cell_i, F_cell_j, nx, ny, 0.0, F)
+                    gs, i, j, gap, p, F_cell_i, F_cell_j, nx, ny, 0.0, F,
+                F_up_i=F_up_i, F_up_j=F_up_j)
                 n_existing = n_ci + n_cj
                 if gap < p.cell_sense_distance:
                     pj_v_2d = pos[i] + np.array([dx, dy])
                     pf = _classify_bridge_path(gs, p, i, j, pos[i], pj_v_2d, gap)
                     _attempt_new_bridges(
                         gs, i, j, gap, p, rng, F_cell_i, F_cell_j, nx, ny, 0.0, F,
+                    F_up_i=F_up_i, F_up_j=F_up_j,
                         pair_fac=_fac,
                         n_existing_bridges=n_existing, path_factor=pf,
                         pos_i=pos[i], pos_j=pj_v_2d)
@@ -1652,10 +1698,23 @@ def compute_forces(gs: GranuleSystem, p: Params, rng):
                 gs.E_gran[j], p, gs.fa_maturity[j], nu=gs.nu_gran[j],
                 g=traction_gain(gs.f[j], gs.f[i], _law, _rule, p.traction_exponent, _kappa),
                 F_adh=(_adh[j] if _adh is not None else None))
+            # V3.6: the same cell's traction if it is standing on CELLS rather
+            # than on the granule. Both computed properly; the service loop picks
+            # per cell by `cell_layer`, because a ratio applied afterwards would
+            # be the F(g.h) != F.h trap.
+            F_up_i = F_up_j = None
+            if _stack:
+                F_up_i = stacked_traction_force(
+                    p, gs.fa_maturity[i], traction_gain(gs.f[i], gs.f[j], _law, _rule, p.traction_exponent, _kappa),
+                    F_adh=(_adh[i] if _adh is not None else None))
+                F_up_j = stacked_traction_force(
+                    p, gs.fa_maturity[j], traction_gain(gs.f[j], gs.f[i], _law, _rule, p.traction_exponent, _kappa),
+                    F_adh=(_adh[j] if _adh is not None else None))
 
             # 1) Service committed bridges (apply force with maturity ramp)
             n_ci, n_cj, _fac = _service_committed_bridges(
-                gs, i, j, gap, p, F_cell_i, F_cell_j, nx, ny, 0.0, F)
+                gs, i, j, gap, p, F_cell_i, F_cell_j, nx, ny, 0.0, F,
+                F_up_i=F_up_i, F_up_j=F_up_j)
             n_existing = n_ci + n_cj
 
             # 2) Path-dependent bridge formation (V2.1)
@@ -1664,6 +1723,7 @@ def compute_forces(gs: GranuleSystem, p: Params, rng):
                 pf = _classify_bridge_path(gs, p, i, j, pos[i], pj_v_2d, gap)
                 _attempt_new_bridges(
                     gs, i, j, gap, p, rng, F_cell_i, F_cell_j, nx, ny, 0.0, F,
+                    F_up_i=F_up_i, F_up_j=F_up_j,
                     pair_fac=_fac,
                     n_existing_bridges=n_existing, path_factor=pf,
                     pos_i=pos[i], pos_j=pj_v_2d)
@@ -1803,6 +1863,7 @@ def compute_forces_3d(gs: GranuleSystem, p: Params, rng):
     _rule = rule_code(p.traction_f_rule)
     _kappa = p.K_sigma_traction / p.sigma_ligand_max if p.sigma_ligand_max > 0 else 0.0
     _adh = adhesion_force_ceiling(gs, p)   # V3.6: sigma x A ceiling, at g = 1
+    _stack = stacking_enabled(p)           # V3.6: cells standing on cells
     _mu = float(getattr(p, 'friction_mu', 0.0))     # V3.1 Coulomb friction term
     _cell_adh = float(getattr(p, 'cell_contact_adhesion', 0.0))   # V3.2 cell grip at the contact
     _R_cap = float(getattr(p, 'curvature_R_cap', 0.0))            # V3.2 curvature cap
@@ -1896,14 +1957,28 @@ def compute_forces_3d(gs: GranuleSystem, p: Params, rng):
                     gs.E_gran[j], p, gs.fa_maturity[j], nu=gs.nu_gran[j],
                     g=traction_gain(gs.f[j], gs.f[i], _law, _rule, p.traction_exponent, _kappa),
                     F_adh=(_adh[j] if _adh is not None else None))
+                # V3.6: the same cell's traction if it is standing on CELLS rather
+                # than on the granule. Both computed properly; the service loop picks
+                # per cell by `cell_layer`, because a ratio applied afterwards would
+                # be the F(g.h) != F.h trap.
+                F_up_i = F_up_j = None
+                if _stack:
+                    F_up_i = stacked_traction_force(
+                        p, gs.fa_maturity[i], traction_gain(gs.f[i], gs.f[j], _law, _rule, p.traction_exponent, _kappa),
+                        F_adh=(_adh[i] if _adh is not None else None))
+                    F_up_j = stacked_traction_force(
+                        p, gs.fa_maturity[j], traction_gain(gs.f[j], gs.f[i], _law, _rule, p.traction_exponent, _kappa),
+                        F_adh=(_adh[j] if _adh is not None else None))
                 n_ci, n_cj, _fac = _service_committed_bridges(
-                    gs, i, j, gap, p, F_cell_i, F_cell_j, nv[0], nv[1], nv[2], F)
+                    gs, i, j, gap, p, F_cell_i, F_cell_j, nv[0], nv[1], nv[2], F,
+                    F_up_i=F_up_i, F_up_j=F_up_j)
                 n_existing = n_ci + n_cj
                 if gap < p.cell_sense_distance:
                     pf = _classify_bridge_path(gs, p, i, j, pos[i], pj_v, gap)
                     _attempt_new_bridges(
                         gs, i, j, gap, p, rng, F_cell_i, F_cell_j,
-                        nv[0], nv[1], nv[2], F, pair_fac=_fac,
+                        nv[0], nv[1], nv[2], F,
+                        F_up_i=F_up_i, F_up_j=F_up_j, pair_fac=_fac,
                         n_existing_bridges=n_existing, path_factor=pf,
                         pos_i=pos[i], pos_j=pj_v)
             continue  # skip rigid contact path
@@ -2018,11 +2093,23 @@ def compute_forces_3d(gs: GranuleSystem, p: Params, rng):
                 gs.E_gran[j], p, gs.fa_maturity[j], nu=gs.nu_gran[j],
                 g=traction_gain(gs.f[j], gs.f[i], _law, _rule, p.traction_exponent, _kappa),
                 F_adh=(_adh[j] if _adh is not None else None))
+            # V3.6: the same cell's traction if it is standing on CELLS rather
+            # than on the granule. Both computed properly; the service loop picks
+            # per cell by `cell_layer`, because a ratio applied afterwards would
+            # be the F(g.h) != F.h trap.
+            F_up_i = F_up_j = None
+            if _stack:
+                F_up_i = stacked_traction_force(
+                    p, gs.fa_maturity[i], traction_gain(gs.f[i], gs.f[j], _law, _rule, p.traction_exponent, _kappa),
+                    F_adh=(_adh[i] if _adh is not None else None))
+                F_up_j = stacked_traction_force(
+                    p, gs.fa_maturity[j], traction_gain(gs.f[j], gs.f[i], _law, _rule, p.traction_exponent, _kappa),
+                    F_adh=(_adh[j] if _adh is not None else None))
 
             # 1) Service committed bridges (apply force with maturity ramp)
             n_ci, n_cj, _fac = _service_committed_bridges(
                 gs, i, j, gap, p, F_cell_i, F_cell_j,
-                nv[0], nv[1], nv[2], F)
+                nv[0], nv[1], nv[2], F, F_up_i=F_up_i, F_up_j=F_up_j)
             n_existing = n_ci + n_cj
 
             # 2) Path-dependent bridge formation (V2.1)
@@ -2030,7 +2117,8 @@ def compute_forces_3d(gs: GranuleSystem, p: Params, rng):
                 pf = _classify_bridge_path(gs, p, i, j, pos[i], pj_v, gap)
                 _attempt_new_bridges(
                     gs, i, j, gap, p, rng, F_cell_i, F_cell_j,
-                    nv[0], nv[1], nv[2], F, pair_fac=_fac,
+                    nv[0], nv[1], nv[2], F,
+                    F_up_i=F_up_i, F_up_j=F_up_j, pair_fac=_fac,
                     n_existing_bridges=n_existing, path_factor=pf,
                     pos_i=pos[i], pos_j=pj_v)
 

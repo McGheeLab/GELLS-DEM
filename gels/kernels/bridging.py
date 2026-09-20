@@ -25,7 +25,8 @@ pass, B2 per-granule pass, hashed RNG) land.
 
 import numpy as np
 
-from gels.engine import motor_clutch_force
+from gels.engine import (adhesion_force_ceiling, motor_clutch_force,
+                         stacked_traction_force, stacking_enabled)
 from gels.materials import blocker_factor, law_code, rule_code, traction_gain
 
 
@@ -102,6 +103,11 @@ def bridging_pass(gs, p, rng, F, pair_i, pair_j, rec, pos, dim, csr=None):
     law = law_code(p.traction_f_law)
     rule = rule_code(p.traction_f_rule)
     kappa = p.K_sigma_traction / p.sigma_ligand_max if p.sigma_ligand_max > 0 else 0.0
+    # V3.6: this hybrid path has to apply the adhesion ceiling and the cell-on-cell
+    # substrate too, or `perf_cells_backend='python'` would silently be a third
+    # force law rather than the exact V2.7 cell machinery on compiled contacts.
+    _adh = adhesion_force_ceiling(gs, p)
+    _stack = stacking_enabled(p)
     gamma = p.traction_exponent
     sense = p.cell_sense_distance
     periodic = (p.boundary_mode == 'periodic')
@@ -161,15 +167,26 @@ def bridging_pass(gs, p, rng, F, pair_i, pair_j, rec, pos, dim, csr=None):
             pos_i = pos[i]
             pos_j = pos_i + dp
 
+        _g_i = traction_gain(gs.f[i], gs.f[j], law, rule, gamma, kappa)
+        _g_j = traction_gain(gs.f[j], gs.f[i], law, rule, gamma, kappa)
         F_cell_i = motor_clutch_force(
-            gs.E_gran[i], p, gs.fa_maturity[i], nu=gs.nu_gran[i],
-            g=traction_gain(gs.f[i], gs.f[j], law, rule, gamma, kappa))
+            gs.E_gran[i], p, gs.fa_maturity[i], nu=gs.nu_gran[i], g=_g_i,
+            F_adh=(_adh[i] if _adh is not None else None))
         F_cell_j = motor_clutch_force(
-            gs.E_gran[j], p, gs.fa_maturity[j], nu=gs.nu_gran[j],
-            g=traction_gain(gs.f[j], gs.f[i], law, rule, gamma, kappa))
+            gs.E_gran[j], p, gs.fa_maturity[j], nu=gs.nu_gran[j], g=_g_j,
+            F_adh=(_adh[j] if _adh is not None else None))
+        F_up_i = F_up_j = None
+        if _stack:
+            F_up_i = stacked_traction_force(
+                p, gs.fa_maturity[i], _g_i,
+                F_adh=(_adh[i] if _adh is not None else None))
+            F_up_j = stacked_traction_force(
+                p, gs.fa_maturity[j], _g_j,
+                F_adh=(_adh[j] if _adh is not None else None))
 
         n_ci, n_cj, _fac = _ref._service_committed_bridges(
-            gs, i, j, gap, p, F_cell_i, F_cell_j, nx, ny, nz, F)
+            gs, i, j, gap, p, F_cell_i, F_cell_j, nx, ny, nz, F,
+            F_up_i=F_up_i, F_up_j=F_up_j)
         n_existing = n_ci + n_cj
 
         if gap < sense:
@@ -179,7 +196,8 @@ def bridging_pass(gs, p, rng, F, pair_i, pair_j, rec, pos, dim, csr=None):
             else:
                 pf = _ref._classify_bridge_path(gs, p, i, j, pos_i, pos_j, gap)
             _ref._attempt_new_bridges(
-                gs, i, j, gap, p, rng, F_cell_i, F_cell_j, nx, ny, nz, F, pair_fac=_fac,
+                gs, i, j, gap, p, rng, F_cell_i, F_cell_j, nx, ny, nz, F,
+                F_up_i=F_up_i, F_up_j=F_up_j, pair_fac=_fac,
                 n_existing_bridges=n_existing, path_factor=pf,
                 pos_i=pos_i, pos_j=pos_j)
     return int(idx.size)

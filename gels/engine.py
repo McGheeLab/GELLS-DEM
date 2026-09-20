@@ -181,6 +181,21 @@ class Params:
     # the stored strain energy that traction force microscopy reports.
     cell_series_stiffness: float = 10.0
 
+    # ── Cells standing on cells (V3.6) ──
+    # A cell's anchorage is the SAME motor-clutch expression evaluated on
+    # whatever it stands on. Layer 0 gets the granule's modulus, Poisson ratio
+    # and ligand gain; layer >= 1 gets `cell_substrate_*` and the ligand gain
+    # multiplied by a cadherin factor in `f_cell_cell`. That substitution IS the
+    # feature; the preference for the granule is a consequence, not a rule.
+    #
+    # The cadherin factor is folded into g BEFORE the call, never multiplied
+    # onto the returned force: g enters `motor_clutch_force` twice -- as a
+    # prefactor and inside k_sub/(k_sub + g k_opt) -- so F(g.h) != F.h.
+    cell_stacking_enabled: bool = False
+    cell_substrate_E: float = 1.0          # kPa, a cell as a substrate (cortical ~1 kPa)
+    cell_substrate_poisson: float = 0.5    # cells are essentially incompressible
+    f_cell_cell: float = 0.15              # cadherin coverage; 1.0 = parity with the granule
+
     # ── Cell migration ──
     cell_migration_speed: float = 5.0  # µm/h, random walk speed on granule surface
 
@@ -537,6 +552,13 @@ class GranuleSystem:
         ('cell_generation', np.int8, 0),            # division generation (0 = seeded)
         # V3.2
         ('cell_cycle_time', np.float64, 0.0),       # h, this cell's own cycle length (0 = use cell_doubling_time)
+        # V3.6: which storey this cell stands on. 0 = on the granule, >= 1 = on
+        # other cells. Deliberately NOT a pointer to a host cell: an absolute
+        # cell index is invalidated by `add_cells`' CSR rebuild, and no physics
+        # needs one -- the substrate is a MATERIAL, not a particular neighbour,
+        # and bridge force already accumulates onto the host granule's row, so a
+        # stacked cell correctly pulls its granule THROUGH the cell beneath.
+        ('cell_layer', np.int8, 0),
     )
 
     def __init__(self, x, y, r, gtype, n_cells,
@@ -3585,6 +3607,44 @@ def motor_clutch_force(E_kPa, p: Params, fa_maturity_val, nu=None, g=1.0, F_adh=
     return min(F_mc, cap)
 
 
+def cadherin_gain(p):
+    """The ligand gain of a CELL as a substrate (V3.6).
+
+    The same Langmuir the granule coating uses, evaluated on `f_cell_cell`, so
+    the two surfaces are described by one rule rather than two. At
+    ``f_cell_cell = 1`` it is **exactly** 1.0, which is what makes the parity
+    run bit-identical to the stacking-off run.
+    """
+    from gels.materials import law_code, rule_code, traction_gain
+    kappa = p.K_sigma_traction / p.sigma_ligand_max if p.sigma_ligand_max > 0 else 0.0
+    f_cc = float(getattr(p, 'f_cell_cell', 1.0))
+    return traction_gain(f_cc, f_cc, law_code(p.traction_f_law),
+                         rule_code(p.traction_f_rule), p.traction_exponent, kappa)
+
+
+def stacked_traction_force(p, fa_maturity_val, g, F_adh=None):
+    """Traction of a cell standing on ANOTHER CELL rather than on a granule (V3.6).
+
+    The identical `motor_clutch_force`, evaluated on the cell substrate. The
+    cadherin factor is folded into ``g`` BEFORE the call and never multiplied
+    onto the result, because ``g`` enters that expression twice -- as a
+    prefactor and inside ``k_sub/(k_sub + g k_opt)`` -- so ``F(g.h) != F.h``.
+
+    Effect at the defaults (`k_opt = 375` nN/um at the bare motor counts,
+    `a = 10` um): a cell on a 1 kPa cell substrate with 15 % cadherin coverage
+    pulls a small fraction of what it would on the granule, and the RATIO falls
+    as granules stiffen -- which is the motor-clutch story, not an extra rule.
+    """
+    return motor_clutch_force(p.cell_substrate_E, p, fa_maturity_val,
+                              nu=p.cell_substrate_poisson,
+                              g=g * cadherin_gain(p), F_adh=F_adh)
+
+
+def stacking_enabled(p):
+    """V3.6: is the cell-on-cell substrate switched on?"""
+    return bool(getattr(p, 'cell_stacking_enabled', False))
+
+
 def cell_substrate_stiffness(gs, p):
     """Each granule's substrate spring at cell scale, nN/um (V3.6).
 
@@ -3682,7 +3742,12 @@ def traction_metrics(gs, p):
     out = {'cell_strain_energy': 0.0, 'cell_strain_energy_pJ': 0.0,
            'cell_strain_energy_per_cell_pJ': 0.0,
            'traction_stress_mean_Pa': 0.0, 'traction_stress_footprint_Pa': 0.0,
-           'traction_ceiling_mean_nN': 0.0, 'n_cells_loaded': 0}
+           'traction_ceiling_mean_nN': 0.0, 'n_cells_loaded': 0,
+           # V3.6 stacking. `stacked_traction_ratio` is the whole feature in one
+           # number: what a cell standing on cells pulls, as a fraction of the
+           # same cell standing on the granule. It falls as granules stiffen.
+           'n_cells_stacked': 0, 'cell_layer_mean': 0.0, 'cell_layer_max': 0,
+           'stacked_traction_ratio': 1.0}
     N = gs.N
     off = getattr(gs, 'cell_offset', None)
     C = int(off[N]) if off is not None and len(off) > N else 0
@@ -3715,6 +3780,17 @@ def traction_metrics(gs, p):
     ceil = adhesion_force_ceiling(gs, p)
     if ceil is not None and ceil.size:
         out['traction_ceiling_mean_nN'] = float(np.mean(ceil))
+    lay = np.asarray(gs.cell_layer[:C], dtype=np.int64)
+    out['n_cells_stacked'] = int(np.sum(lay > 0))
+    out['cell_layer_mean'] = float(np.mean(lay))
+    out['cell_layer_max'] = int(np.max(lay))
+    if stacking_enabled(p) and N:
+        E_mean = float(np.mean(gs.E_gran[:N]))
+        nu_mean = float(np.mean(gs.nu_gran[:N]))
+        on_gran = motor_clutch_force(E_mean, p, 1.0, nu=nu_mean, g=1.0)
+        if on_gran > 0:
+            out['stacked_traction_ratio'] = float(
+                stacked_traction_force(p, 1.0, 1.0) / on_gran)
     return out
 
 
@@ -7058,6 +7134,7 @@ def save_snapshot_to_disk(snap_idx, gs, p, t, F, output_dir,
     data['cell_bridge_force'] = gs.cell_bridge_force.copy()
     data['cell_age'] = gs.cell_age.copy()
     data['cell_generation'] = gs.cell_generation.copy()
+    data['cell_layer'] = gs.cell_layer.copy()          # V3.6
     data['cell_cycle_time'] = gs.cell_cycle_time.copy()          # V3.2
     data['fixed'] = gs.fixed.copy()
     data['n_divisions_cum'] = np.int64(getattr(gs, 'n_divisions_cum', 0))
@@ -7438,6 +7515,7 @@ def restore_gs_from_snapshot(snap_path, p):
     gs.cell_bridge_force[:] = data.get('cell_bridge_force', np.zeros(n_c))
     gs.cell_age[:] = data.get('cell_age', np.zeros(n_c))
     gs.cell_generation[:] = data.get('cell_generation', np.zeros(n_c, dtype=np.int8))
+    gs.cell_layer[:] = data.get('cell_layer', np.zeros(n_c, dtype=np.int8))     # V3.6
     gs.cell_cycle_time[:] = data.get('cell_cycle_time', np.zeros(n_c))       # V3.2
     if 'fixed' in data:
         gs.fixed[:] = np.asarray(data['fixed'], dtype=bool)
@@ -7525,6 +7603,7 @@ def _snapshot_dict(gs, F, pf, pi, pv, contacts):
         'cell_bridge_force': gs.cell_bridge_force.copy(),
         'cell_age': gs.cell_age.copy(),
         'cell_generation': gs.cell_generation.copy(),
+        'cell_layer': gs.cell_layer.copy(),            # V3.6
         'cell_cycle_time': gs.cell_cycle_time.copy(),   # V3.2
         'fixed': gs.fixed.copy(),
         'n_divisions_cum': int(getattr(gs, 'n_divisions_cum', 0)),

@@ -425,6 +425,25 @@ percolation).
   rounded-cell ceiling that reaches 366 nN once spread, and the two ramp together. That
   makes `F_max_per_cell = 150–200 nN` a *reasonable* cap rather than an arbitrary one, and
   points at `adhesion_area_frac` as the knob. Off by default (`stress_Pa = 0`).
+- **Cells crawl on cells** (V3.6): `cells.stacking.enabled` (default off). A cell's anchorage
+  is the *same* motor-clutch expression evaluated on whatever it stands on — layer 0 on the
+  granule, layer ≥ 1 on `substrate_E_kPa` / `substrate_poisson` with the ligand gain times a
+  cadherin factor in `f_cell_cell`. That substitution **is** the feature; the preference for
+  the granule is a consequence. Traction ratio cell/granule = **0.178** at 10 kPa, 0.109 at
+  50 kPa, 0.091 on PMMA — falling as granules stiffen, which is the motor-clutch story.
+  **Stiffness does ~91 % of it**: `f_cell_cell = 1.0` alone moves the ratio only
+  0.178 → 0.196, so a parity test must set *both* the modulus and the coverage.
+  **The trap**: `g` enters `motor_clutch_force` twice (prefactor *and* inside
+  `k_sub/(k_sub + g·k_opt)`), so the cadherin factor is folded into `g` before the call, never
+  multiplied onto the result. `cell_layer` (int8) is **derived from CSR rank each step**
+  (`k // cap`, the same rank the overcrowding rule uses), so there is no host-cell pointer to
+  be invalidated by `add_cells`. **Before V3.6 a tolerated overcrowded cell was frozen in
+  ATTACHED and never bridged** — `cell_stacking_max` was a senescence delay, not a second
+  storey. Turning stacking on therefore does two things, and the parity run separates them:
+  unfreezing adds bridges and 51 % to `F_mean`, then the cell substrate takes almost all of
+  it back because those bridges pull at 18 % strength. **A second storey adds connectivity
+  without adding much traction.** Preset `stacked_monolayer` seeds 1.8 storeys, because
+  `fibroblast_realistic` seeds at 0.8 of capacity and never overflows.
 - **Cell strain energy is the TFM-comparable observable** (V3.6). A loaded cell is a spring
   in series with what it grips (`1/k = 1/k_cell + 1/k_sub`; a bridging cell grips two), so
   `U = F²/2k` — one pass over the per-cell force arrays, no kernel change. `energy_cell`
