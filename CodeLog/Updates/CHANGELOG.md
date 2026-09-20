@@ -8,11 +8,57 @@ MINOR tracks feature additions and improvements.
 
 ---
 
-## [V3.6] - in progress (started 2026-09-19)
+## [V3.6] - 2026-09-19
 
 Plan: `CodeLog/ClaudesPlan/3.6.md`. Two things the engine models but the solver
 never feels, and they are the same defect twice: a substrate the force law knows
 about and the numerics never asks about.
+
+### Phase 6 - documentation sweep
+
+`CodeLog/Architecture/ARCHITECTURE.md` had not been touched since V3.0 and
+`CodeLog/Readme/README.md` since V3.1, so both described physics the engine no
+longer does. Corrected rather than appended to:
+
+* **Section 2.5 said "Hertz Contact Mechanics".** The live law has been **JKR**
+  since V2.3; `hertz_contact_force` is kept for reference and for the V1.x
+  comparison. Now documents `jkr_force_from_overlap` (and that it returns the
+  contact radius, which the semi-implicit stiffness, the V3.6 wall stiffness and
+  the V3.5 contact energy all consume without a second solve) and
+  `jkr_contact_energy`.
+* **Section 2.8 described the common-normal solver.** That solver was replaced
+  in V3.4, not tuned: it found **12 %** of true contacts, over-reported
+  penetration by a median **9.8x**, and reported the normal BACKWARDS for ~50 %
+  of 3D shaped contacts -- which, since force is applied as `-F n`, was
+  attraction. Now documents the support-function MTD solver, the separation
+  certificate that makes it 4.5x faster while finding 3.3x more contacts, and
+  the one-evaluation wall case.
+* **Section 2.10 showed `v = F/gamma`.** It has been `F/(gamma + dt k)` since
+  V3.2, and since V3.6 `dt` is a coupling interval with `advance()` substepping
+  above `step()`. Now shows the real loop and names the three things about it
+  that are easy to get wrong.
+* **The force table** listed Hertz-DMT contact and Hertz walls, and had no rows
+  for MC-DEM or gravity.
+* **README "Key Physics"** led with "Hertzian contact mechanics" and did not
+  mention gravity, containers, the MTD solver, the Laguerre metrics or the
+  gradient-flow audit.
+
+Added: **"Modules added V3.2-V3.6"** (the six new top-level modules and, for
+each, whether it imports from `gels.engine` -- they are all leaves, which is
+what lets the twins, the pipeline and the tests share them); **"The four
+numerical rails, and how to tell which one a run is on"**, which collects the
+recurring theme from V3.2 onward that the engine has several mechanisms standing
+in for the contact law and each is now observable; and the two audits that say
+whether the force law itself is sound. The architecture document gained a
+reading-order note saying which sections are stable and which were rewritten.
+
+README gained "What's New in V3.6", one paragraph each for V3.2-V3.5, the
+current package layout, and the `shadow_check.py` calibration step.
+
+**Deferred from the V3.3 backlog, with the reason recorded:** the HTML viewer
+adapter (V3.3 Phase 7). `pipeline/live_view.py` covers watching a run and
+`viz2/compare_runs.py` covers comparing several; the adapter's value is a
+gallery for runs that do not exist yet. Deferred, not dropped.
 
 ### Phase 5 - `gels/convergence.py`: has the run arrested?
 

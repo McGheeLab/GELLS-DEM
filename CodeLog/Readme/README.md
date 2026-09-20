@@ -18,14 +18,71 @@ over 24--72 hours.
 
 ### Key Physics
 
-- **Hertzian contact mechanics** with physically meaningful Young's modulus (1--100 kPa)
-- **Motor-clutch cell bridging** (Chan & Odde 2008) — substrate stiffness-dependent traction with probabilistic bridge initiation, maturity ramp, and senescence
-- **DMT adhesion** and **area-dependent friction** by granule pair type
-- **Superellipsoid granule shapes** (3D) / superellipse shapes (2D)
+- **JKR adhesive contact** (V2.3; Hertz+DMT before) with a physically meaningful Young's
+  modulus (1--100 kPa) and a separate cap on the *contact* stiffness for rigid beads
+- **Motor-clutch cell bridging** (Chan & Odde 2008) — substrate stiffness-dependent traction
+  with probabilistic initiation, a maturity ramp, lock-in and senescence; optionally a Hill
+  force-velocity element rather than a constant actuator
+- **Traction as a stress over the adhesion area** (V3.6), scaled by ligand coverage — with
+  the **cell strain energy** that traction force microscopy measures
+- **Superellipsoid / superellipse granules**, with contact detection by the closed-form
+  **support function** (V3.4): a true penetration depth, an exact `R_eff`, and forces that
+  are the gradient of an energy
 - **Quaternion-based 3D rotational dynamics**
-- **Transport metrics**: Kozeny-Carman permeability, Darcy flow, RCP compaction
-- **Volume conservation** via effective-radius correction for overlapping granules
+- **Gravity, containers and free surfaces** (V3.1): box or cylinder, walled or open top
+- **Transport metrics**: Kozeny-Carman *and* Katz-Thompson permeability, geodesic
+  tortuosity, Laguerre (halo-free) local packing fraction, contact-graph percolation
+- **Overdamped dynamics as gradient flow** (V3.5), with an audit that checks it
 - **Overdamped Langevin dynamics** (no inertia, appropriate for viscous culture medium)
+
+---
+
+## What's New in V3.6
+
+Three things the engine modelled but the solver never *felt*, plus the machinery
+to say when a run is done.
+
+- **`dt` is a coupling interval, not an integration step.** `contact.semi_implicit`
+  gets the equilibrium exactly right for any `dt`, but the *rate* wrong by
+  `1 + dt·k/gamma` — which at the shipped `dt = 0.5 h` averages **41** on a
+  cell-seeded bed, so a 24 h compaction came out ~4x low. `dynamics.substep: auto`
+  makes `dt` the interval the run is *sampled* at and substeps the mechanics
+  underneath it. It declines a passive run, because a bed that ends at a fixed
+  point does not care (measured: 0.05 % on a gravity bed).
+- **Cell types are objects** — `gels/celltypes/`, every value carrying its source.
+  `--cell-type fibroblast` (the only reviewed one) or `--cell-type msc`.
+  `--describe-cell-type NAME` prints the provenance and the derived checks.
+- **Traction is a stress over the contact area**, and cells now hold **strain
+  energy** — the quantity traction force microscopy reports, so the model has a
+  direct comparison with experiment it did not have before. It currently reads
+  about **10x below** a fibroblast on flat TFM; that is a visible calibration
+  target rather than an invisible one.
+- **Cells crawl on cells** (`cells.stacking`): a cell above the monolayer anchors
+  to a *cell*, and pulls at ~18 % of what it would on the granule. A second
+  storey adds connectivity without adding much traction.
+- **The wall is a real contact** — its stiffness reaches the implicit step, which
+  took a bed off the overlap rail.
+- **A convergence detector** (`convergence.enable`, off by default) with
+  proportional windows, and `pipeline/shadow_check.py` to calibrate it against
+  runs you have already paid for.
+
+### V3.2 – V3.5 in one paragraph each
+
+- **V3.2** — soft granules: `contact.overlap_model: elastic` sizes the overlap
+  allowance from the contact law, `contact.semi_implicit` takes stability duty off
+  the velocity cap, and the **numerical rails became observable**
+  (`overlap_clip_fraction`, `frac_velocity_clipped`). Shape-aware packing.
+- **V3.3** — structural metrics that measure the contact graph rather than a
+  halo-inflated render: union-find percolation, Laguerre local packing fraction,
+  Katz-Thompson permeability. Plus a minimum-image guard that had been silently
+  dropping periodic pairs.
+- **V3.4** — the **support-function MTD** contact solver. The old common-normal
+  solver found 12 % of true contacts, over-reported penetration 9.8x, and had the
+  normal *backwards* for half of 3D shaped contacts.
+- **V3.5** — energy descent: `dynamics.gradient_flow` audits `dE/dt <= 0` and
+  confirms the assembled force law is a gradient to **3.9e-9**; `packing.relax`
+  FIRE-relaxes the packed bed under the dynamics' own force law, taking the
+  handoff from 346x the driving load to 1.0x.
 
 ---
 
@@ -194,8 +251,19 @@ GELS/
 ├── gels/                         # Simulation engine package (V2.7+)
 │   ├── __init__.py               # Re-exports Params, run, load_run, ...
 │   ├── engine.py                 # Primary engine (was new_dem_0.py)
+│   ├── config.py                 # Sectioned YAML setup <-> Params (V3.0)
+│   ├── presets.py                # Named bundles of correlated overrides (V3.1)
+│   ├── celltypes/                # Instantiable cell types, each value sourced (V3.6)
+│   ├── convergence.py            # Proportional-window arrest detector (V3.6)
+│   ├── division.py               # Cell division pass (V3.1)
+│   ├── laguerre.py               # Halo-free local packing fraction (V3.3)
+│   ├── pore.py                   # Katz-Thompson permeability, tortuosity (V3.3)
+│   ├── kernels/                  # Compiled compute layer + its Python oracle (V3.0)
+│   ├── live/                     # Observer hook, live viewer (V3.0)
+│   ├── io/                       # Background snapshot writer (V3.0)
 │   └── lsdem.py                  # LS-DEM deformable particles
 ├── pipeline/                     # Step-by-step local runner (V2.7+)
+│   ├── step0_new_setup.py        # Write a sectioned YAML setup; --preset, --cell-type
 │   ├── step1_config.py           # Resolve parameters -> params.json
 │   ├── step2_pack.py             # Packing + cell seeding -> snap_0000
 │   ├── step3_simulate.py         # Advance dynamics to t_total
@@ -346,6 +414,17 @@ done
 
 Because each step checkpoints into `pipeline_state.json`, re-running the loop
 skips work that already completed and only picks up where it left off.
+
+`python pipeline/run_showcase.py` runs a table of conditions concurrently and
+then draws them on the same figures with `viz2/compare_runs.py`.
+
+Before enabling the V3.6 convergence detector on a sweep, calibrate it against
+runs you have already finished:
+
+```bash
+python pipeline/shadow_check.py results/
+python pipeline/shadow_check.py results/ --sweep eps_gel=0.005,0.01,0.02
+```
 
 The previous SLURM machinery (`hpc/`, `run_all_trials.py`,
 `run_hpc_headless.py`) is archived unmodified under `old code/` — see

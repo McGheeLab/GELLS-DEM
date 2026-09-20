@@ -1,8 +1,19 @@
 # GELS Architecture Document
 
-**Version:** V3.0 (in progress)
-**Last updated:** 2026-09-16
-**Primary source files:** `gels/engine.py`, `gels/kernels/reference.py`, `gels/lsdem.py`
+**Version:** V3.6 (in progress)
+**Last updated:** 2026-09-19
+**Primary source files:** `gels/engine.py`, `gels/kernels/reference.py`,
+`gels/convergence.py`, `gels/celltypes/`, `gels/laguerre.py`, `gels/pore.py`
+
+> **Reading order.** Sections 1–4 describe the shape of the system and are
+> broadly stable. Sections 2.5, 2.8 and 2.10 were rewritten for V3.4–V3.6 and
+> are the ones where the physics actually changed: the contact law is **JKR**,
+> not Hertz; shaped contact detection is the **support-function MTD** solver,
+> not a common normal; and `dt` is a **coupling interval** above which
+> `advance()` substeps the mechanics, not the integration step. "Modules added
+> V3.2–V3.6" and "The four numerical rails" in section 5 are the map of
+> everything after V3.0. `CLAUDE.md` is the authority on defaults and their
+> reasons; `CodeLog/Updates/CHANGELOG.md` on what changed when.
 
 ---
 
@@ -248,9 +259,22 @@ Pure functions for quaternion math:
 | `superellipsoid_implicit_world(...)` | Inside/outside test in world frame (uses quaternion) |
 | `superellipsoid_mesh(...)` | Triangle mesh for rendering |
 
-### 2.5 Hertz Contact Mechanics
+### 2.5 Contact Mechanics — JKR since V2.3
 
-Three functions implement the contact physics (V1.1+):
+**`hertz_contact_force` is no longer the force law**; it is retained for
+reference and for the V1.x comparison. The live law is JKR adhesive contact:
+
+#### `jkr_force_from_overlap(delta_um, R_eff_um, E_star_Pa, W_Jm2) -> (F, a)`
+`F = (4/3) E* a^3/R* - sqrt(8 pi W E* a^3)`, with the contact radius `a` solved
+from the overlap by Newton-Raphson. Reduces exactly to Hertz at `W = 0`. Returns
+the contact radius as well, which several later features consume without a
+second solve: the semi-implicit stiffness (`2 E_s a`), the wall stiffness (V3.6)
+and the JKR contact ENERGY (V3.5).
+
+#### `jkr_contact_energy(a, R*, E*, W)` (V3.5)
+`U(a) = (8/15) E* a^5/R*^2 - (4/3) sqrt(2 pi W E*) a^(7/2)/R* + pi W a^2`, the
+potential whose gradient is the force above. `dU/d(delta) = F` to 1e-10 across
+the JKR range.
 
 #### `hertz_contact_force(E_star_Pa, R_eff_um, delta_um) -> float`
 Hertzian normal force: `F = (4/3) E* sqrt(R*) delta^(3/2)`.
@@ -279,47 +303,82 @@ Per-step lifecycle: attachment → spreading → FA maturation → overcrowding
 | `generate_packing_3d()` | 3D | 3D RSA with superellipsoid shapes, random quaternion orientation |
 | `generate_packing_2d_slice()` | 2D-slice | Calls `generate_packing_3d()`, slices at z=Lz/2 via `slice_superellipsoid_z()` |
 
-### 2.8 Contact Detection
+### 2.8 Contact Detection — support-function MTD since V3.4
 
-**2D (V1.3):** Circle fast-path (`r_i + r_j - d`) or superellipse common normal (Newton-Raphson, 2 unknowns).
+**The common-normal solver was replaced, not tuned.** It detected **12 %** of
+true contacts at 2 % past first touch, over-reported penetration by a median
+**9.8x**, and reported the normal BACKWARDS for ~50 % of 3D shaped contacts --
+and since force is applied as `-F n`, that was attraction. The retired bodies
+survive under `*_cn` names, called by nothing, as evidence for the defect tests.
 
-**3D (V1.4):**
-- `find_contact_spheres_3d()` — analytical sphere-sphere overlap
-- `find_contact_superellipsoids_3d()` — Newton-Raphson with 4 unknowns (eta_i, omega_i, eta_j, omega_j). Returns penetration depth, contact normal, contact point, local curvature radii.
-- `find_contact_wall_3d()` — 6 wall faces with bounding-sphere sampling
+The support function of the two-exponent superellipsoid is closed form -- a
+nested dual norm `h(n) = ||(||(a nx, b ny)||_q1, c nz)||_q2` with `q = n/(n-1)` --
+so `sep(n) = (c2-c1).n - h1(n) - h2(n)` is concave, `delta = -max sep` is a true
+penetration depth, and the force is the gradient of an energy.
+
+- **Circle / sphere fast path** — unchanged analytical overlap.
+- `find_contact_superellipses` / `find_contact_superellipsoids_3d` — **are** the
+  MTD solver; there is no solver flag. `grad h` IS the support point, so the
+  contact point is free, `(eta, omega)` invert in closed form, and
+  `R_eff = sqrt(det grad^2 h)` on the tangent plane is exact to ~1e-11 against
+  the old scheme's ~1e-3.
+- **`sep(n0) > 0` PROVES separation** and returns immediately, which is why the
+  new solver is 4.5x faster at realistic neighbour-list occupancy while finding
+  3.3x more contacts. The old one ran 15 unconditional iterations per candidate.
+- **Walls are the easy case**: a wall is a half-space, so
+  `penetration = h(-w) - (c-q).w` and the contact point `= c + grad h(-w)` are
+  exact in ONE support evaluation. This replaced six brute-force samplers that
+  under-reported penetration by a median 0.118 um -- the size of the overlaps
+  being resolved.
+
+`contact.curvature_R_cap` defaults to 2.0 because the new `R_eff` at a flat face
+is the true ~1e15 um; it cannot bind for spheres.
 
 ### 2.9 Force Computation
 
 | Force | Scope | Law | Key parameters |
 |-------|-------|-----|----------------|
-| **Contact (normal)** | All overlapping pairs | Hertz − DMT | `E_modulus`, `poisson_ratio`, `W_adh_*` |
+| **Contact (normal)** | All overlapping pairs | **JKR** (V2.3; Hertz+DMT before) | `E_modulus`, `poisson_ratio`, `W_adh_*`, `contact_E_cap` |
 | **Contact (tangential)** | All overlapping pairs | Area-dependent friction | `tau_0_*`, `friction_v_ref` |
 | **Contact torque** | Non-spherical granules | τ = (contact_pt − centre) × F | Off-centre contacts |
 | **Cell bridging** | Functional pairs with spreading/proliferating cells | Motor-clutch (probabilistic, maturity-ramped, lock-in) | `bridge_attempt_rate`, `bridge_formation_time`, `min_fa_for_bridge`, `bridge_lock_force_threshold` (V1.9) |
-| **Wall** | Granules penetrating boundary (walls mode) | Hertz (rigid flat) | 4 walls (2D) or 6 walls (3D); disabled in periodic mode (V1.10) |
+| **Wall** | Granules penetrating boundary (walls mode) | JKR on a half-space, from the support function (V3.4) | 4 walls (2D), 6 faces or floor+cylinder (3D); `contact.wall_torque`; disabled in periodic mode |
+| **MC-DEM** | Soft granules with many contacts | Confinement factor `kappa` on the repulsion (V2.2) | `mc_dem_enabled`, `mc_dem_kappa_max`. **Not a gradient of any energy** — it is most of the V3.5 audit's residual for shapes |
+| **Gravity** | All granules (V3.1) | Buoyant weight `(rho_g - rho_m) g V` | `gravity_enabled`, per-species `density_kg_m3` |
 | **Active noise** | Functional granules only | Gaussian white noise | `T_active` |
 
 Dispatch: `compute_forces()` → 2D path, `compute_forces_3d()` → 3D path.
 
-### 2.10 Time Integration — `step()`
+### 2.10 Time Integration — `step()`, and `advance()` above it
 
-**2D path:**
 ```
-update_cell_state(gs, p, t)
-F, torques, contacts = compute_forces(gs, p, rng)
-v = F / gamma;  |v| = min(|v|, v_max)
-x += v * dt;  x = clamp(x, 4 walls)
-theta += omega * dt  (non-circular granules)
+update_cell_state(gs, p, t)                  # cell state machine, division, layers
+F, torques, contacts = compute_forces*(gs, p, rng)
+gamma = drag_scale * r
+gamma += dt * contact_stiffness_per_granule(gs, contacts)   # semi-implicit (V3.2)
+v = F / gamma
+v *= speed_rails(v_max, population_cap)      # two rails, reported separately (V3.6)
+x += v * dt;   theta / quat integrate
+apply_position_bounds(gs, p);  _resolve_overlaps(gs, p);  apply_position_bounds
 ```
 
-**3D path:**
-```
-update_cell_state(gs, p, t)
-F, torques, contacts = compute_forces_3d(gs, p, rng)
-v = F / gamma;  |v| = min(|v|, v_max)
-x,y,z += v * dt;  clamp to 6 walls
-quat = quat_integrate(quat, omega_3d, dt)
-```
+Three things about this loop are easy to get wrong and are documented where they
+are decided:
+
+* **`contact_semi_implicit` (default true since V3.4)** takes
+  `v = F/(gamma + dt k)`. At the fixed point `F = 0`, so the equilibrium is
+  exact for any `dt` — that is the unconditional stability. But the RATE is
+  wrong by `(1 + S)` with `S = dt k/gamma`, and at the shipped `dt = 0.5 h` on a
+  cell-seeded bed **S averages 41**. `k` includes WALL contacts since V3.6.
+* **`advance()` (V3.6)** therefore sits above `step()`: `dt` is the interval at
+  which the run is SAMPLED, and the mechanics inside it is advanced in `n_sub`
+  substeps sized so `S ~ 0.2`. A substep is an ordinary `step` with a smaller
+  `dt`, because everything inside is already a rate times `dt`. `v_max` is
+  scaled with the subdivision so it caps displacement per coupling interval.
+* **Two velocity rails, reported separately.** `v_max` is absolute;
+  `dynamics.outlier_speed` caps a granule at 8x the median of its own
+  coordination class. `frac_velocity_clipped` / `frac_outlier_clipped` never
+  double-count.
 
 ### 2.11 Phase Field Rendering
 
@@ -545,6 +604,49 @@ never blocks on the viewer; a closed window detaches and the run continues. Snap
 history writes are atomic (`.tmp` + `os.replace`), so a tailing viewer never sees a
 half-written file. The parent process stays on Agg; the child sets `MPLBACKEND=TkAgg`
 before importing matplotlib.
+
+### Modules added V3.2–V3.6
+
+The engine grew six top-level modules after V3.0. Each is deliberately a LEAF —
+it imports from `gels.engine` or from nothing, never the reverse — so the twins,
+the pipeline and the tests can all use it and the kernels stay importable.
+
+| Module | Added | What it is | Imports from `gels.engine`? |
+|---|---|---|---|
+| `gels/division.py` | V3.1 | Cell division pass: doubling time, contact inhibition, the `cycle` model that makes 24 h *mean* 24 h. `age_cells` is called from **both** `update_cell_state` twins — until V3.2 nothing advanced `gs.cell_age`, so with the default 8 h refractory no cell ever divided | yes |
+| `gels/laguerre.py` | V3.3 | Radical (Laguerre) Voronoi: the **halo-free** local packing fraction. `compaction_func = phi_loc_func / phi_RCP` is the honest twin of `compaction_ratio`, which is ~1.5x inflated by the tanh interface. Qhull cannot be compiled, so this is top level, not a kernel; `metrics_laguerre` is off by default at 0.3–1 s/frame | yes |
+| `gels/pore.py` | V3.3 | Katz-Thompson permeability and geodesic tortuosity on the signed-distance field both twins were already building and half-discarding | yes |
+| `gels/kernels/percolation.py` | V3.3 | Union-find percolation on the **real contact graph** (`gran_lf_*`, `gran_span_*`, `gran_z_mean`, `gran_rattler_frac`), against `func_lf`'s thresholded tanh field. Pure NumPy, called by both twins so they cannot disagree | no |
+| `gels/celltypes/` | V3.6 | Instantiable cell types, every value carrying its source. `to_overrides()` emits the same dotted currency as a preset, so a preset states the scaffold and a cell type states the cell | only for the geometry cross-check, in tests |
+| `gels/convergence.py` | V3.6 | Proportional-window arrest detector. Consumes the flat metrics dict and a position array and imports **nothing** from the engine, which is what lets `pipeline/shadow_check.py` replay a finished run through the identical code | **no** |
+
+### The four numerical rails, and how to tell which one a run is on
+
+A recurring theme from V3.2 onward: the engine has several mechanisms that stand
+in for the contact law, and a run dominated by one of them looks exactly like a
+run doing physics. Each is now observable.
+
+| Rail | What it does instead of the contact law | Diagnostic | Added |
+|---|---|---|---|
+| Overlap projection | Pushes granules apart geometrically when `max_overlap_frac` is exceeded | `n_overlap_clipped`, `overlap_clip_fraction`, `max_overlap_ratio` (equal to `max_overlap_frac` means pinned) | V3.2 |
+| Velocity cap | Discards force MAGNITUDE above `v_max * drag_scale * r` | `frac_velocity_clipped` | V3.2 |
+| Population speed cap | Limits a granule against its own coordination class | `frac_outlier_clipped` | V3.6 |
+| Semi-implicit damping | Correct fixed point, RATE too slow by `1 + dt k/gamma` | `stiffness_number`, `n_substeps`, `substep_budget_bound` | V3.6 |
+
+And two audits that say whether the force law itself is sound:
+
+* **`dynamics.gradient_flow`** (V3.5) — overdamped dynamics is gradient flow, so
+  the energy must fall every step and the work must account for the fall.
+  Central-differencing the total energy against `compute_forces` gives **3.9e-9**
+  for spheres with walls and gravity. Four things break it and all are
+  intentional: active noise, explicit friction, MC-DEM and shaped granules.
+  `energy_residual` is then the non-conservative throughput — and with cells
+  seeded, after V3.6 subtracts `energy_cell`, it is the **myosin work**.
+* **`handoff_force_balance`** (V3.4) + **`packing.relax`** (V3.5) — the packer
+  used to hand over a bed pre-loaded far above the driving load, because the
+  settle stops on a LENGTH tolerance that knows nothing about the contact law
+  the dynamics will apply. FIRE-relaxing under the *exact* dynamics force law
+  takes a shaped gravity bed from 346x the granule weight to 1.0x.
 
 ### Execution — `pipeline/` package (V2.7+)
 

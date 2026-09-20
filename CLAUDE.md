@@ -6,7 +6,11 @@
 is a 2D/3D overdamped particle dynamics simulator for modelling cell-driven rearrangement
 of hydrogel granular scaffolds. The primary simulation engine is `gels/engine.py`.
 
-**Current version: V3.6 (in progress — see `CodeLog/Updates/CHANGELOG.md` for landed phases)**
+**Current version: V3.6 — all six phases landed. See `CodeLog/Updates/CHANGELOG.md`.**
+
+`CodeLog/Architecture/ARCHITECTURE.md` and `CodeLog/Readme/README.md` were swept for
+V3.6 and are current. This file remains the authority on defaults and *why* they are
+what they are; the architecture document is the authority on shape and data flow.
 
 **Runs are local only.** HPC execution was retired in V2.7; simulations are driven
 by the five numbered steps in `pipeline/`. See `pipeline/README.md`.
