@@ -8,6 +8,176 @@ MINOR tracks feature additions and improvements.
 
 ---
 
+## [V3.8] - 2026-09-20
+
+Plan: `CodeLog/ClaudesPlan/3.8.md`. The question was whether
+`cell_sense_distance` could be derived from the random search distance a cell
+covers in `dt`, since 80 um is asserted rather than measured. Chasing it found
+something worse in the mechanism the question was about.
+
+### The bug
+
+The cell's random walk on the granule surface was scaled **ballistically**:
+
+```python
+sigma = p.cell_migration_speed * p.dt / r_eff      # pre-V3.8
+```
+
+`v*dt` is a ballistic displacement being used as the standard deviation of a
+diffusive increment. Variance adds, so over a window `T` taken in steps of `dt`
+the spread is `(v/r) sqrt(T dt)` -- it **depends on the timestep**. A random walk
+composes under subdivision only when `sigma ~ sqrt(dt)`.
+
+V3.6 made it bite: `dt` became a coupling interval and `advance()` subdivides it
+129-330x on the flagship fibroblast preset, so the search shrank by
+`sqrt(n_sub)`. Measured over one coupling interval, division off so the CSR
+indices are stable:
+
+| T = 0.5 h | RMS \|d theta\| | arc | predicted |
+|---|---|---|---|
+| `substep: off` (n_sub = 1) | 0.382 rad | **17.0 um** | 0.337 |
+| `substep: auto` (n_sub = 129) | 0.033 rad | **1.45 um** | 0.030 |
+| | | **11.75x suppressed** | sqrt(129) = 11.4 |
+
+V3.6's claim that "everything inside `step` is already a rate times dt" holds for
+`1 - exp(-rate dt)`, `+= dt` and `speed*dt`. It does not hold for a Gaussian
+increment whose width is proportional to `dt`. **This was invisible because V3.6
+re-blessed the baseline** -- the cost the V3.5 "re-bless, don't pin" rule
+knowingly accepts, which is why it is written out here.
+
+The sharp statement: **the model's persistence time was whatever `dt` happened
+to be.**
+
+### The fix: a persistent random walk
+
+The walk now carries a heading. The heading is the only random term and it has
+the `sqrt(dt)` scaling; the displacement is a rate times dt. That gives
+`MSD(t) = 2 d D [t - tau (1 - e^{-t/tau})]` with `D = v^2 tau / d`: **ballistic
+for `t << tau`, diffusive for `t >> tau`, and independent of `dt` either way.**
+
+* **3D** (the surface is 2-dimensional): a heading angle in the tangent plane
+  diffuses at `1/tau`, and the cell steps `v dt` along it.
+* **2D** (the surface is the 1-dimensional circumference): a telegraph process,
+  the heading sign flipping with probability `1 - exp(-dt/tau)`.
+
+Pure diffusion (`sigma = sqrt(2 D dt)/r`) would also have been dt-independent but
+gives the LONG-time answer at all times -- 30 um against a true 13.9 um for a
+fibroblast over 0.5 h, because `dt < tau` is the ballistic regime and the
+substeps run deeper into it. Hence the heading.
+
+Measured after: **11.75x -> 1.175x**. What remains is the coarse resolution of
+the heading process at `dt/tau = 0.5`, not a scaling error; the substepped
+answer is the converged one.
+
+### Persistence time is a REQUIRED cell-type value
+
+`persistence_time_h` is a `Measured` field on `CellType` with **no default**, so
+no type can be defined without stating how long its cells keep going in one
+direction -- the same discipline V3.6 applied to every other cell value.
+
+`fibroblast` = **1.0 h**, sourced to Gail & Boone 1970 (Biophys J 10:980-993),
+which is the origin of the persistent-random-walk description of fibroblast
+locomotion. The source string is precise about what that paper supports: its own
+data show direction persisting between successive 2.5 h intervals and appearing
+random over 5 h, so **1.0 h is the short end** of its range and is the
+conservative choice. The span is (0.5, 3.0), and the model is linear in `tau`
+through `D = v^2 tau / 2`, so a factor of 3 here is a factor of 3 in search area.
+
+`msc` states 1.0 h marked `ASSUMPTION` -- it borrows the fibroblast value and has
+had no review, as with the rest of that type.
+
+New derived helpers on `CellType`: `surface_diffusivity_um2_per_h()` and
+`search_distance_um(t_h)`.
+
+### Mean-field crowding
+
+`crowd_mobility` gives `mobility = (1 - theta) + theta * p_climb`, the
+lattice-gas mean-field result for simple exclusion, with `theta =
+n_attached / capacity` from the per-granule aggregates that already exist. A
+cell prefers the granule but may cross over another cell.
+
+`p_climb` is **`f_cell_cell`**, and that is the point: the same number that makes
+a stacked cell pull at 0.178x in V3.6 also sets how willing a cell is to climb
+onto one. One parameter, two observables, so they cannot disagree about the
+preference -- and `f_cell_cell` is flagged as an ASSUMPTION needing calibration,
+so a second observable is worth having.
+
+`f_cell_cell = 1` gives mobility 1 at any occupancy, which is exactly the
+pre-V3.8 walk and is the parity test. `cells.migration` gains nothing for this;
+the switch is `cell_crowding_enabled` (default on).
+
+### What `cell_sense_distance` turned out to be, and why it was not changed
+
+It **is** the void-spanning range the question was about -- tested against `gap`,
+the surface-to-surface separation between two granules, at four sites. But it is
+a hard cutoff sitting on top of `exp(-gap / bridge_decay_length)` with
+`bridge_decay_length = 30 um`. At the fibroblast's 80 um the path factor is
+already `e^(-8/3) = 7 %` of its contact value, so **the cutoff does very little
+and `bridge_decay_length` is what actually sets the range.** Deriving
+`sense_distance` from search would have been tuning the wrong knob. Its current
+meaning -- the cell's reach, which caps the search -- is correct and is left
+alone.
+
+### Tests
+
+`tests/test_cell_walk.py`, 21 tests: dt-independence (the bug), both limits of
+the MSD, crowding parity at `f_cell_cell = 1` and pure exclusion at 0, the
+required-field check on every cell type, twin agreement, and the spawned-stream
+contract.
+
+**Crowding parity is exact end to end, not statistical**: `f_cell_cell = 1`
+gives mobility identically 1.0 at every occupancy, so the run consumes the same
+RNG and takes the same path as `crowding: false` -- identical `n_bridges` (576)
+and `F_mean`. That is the falsifiable form of "off by construction at parity",
+the same discipline V3.6's stacking parity test follows.
+
+Two measurement traps are pinned as tests, because each cost a wrong answer
+while this was being found:
+
+* `fibroblast_realistic` has division ON and `add_cells` rebuilds the CSR, so an
+  index-wise comparison of `cell_theta_local` across it silently compares
+  **different cells**;
+* `pi/sqrt(3) = 1.8138 rad` is the RMS of a uniform distribution on a circle, so
+  a long enough window reads that value whatever the walk does -- two runs
+  11.75x apart looked identical.
+
+### Config and metrics
+
+`cells.migration.persistence_time_h` (1.0) and `cells.migration.crowding` (true).
+`cells.sensing.sense_distance_um` is unchanged.
+
+Two new metric keys, because a mobility factor that silently multiplies the
+search speed with no observable would be out of character -- the same reason
+`n_substeps`, `frac_velocity_clipped`, `stress_volume` and
+`laguerre_valid_frac` exist. `cell_occupancy_mean` and `cell_crowd_mobility`,
+averaged over granules that HAVE cells (an empty one is trivially 1.0 and would
+dilute the mean). On the flagship preset they read 0.448 and 0.619.
+
+### Baseline
+
+**Re-blessed**, and this is the record, because after re-blessing the gate can
+no longer see any of it. What moved, and why:
+
+* the walk's increment changed shape (a heading plus a step, instead of one
+  Gaussian), so every trajectory with cells on it changed;
+* the RNG stream consumption changed -- 3D used to draw two normals per mobile
+  cell per step and now draws one, so everything downstream of it shifts;
+* crowding is on by default, so the walk is slower on an occupied granule than
+  the V3.7 walk was at the same speed;
+* the initial heading is randomised at seeding. It is drawn from a **spawned
+  child stream**, not from `rng`: with division off, `_initialize_cells` is
+  contracted to consume exactly the surface-angle draws and nothing else
+  (`test_seeding_draws_nothing_when_division_is_off`), and taking the headings
+  from the parent shifted every later draw -- it moved the seeded cell-age CV
+  from 0.577 to 0.706 before the suite caught it. `spawn` derives from the seed
+  sequence without advancing the parent, so the headings are reproducible for a
+  given seed and cost the packing nothing.
+
+The four reference runs (`run2d_walls`, `run2d_periodic`, `run2d_shapes`,
+`run3d_spheres`) all changed, as expected: all four seed cells.
+
+---
+
 ## [V3.7] - 2026-09-19
 
 Plan: `CodeLog/ClaudesPlan/3.7.md`. A sweep of `viz/`, `viz2/` and `analysis/`

@@ -120,6 +120,11 @@ class CellType:
 
     # ── kinetics ──────────────────────────────────────────────────────
     migration_speed_um_per_h: Measured
+    # V3.8. REQUIRED, deliberately: it has no default, so no cell type can exist
+    # without stating how long it keeps going in one direction. Before V3.8 the
+    # walk had no persistence time at all -- `sigma = v*dt/r` implied
+    # `tau_p = dt`, i.e. the model's persistence was whatever the timestep was.
+    persistence_time_h: Measured
     contraction_speed_um_per_h: Measured
     sense_distance_um: Measured
     spread_duration_h: Measured
@@ -148,6 +153,32 @@ class CellType:
         A_spread = math.pi * (3.0 * ((4.0 / 3.0) * math.pi * r ** 3)
                               / (4.0 * math.pi * (h / 2.0)))
         return A_sphere + float(spread_fraction) * (A_spread - A_sphere)
+
+    def surface_diffusivity_um2_per_h(self) -> float:
+        """``D = v^2 tau_p / d`` on the granule surface, um^2/h (V3.8).
+
+        ``d = 2``: the granule surface is two-dimensional. This is the long-time
+        diffusivity of the persistent random walk, reached only for
+        ``t >> tau_p``; use `search_distance_um` for a finite window.
+        """
+        v = _v(self.migration_speed_um_per_h)
+        return v * v * _v(self.persistence_time_h) / 2.0
+
+    def search_distance_um(self, t_h: float) -> float:
+        """RMS displacement of the persistent random walk over ``t_h`` (V3.8).
+
+        ``MSD(t) = 2 d D [t - tau_p (1 - e^{-t/tau_p})]``, which is ``v t``
+        (ballistic) for ``t << tau_p`` and ``sqrt(2 d D t)`` (diffusive) for
+        ``t >> tau_p``. Quoting the diffusive form at short times overestimates
+        badly -- 30 um against a true 13.9 um for a fibroblast over 0.5 h.
+        """
+        tau = _v(self.persistence_time_h)
+        if tau <= 0 or t_h <= 0:
+            return 0.0
+        d = 2
+        D = self.surface_diffusivity_um2_per_h()
+        msd = 2.0 * d * D * (t_h - tau * (1.0 - math.exp(-t_h / tau)))
+        return math.sqrt(max(msd, 0.0))
 
     def adhesion_area_um2(self, spread_fraction: float = 1.0) -> float:
         """The part of the footprint that is actually focal adhesion, um^2."""
@@ -215,6 +246,7 @@ class CellType:
             f'cells.stacking.f_cell_cell={_v(self.f_cell_cell):g}',
             f'cells.motor_clutch.F_max_per_cell_nN={_v(self.total_traction_nN):g}',
             f'cells.migration.speed_um_per_h={_v(self.migration_speed_um_per_h):g}',
+            f'cells.migration.persistence_time_h={_v(self.persistence_time_h):g}',
             f'cells.bridging.contraction_speed_um_per_h={_v(self.contraction_speed_um_per_h):g}',
             f'cells.sensing.sense_distance_um={_v(self.sense_distance_um):g}',
             f'cells.kinetics.spread_duration_h={_v(self.spread_duration_h):g}',

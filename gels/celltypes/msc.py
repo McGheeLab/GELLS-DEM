@@ -63,6 +63,13 @@ CELL_TYPE = CellType(
                           'collagen-coated granule -- calibrate first', (0.0, 1.0)),
     migration_speed_um_per_h=M(15.0, 'um/h', 'hMSC 10-25 um/h on 2D '
                                              '[typical reported range]', (10.0, 25.0)),
+    # V3.8: required, and this type has not been reviewed, so it says so. The
+    # search distance goes as sqrt(tau_p), so this is not a harmless placeholder
+    # -- it sets how far an MSC explores before it can bridge.
+    persistence_time_h=M(1.0, 'h', ASSUMPTION + ': the fibroblast value borrowed '
+                                   'wholesale (Gail & Boone 1970); no MSC '
+                                   'persistent-random-walk fit was reviewed',
+                         (0.5, 3.0)),
     contraction_speed_um_per_h=M(10.0, 'um/h', ASSUMPTION + ': fibroblast value, scaled',
                                  (6.0, 30.0)),
     sense_distance_um=M(90.0, 'um', ASSUMPTION + ': larger cell, longer reach',

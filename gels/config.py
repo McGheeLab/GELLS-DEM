@@ -211,6 +211,8 @@ class MotorClutch:
 @dataclass
 class Migration:
     speed_um_per_h: float = _P.cell_migration_speed
+    persistence_time_h: float = _P.cell_persistence_time      # V3.8
+    crowding: bool = _P.cell_crowding_enabled                 # V3.8
     directed_speed_mult: float = _P.bridge_directed_speed_mult
 
 
@@ -514,6 +516,8 @@ FLAT_MAP = [
     ('cells.motor_clutch.traction_f_rule', 'traction_f_rule'),
     ('cells.motor_clutch.traction_exponent', 'traction_exponent'),
     ('cells.migration.speed_um_per_h', 'cell_migration_speed'),
+    ('cells.migration.persistence_time_h', 'cell_persistence_time'),   # V3.8
+    ('cells.migration.crowding', 'cell_crowding_enabled'),             # V3.8
     ('cells.migration.directed_speed_mult', 'bridge_directed_speed_mult'),
     ('cells.sensing.sense_distance_um', 'cell_sense_distance'),
     ('cells.sensing.bridge_decay_length_um', 'bridge_decay_length'),
@@ -1406,6 +1410,15 @@ cells:                             # human dermal fibroblasts
     f_cell_cell: 0.15            # cadherin coverage; 1.0 = parity with the granule
   migration:
     speed_um_per_h: 30.0           # 12-60 um/h on collagen (0.2-1 um/min)
+    persistence_time_h: 1.0        # directional persistence; D = v^2 tau/2 on the
+                                   #   surface. Ballistic for dt << tau, diffusive for
+                                   #   t >> tau, dt-independent either way (V3.8).
+                                   #   0 disables the walk.
+    crowding: true                 # mean-field excluded volume on the granule surface:
+                                   #   mobility = (1-theta) + theta*p_climb, with
+                                   #   p_climb = cells.stacking.f_cell_cell, so ONE
+                                   #   number sets both how hard a stacked cell pulls
+                                   #   and how willing a cell is to climb (V3.8)
     directed_speed_mult: 2.0       # crawl speed multiplier toward a bridge target
   sensing:
     sense_distance_um: 40.0        # whole-cell reach (40-100 um for elongated fibroblasts)

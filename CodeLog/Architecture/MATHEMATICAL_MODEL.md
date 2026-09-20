@@ -326,12 +326,50 @@ $$n_{\max} = \left\lfloor \frac{\pi R^2 \cdot c_{\text{cov}}}{A_{\text{cell}}} \
 
 Excess cells ($n_{\text{attached}} > n_{\max}$) transition to the SENESCENT state.
 
-**Migration.** Mobile cells (ATTACHED, SPREADING, PROLIFERATING) undergo a random walk
-on the granule surface, with angular displacement per timestep:
+**Migration.** Mobile cells (ATTACHED, SPREADING, PROLIFERATING) undergo a
+**persistent** random walk on the granule surface (V3.8). The cell carries a heading;
+the heading diffuses, and the cell steps along it:
 
-$$\Delta\theta \sim \mathcal{N}\!\left(0, \; \frac{v_{\text{mig}} \, \Delta t}{R_i}\right)$$
+$$\Delta\phi \sim \mathcal{N}\!\left(0,\; \sqrt{2\,\Delta t/\tau_p}\right), \qquad
+  \Delta\theta = \frac{v_{\text{mig}}\, m\, \Delta t}{R_i}\,\hat e(\phi)$$
 
-where $v_{\text{mig}}$ is the migration speed ($\mu$m/h).
+with $\tau_p$ the directional persistence time and $m$ the crowding mobility below.
+In 3D the surface is two-dimensional and $\phi$ is an angle in its tangent plane; in
+2D the surface is the circumference and the heading is a sign flipping with
+probability $1-e^{-\Delta t/\tau_p}$ (a telegraph process). Both give
+
+$$\mathrm{MSD}(t) = 2 d D \left[t - \tau_p\left(1 - e^{-t/\tau_p}\right)\right],
+  \qquad D = \frac{v_{\text{mig}}^2 \tau_p}{d}$$
+
+which is ballistic ($v t$) for $t \ll \tau_p$ and diffusive ($\sqrt{2dDt}$) for
+$t \gg \tau_p$.
+
+*Why the heading, and not simply $\sigma = \sqrt{2D\,\Delta t}$.* Before V3.8 the
+increment was $\mathcal{N}(0, v_{\text{mig}}\Delta t / R_i)$ — a **ballistic**
+displacement used as the width of a **diffusive** step. Variance adds, so the search
+over a window $T$ went as $(v/R)\sqrt{T\,\Delta t}$: it depended on the timestep, and
+V3.6's substepping (§2.10) suppressed it by $\sqrt{n_{\text{sub}}}$ — measured
+**11.75×**. A random walk composes under subdivision only when $\sigma \sim
+\sqrt{\Delta t}$, which here is true of the heading alone. Pure diffusion would also
+be $\Delta t$-independent, but it gives the long-time answer at *all* times: 30 µm
+against a true 13.9 µm for a fibroblast over 0.5 h, since $\Delta t < \tau_p$ is the
+ballistic regime and the substeps run deeper into it.
+
+$\tau_p$ is a **required** cell-type value with no default (`persistence_time_h`);
+fibroblast 1.0 h, after Gail & Boone (1970).
+
+**Crowding.** A cell prefers the granule but may cross over another cell. The
+mean-field lattice-gas mobility for simple exclusion, with climbing rather than
+rejection, is
+
+$$m = (1 - \theta) + \theta\, p_{\text{climb}}, \qquad
+  \theta = n_{\text{attached}} / n_{\max}$$
+
+and $p_{\text{climb}} = f_{\text{cell-cell}}$ — the same cadherin coverage that sets
+the stacked-cell traction ratio (§ cell stacking), so one parameter governs both how
+hard a stacked cell pulls and how willing a cell is to climb onto one.
+$f_{\text{cell-cell}} = 1$ gives $m = 1$ at any occupancy, recovering the uncrowded
+walk exactly.
 
 ---
 

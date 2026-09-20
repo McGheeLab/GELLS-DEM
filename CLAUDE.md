@@ -6,7 +6,7 @@
 is a 2D/3D overdamped particle dynamics simulator for modelling cell-driven rearrangement
 of hydrogel granular scaffolds. The primary simulation engine is `gels/engine.py`.
 
-**Current version: V3.7 — all three phases landed. See `CodeLog/Updates/CHANGELOG.md`.**
+**Current version: V3.8 — all three phases landed. See `CodeLog/Updates/CHANGELOG.md`.**
 
 `CodeLog/Architecture/ARCHITECTURE.md` and `CodeLog/Readme/README.md` were swept for
 V3.6 and are current. This file remains the authority on defaults and *why* they are
@@ -432,6 +432,66 @@ percolation).
   rounded-cell ceiling that reaches 366 nN once spread, and the two ramp together. That
   makes `F_max_per_cell = 150–200 nN` a *reasonable* cap rather than an arbitrary one, and
   points at `adhesion_area_frac` as the knob. Off by default (`stress_Pa = 0`).
+- **The cell's surface search is a PERSISTENT random walk** (V3.8). Until V3.8 it
+  drew `N(0, v·dt/r)` — a *ballistic* displacement used as the width of a *diffusive*
+  increment. Variance adds, so the search went as `(v/r)·√(T·dt)`: it **depended on the
+  timestep**. V3.6 made that bite, because `dt` became a coupling interval subdivided
+  129–330× on the flagship preset, so the search shrank by `√n_sub` — **measured 11.75×
+  suppressed** at one coupling interval (17.0 µm → 1.45 µm of arc). V3.6's "everything
+  inside `step` is already a rate × dt" holds for `1−exp(−rate·dt)`, `+= dt` and
+  `speed·dt`; **it does not hold for a Gaussian whose width is ∝ dt**. It was invisible
+  because V3.6 re-blessed the baseline. The sharp statement: **the model's persistence
+  time was whatever `dt` happened to be.**
+  The walk now carries a **heading** — the only random term, and it has the `√dt`
+  scaling, while the displacement is a rate × dt. That gives
+  `MSD(t) = 2dD[t − τ(1−e^{−t/τ})]` with `D = v²τ/d`: ballistic for `t ≪ τ`, diffusive
+  for `t ≫ τ`, `dt`-independent either way. 3D: a heading angle in the surface tangent
+  plane diffusing at `1/τ`. 2D: a telegraph process, the sign flipping at
+  `1−exp(−dt/τ)`. **Pure diffusion `√(2D·dt)` would also be dt-independent but is
+  wrong at short times** — 30 µm against a true 13.9 µm over 0.5 h, because `dt < τ` is
+  the ballistic regime and the substeps run deeper into it. Measured after:
+  **11.75× → 1.175×**, the residual being the coarse resolution of the heading at
+  `dt/τ = 0.5`, not a scaling error.
+- **`persistence_time_h` is a REQUIRED cell-type value** (V3.8) — a `Measured` with no
+  default, so no type can exist without stating it. `fibroblast` = **1.0 h** (Gail &
+  Boone 1970, the origin of the persistent-random-walk description of fibroblast
+  locomotion). Be precise about the number: that paper shows direction persisting across
+  **2.5 h** intervals and randomising by 5 h, so **1.0 h is the short end** of what it
+  supports, and the source string says so. Span (0.5, 3.0), and `D = v²τ/2` is linear in
+  τ, so a factor of 3 here is a factor of 3 in search area. `msc` borrows it and is
+  marked `ASSUMPTION`.
+- **Crowding is mean-field, and `f_cell_cell` does double duty** (V3.8).
+  `crowd_mobility = (1−θ) + θ·p_climb` with `θ = n_attached/capacity` — the lattice-gas
+  result for simple exclusion, with climbing instead of pure rejection. **`p_climb` IS
+  `f_cell_cell`**, the same number that makes a stacked cell pull at 0.178× in V3.6, so
+  one parameter governs both how hard a stacked cell pulls and how willing a cell is to
+  climb onto one; they cannot disagree about the preference. `f_cell_cell = 1` gives
+  mobility 1 at any occupancy — exactly the pre-V3.8 walk, and the parity test.
+  Keys: `cells.migration.persistence_time_h`, `cells.migration.crowding`; watch
+  `cell_occupancy_mean` and `cell_crowd_mobility` (0.448 / 0.619 on the flagship
+  preset). **Parity is exact, not statistical** — at `f_cell_cell = 1` the mobility
+  is identically 1.0 at every occupancy, so the run consumes the same RNG and gives
+  identical `n_bridges` to `crowding: false`.
+- **A seeding draw must not touch the packing stream** (V3.8). `_initialize_cells` is
+  contracted to consume exactly the surface-angle draws when division is off
+  (`test_seeding_draws_nothing_when_division_is_off`). The V3.8 heading randomisation
+  therefore comes from `rng.spawn(1)[0]`, which derives from the seed sequence
+  **without advancing the parent**. Taking it from `rng` directly shifted every later
+  draw and moved the seeded cell-age CV from 0.577 to 0.706. Any future per-cell
+  initialisation needs the same treatment.
+- **`cell_sense_distance` is the void-spanning range, but the cutoff barely matters**
+  (measured V3.8). It IS tested against `gap`, the surface-to-surface separation, at
+  four sites. But it is a hard cutoff on top of `exp(−gap/bridge_decay_length)` with
+  `bridge_decay_length = 30 µm`, so at the fibroblast's 80 µm the path factor is already
+  **7 %** of its contact value. **`bridge_decay_length` is what sets the range**; tuning
+  `sense_distance` is tuning the wrong knob. Its meaning — the cell's reach, which caps
+  the search — is correct and unchanged.
+- **Two measurement traps around cells, both pinned as tests** (V3.8). `add_cells`
+  rebuilds the CSR, so an index-wise comparison of any `cell_*` array across a division
+  event silently compares **different cells** — and `fibroblast_realistic` has division
+  on. And `π/√3 = 1.8138 rad` is the RMS of a uniform distribution on a circle, so any
+  sufficiently long window reads that value whatever the walk does: two runs 11.75×
+  apart looked identical. Each cost a wrong measurement before being caught.
 - **The engine reports a STRESS, not just a force** (V3.7, `gels/stress.py`).
   Everything mechanical before this was extensive — `F_mean`, `F_max` — so it was
   comparable to nothing. Love-Weber, **compression positive**, `P = tr(σ)/d` with

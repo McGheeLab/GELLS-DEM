@@ -37,6 +37,41 @@ over 24--72 hours.
 
 ---
 
+## What's New in V3.8
+
+The cell's search on the granule surface now has a **persistence time** instead of a
+timestep.
+
+The walk used to draw `N(0, v·dt/r)` — a ballistic displacement used as the width of
+a diffusive step. Variance adds, so the distance a cell searched scaled as
+`sqrt(T·dt)`: it depended on the timestep. V3.6 turned `dt` into a coupling interval
+and subdivides it 129–330× on the fibroblast preset, so the search quietly shrank by
+`sqrt(n_sub)` — **11.75× suppressed**, from 17 µm of surface arc per half-hour to
+1.45 µm. It was invisible because V3.6 re-blessed the regression baseline.
+
+The walk now carries a heading, which is the only random term and scales as
+`sqrt(dt)`, while the step is `v·dt` along it. That is a persistent random walk:
+ballistic while `t < tau_p`, diffusive after, and the same answer whatever `dt` you
+choose. Measured after: **1.175×**.
+
+`persistence_time_h` is now a **required** cell-type value — no default, so no cell
+type can be defined without stating how long its cells keep going in one direction.
+Fibroblast is 1.0 h after Gail & Boone (1970), with the source string honest that
+1.0 h is the short end of what that paper supports.
+
+Cells also now **crowd**. A searching cell prefers the granule surface but may climb
+over another cell, with mobility `(1 - occupancy) + occupancy * p_climb`. `p_climb`
+is `f_cell_cell` — the same number that makes a stacked cell pull at 0.178× in V3.6 —
+so one parameter sets both how hard a stacked cell pulls and how willing a cell is to
+climb onto one.
+
+One negative result worth recording: `cell_sense_distance` is a hard cutoff sitting
+on top of `exp(-gap/30 µm)`, so at the fibroblast's 80 µm the bridge probability is
+already 7% of its contact value. **`bridge_decay_length` is what actually sets the
+void-spanning range**; `sense_distance` was the wrong knob to tune.
+
+See `CodeLog/Updates/CHANGELOG.md` for the full entry.
+
 ## What's New in V3.7
 
 The engine now reports a **stress**, not just a force.

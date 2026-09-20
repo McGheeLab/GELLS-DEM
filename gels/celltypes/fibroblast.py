@@ -68,6 +68,19 @@ CELL_TYPE = CellType(
     migration_speed_um_per_h=M(30.0, 'um/h', '12-60 um/h on 2D collagen '
                                              '[typical reported range]; 10-30 on curved 3D',
                                (12.0, 60.0)),
+    # V3.8. Gail & Boone 1970 (Biophys J 10:980-993) is the origin of the
+    # persistent-random-walk description of fibroblast locomotion, and is the
+    # source for the MODEL. On the NUMBER, be precise about what that paper
+    # supports: its own data show direction persisting between successive 2.5 h
+    # intervals and appearing random over 5 h, so 1.0 h is at the SHORT end of
+    # what it shows and is the conservative choice. The span is the honest
+    # bracket, and the model is linear in tau_p through D = v^2 tau_p / 2, so a
+    # factor of 3 here is a factor of 3 in the search area.
+    persistence_time_h=M(1.0, 'h', 'persistent random walk fitted to fibroblast '
+                                   'locomotion (Gail & Boone 1970); that paper shows '
+                                   'persistence across 2.5 h and randomisation by 5 h, '
+                                   'so 1.0 h is the short end of its range',
+                         (0.5, 3.0)),
     contraction_speed_um_per_h=M(12.0, 'um/h', '0.1-0.5 um/min unloaded shortening',
                                  (6.0, 30.0)),
     sense_distance_um=M(80.0, 'um', 'reach of a spread fibroblast (100-150 um long), '

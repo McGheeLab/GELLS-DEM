@@ -280,10 +280,12 @@ def cells_update_k(seed, do_walk, dt, is_3d, periodic, Lx, Ly, Lz,
                    activity,
                    cell_state, cell_target, cell_bridge_age, cell_align, cell_locked, cell_fx, cell_fy, cell_fz,
                    cell_area, cell_over_age, cell_theta, cell_eta, cell_omega, cell_layer,
+                   cell_heading,
                    cell_d, cell_h, cov_surface, cov, is_3d_like, foothold, stacking_max, over_sen_time,
                    stack_on,
                    align_rate, align_min, lock_thr0, lock_scales, law, rule, gamma, kappa,
-                   sen_time, sense, commit_angle, mig_speed, directed_mult):
+                   sen_time, sense, commit_angle, mig_speed, directed_mult,
+                   tau, crowding, climb):
     N = adhesive.shape[0]
     for i in prange(N):
         if not adhesive[i]:
@@ -436,10 +438,22 @@ def cells_update_k(seed, do_walk, dt, is_3d, periodic, Lx, Ly, Lz,
                 cell_state[ci] = ATTACHED
                 cell_over_age[ci] = 0.0
 
-        # ── random-walk migration of mobile cells ──
+        # ── PERSISTENT random-walk migration of mobile cells (V3.8) ──
+        # The twin of the reference block: the only random term is the HEADING,
+        # which scales as sqrt(dt), so the walk composes under V3.6 substepping.
+        # `sigma = v*dt/r` (pre-V3.8) did not, and was suppressed 11.75x.
         if do_walk and mig_speed > 0:
             r_eff = max(r[i], 1.0)
-            sigma = mig_speed * dt / r_eff
+            # mean-field excluded volume: (1 - theta) + theta * p_climb
+            mob = 1.0
+            if crowding and cap > 0:
+                th = n_att / cap
+                if th > 1.0:
+                    th = 1.0
+                mob = (1.0 - th) + th * climb
+            step = mig_speed * dt * mob / r_eff
+            turn = np.sqrt(2.0 * dt / tau) if tau > 0.0 else 0.0
+            p_flip = -np.expm1(-dt / tau) if tau > 0.0 else 0.5
             for k in range(n_total):
                 ci = c0 + k
                 st = cell_state[ci]
@@ -447,12 +461,19 @@ def cells_update_k(seed, do_walk, dt, is_3d, periodic, Lx, Ly, Lz,
                     continue
                 z0, z1 = hash_normal2(seed, ci, 0, 7)
                 if is_3d:
-                    cell_eta[ci] += sigma * z0
-                    cell_omega[ci] += sigma * z1
+                    if tau > 0.0:
+                        cell_heading[ci] += turn * z0
+                    else:
+                        cell_heading[ci] = _TWO_PI * hash_u01(seed, ci, 1, 7)
+                    h = cell_heading[ci]
+                    cell_eta[ci] += step * np.cos(h)
+                    cell_omega[ci] += step * np.sin(h)
                     cell_eta[ci] = min(max(cell_eta[ci], -_ETA_CLAMP), _ETA_CLAMP)
                     cell_omega[ci] = cell_omega[ci] % _TWO_PI
                 else:
-                    cell_theta[ci] += sigma * z0
+                    if hash_u01(seed, ci, 1, 7) < p_flip:
+                        cell_heading[ci] = -cell_heading[ci]
+                    cell_theta[ci] += step * cell_heading[ci]
                     cell_theta[ci] = cell_theta[ci] % _TWO_PI
 
 
@@ -884,6 +905,7 @@ def update_cell_state_k(gs, p, t, rng=None):
                    gs.cell_bridge_locked, gs.cell_fx, gs.cell_fy, gs.cell_fz, gs.cell_contact_area,
                    gs.cell_overcrowd_age, gs.cell_theta_local, gs.cell_eta_local, gs.cell_omega_local,
                    gs.cell_layer,
+                   gs.cell_heading,                                        # V3.8
                    float(p.cell_diameter), float(p.cell_height_spread), float(capacity_coverage(p)),
                    float(p.cell_coverage), bool(is_3d_like), foothold, float(p.cell_stacking_max),
                    float(p.overcrowd_senescence_time), stacking_enabled(p),
@@ -891,7 +913,12 @@ def update_cell_state_k(gs, p, t, rng=None):
                    float(p.bridge_alignment_min), float(p.bridge_lock_force_threshold),
                    bool(p.bridge_lock_scales_with_ligand), law, rule, float(p.traction_exponent), float(kappa),
                    float(p.bridge_senescence_time), float(p.cell_sense_distance), float(p.bridge_commit_angle),
-                   float(p.cell_migration_speed), float(p.bridge_directed_speed_mult))
+                   float(p.cell_migration_speed), float(p.bridge_directed_speed_mult),
+                   # V3.8 persistent walk + mean-field crowding. `climb` is
+                   # f_cell_cell, the same number V3.6 uses for stacked traction.
+                   float(getattr(p, 'cell_persistence_time', 0.0) or 0.0),
+                   bool(getattr(p, 'cell_crowding_enabled', True)),
+                   min(max(float(getattr(p, 'f_cell_cell', 1.0)), 0.0), 1.0))
 
 
 def bridging_k(gs, p, rng, F, pair_i, pair_j, rec, pos, dim, csr):

@@ -373,23 +373,50 @@ def _update_individual_cells(gs: GranuleSystem, p: Params, rng=None):
                 gs.cell_state[ci] = int(CellState.ATTACHED)
                 gs.cell_overcrowd_age[ci] = 0.0
 
-        # ── Cell migration: random walk on granule surface ──
+        # ── Cell migration: PERSISTENT random walk on the granule surface ──
+        # V3.8. Until V3.8 this drew N(0, v*dt/r) directly -- a BALLISTIC
+        # displacement used as the width of a DIFFUSIVE increment. Variance
+        # adds, so the search over a window T went as (v/r)*sqrt(T*dt): it
+        # depended on the timestep, and V3.6's substepping (n_sub 129-330 on the
+        # flagship preset) suppressed it by sqrt(n_sub) -- measured 11.75x.
+        #
+        # A random walk composes under subdivision only when sigma ~ sqrt(dt).
+        # Here the only random term is the HEADING, which has exactly that
+        # scaling, and the displacement is v*dt along it. That gives
+        # MSD(t) = 2 d D [t - tau(1 - e^{-t/tau})] with D = v^2 tau / d:
+        # ballistic for t << tau, diffusive for t >> tau, and dt-independent.
         if rng is not None and p.cell_migration_speed > 0:
             r_eff = max(gs.r[i], 1.0)
-            sigma = p.cell_migration_speed * p.dt / r_eff
+            tau = max(float(getattr(p, 'cell_persistence_time', 0.0)), 0.0)
+            step = p.cell_migration_speed * p.dt * crowd_mobility(gs, i, p) / r_eff
+            # tau <= 0 means "no persistence": fall back to the uncorrelated
+            # walk, which is the tau -> 0 limit of the same process.
+            turn = np.sqrt(2.0 * p.dt / tau) if tau > 0 else 0.0
+            p_flip = -np.expm1(-p.dt / tau) if tau > 0 else 0.5
             for k in range(n_total):
                 ci = gs.cell_offset[i] + k
                 if gs.cell_state[ci] not in mobile_states:
                     continue
                 if gs.mode == "3D":
-                    gs.cell_eta_local[ci] += rng.normal(0, sigma)
-                    gs.cell_omega_local[ci] += rng.normal(0, sigma)
+                    # the surface is 2D: a heading angle in its tangent plane,
+                    # diffusing at 1/tau.
+                    if tau > 0:
+                        gs.cell_heading[ci] += rng.normal(0, turn)
+                    else:
+                        gs.cell_heading[ci] = rng.uniform(0.0, 2 * np.pi)
+                    h = gs.cell_heading[ci]
+                    gs.cell_eta_local[ci] += step * np.cos(h)
+                    gs.cell_omega_local[ci] += step * np.sin(h)
                     # Clamp eta to avoid poles
                     gs.cell_eta_local[ci] = np.clip(
                         gs.cell_eta_local[ci], -0.85 * np.pi / 2, 0.85 * np.pi / 2)
                     gs.cell_omega_local[ci] %= (2 * np.pi)
                 else:
-                    gs.cell_theta_local[ci] += rng.normal(0, sigma)
+                    # the surface is the 1D circumference: a telegraph process,
+                    # the heading sign flipping at rate 1/tau.
+                    if rng.random() < p_flip:
+                        gs.cell_heading[ci] = -gs.cell_heading[ci]
+                    gs.cell_theta_local[ci] += step * gs.cell_heading[ci]
                     gs.cell_theta_local[ci] %= (2 * np.pi)
 
 

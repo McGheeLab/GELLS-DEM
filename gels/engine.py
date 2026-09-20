@@ -208,6 +208,18 @@ class Params:
 
     # ── Cell migration ──
     cell_migration_speed: float = 5.0  # µm/h, random walk speed on granule surface
+    # V3.8: how long a cell keeps going in one direction. The surface walk is a
+    # PERSISTENT random walk -- a heading that diffuses at 1/tau_p, and a step of
+    # v*dt along it -- so D = v^2 tau_p / 2 and the search over a window t is
+    # sqrt(2 d D [t - tau_p(1 - e^{-t/tau_p})]): ballistic for t << tau_p,
+    # diffusive for t >> tau_p, and independent of dt either way. Before V3.8 the
+    # walk drew N(0, v*dt/r) directly, which is a ballistic magnitude used as a
+    # diffusive increment, so the search scaled as sqrt(T*dt) and V3.6's
+    # substepping suppressed it 11.75x. tau_p = dt is what that form implied.
+    cell_persistence_time: float = 1.0  # h, directional persistence (0 = uncorrelated)
+    # V3.8: mean-field excluded volume on the granule surface. Off = the V3.7
+    # walk, which ignores how many cells are already there.
+    cell_crowding_enabled: bool = True
 
     # ── Cell sensing & bridging ──
     cell_sense_distance: float = 40.0  # µm, filopodia sensing range
@@ -569,6 +581,9 @@ class GranuleSystem:
         # and bridge force already accumulates onto the host granule's row, so a
         # stacked cell correctly pulls its granule THROUGH the cell beneath.
         ('cell_layer', np.int8, 0),
+        # V3.8: the persistent walk's heading. 2D: a sign (+1 / -1) along the
+        # circumference. 3D: an angle in the surface tangent plane.
+        ('cell_heading', np.float64, 1.0),
     )
 
     def __init__(self, x, y, r, gtype, n_cells,
@@ -3583,6 +3598,40 @@ def cell_capacity(gs, i, p, A_cell=None):
     return int(round(float(gs.activity[i]) * n_full))
 
 
+def crowd_mobility(gs, i, p):
+    """Mean-field mobility of a cell searching a crowded granule surface (V3.8).
+
+    A cell prefers to be on the granule, but it may cross over another cell.
+    The standard lattice-gas mean-field result for simple exclusion is that a
+    walker's self-diffusion falls as the free-site fraction, ``D = D0 (1 - th)``.
+    Here a blocked move is not simply rejected -- the cell can climb -- so
+
+        mobility = (1 - th) + th * p_climb
+
+    with ``th = n_attached / capacity`` the granule's occupancy, from the
+    per-granule aggregates the cell machinery already maintains.
+
+    ``p_climb`` is **`f_cell_cell`**, which is the point of doing it this way:
+    the same number that makes a stacked cell pull at 0.178x in V3.6 also says
+    how willing a cell is to climb onto one. One parameter, two observables, so
+    they cannot disagree about the preference -- and `f_cell_cell` is flagged as
+    an ASSUMPTION needing calibration, so a second observable is useful.
+
+    ``f_cell_cell = 1`` gives mobility 1 at any occupancy (no preference, no
+    crowding), which is the parity case and is exactly the pre-V3.8 behaviour.
+    """
+    if not bool(getattr(p, 'cell_crowding_enabled', True)):
+        return 1.0
+    cap = cell_capacity(gs, i, p)
+    if cap <= 0:
+        return 1.0
+    th = float(gs.n_attached[i]) / float(cap)
+    th = min(max(th, 0.0), 1.0)
+    climb = float(getattr(p, 'f_cell_cell', 1.0))
+    climb = min(max(climb, 0.0), 1.0)
+    return (1.0 - th) + th * climb
+
+
 def motor_clutch_force(E_kPa, p: Params, fa_maturity_val, nu=None, g=1.0, F_adh=None):
     """
     Steady-state traction force per cell from the motor-clutch model.
@@ -3769,12 +3818,32 @@ def traction_metrics(gs, p):
            # number: what a cell standing on cells pulls, as a fraction of the
            # same cell standing on the granule. It falls as granules stiffen.
            'n_cells_stacked': 0, 'cell_layer_mean': 0.0, 'cell_layer_max': 0,
-           'stacked_traction_ratio': 1.0}
+           'stacked_traction_ratio': 1.0,
+           # V3.8: what the crowding did to the search. 1.0 = unhindered. A
+           # mobility factor that silently multiplies the search speed with no
+           # observable would be out of character for this engine -- the same
+           # reason `n_substeps`, `frac_velocity_clipped`, `stress_volume` and
+           # `laguerre_valid_frac` exist. Averaged over granules that HAVE cells,
+           # because an empty granule is trivially 1.0 and would dilute it.
+           'cell_crowd_mobility': 1.0, 'cell_occupancy_mean': 0.0}
     N = gs.N
     off = getattr(gs, 'cell_offset', None)
     C = int(off[N]) if off is not None and len(off) > N else 0
     if C == 0:
         return out
+    _mob, _occ = [], []
+    for _i in range(N):
+        if off[_i + 1] <= off[_i]:
+            continue
+        _cap = cell_capacity(gs, _i, p)
+        if _cap <= 0:
+            continue
+        _occ.append(min(float(gs.n_attached[_i]) / _cap, 1.0))
+        _mob.append(crowd_mobility(gs, _i, p))
+    if _mob:
+        out['cell_crowd_mobility'] = float(np.mean(_mob))
+        out['cell_occupancy_mean'] = float(np.mean(_occ))
+
     U = cell_strain_energy(gs, p)
     out['cell_strain_energy'] = U
     out['cell_strain_energy_pJ'] = U / 1000.0      # nN.um = 1e-15 J
@@ -3868,6 +3937,25 @@ def _initialize_cells(gs: GranuleSystem, rng, p=None):
     if p is None:
         return
     C = gs.total_cells
+    # V3.8: randomise the persistent walk's initial heading. The array default is
+    # a constant, so without this EVERY seeded cell sets off the same way -- in
+    # 2D that is every granule's cell ring rotating together for the first ~tau_p.
+    # Daughters keep inheriting the default, which is harmless: division is a
+    # trickle rather than a cohort, and a heading decorrelates within tau_p.
+    #
+    # Drawn from a SPAWNED child stream, not from `rng`. With division off,
+    # `_initialize_cells` is contracted to consume exactly the surface-angle
+    # draws and nothing else (`test_seeding_draws_nothing_when_division_is_off`),
+    # and taking the headings from `rng` would shift every later draw -- it moved
+    # the seeded age CV from 0.577 to 0.706 before this was caught. `spawn`
+    # derives from the seed sequence without advancing the parent, so the
+    # headings are reproducible for a given seed and cost the packing nothing.
+    if C > 0:
+        hrng = rng.spawn(1)[0]
+        if gs.is_3d:
+            gs.cell_heading[:C] = hrng.uniform(0.0, 2.0 * np.pi, C)
+        else:
+            gs.cell_heading[:C] = np.where(hrng.random(C) < 0.5, -1.0, 1.0)
     if C > 0 and getattr(p, 'cell_division_enabled', False):
         T_d = max(1e-9, float(p.cell_doubling_time))
         cv = max(0.0, float(getattr(p, 'cell_division_cv', 0.0)))
@@ -7170,6 +7258,7 @@ def save_snapshot_to_disk(snap_idx, gs, p, t, F, output_dir,
     data['cell_age'] = gs.cell_age.copy()
     data['cell_generation'] = gs.cell_generation.copy()
     data['cell_layer'] = gs.cell_layer.copy()          # V3.6
+    data['cell_heading'] = gs.cell_heading.copy()      # V3.8
     data['cell_cycle_time'] = gs.cell_cycle_time.copy()          # V3.2
     data['fixed'] = gs.fixed.copy()
     data['n_divisions_cum'] = np.int64(getattr(gs, 'n_divisions_cum', 0))
@@ -7564,6 +7653,7 @@ def restore_gs_from_snapshot(snap_path, p):
     gs.cell_age[:] = data.get('cell_age', np.zeros(n_c))
     gs.cell_generation[:] = data.get('cell_generation', np.zeros(n_c, dtype=np.int8))
     gs.cell_layer[:] = data.get('cell_layer', np.zeros(n_c, dtype=np.int8))     # V3.6
+    gs.cell_heading[:] = data.get('cell_heading', np.ones(n_c))                # V3.8
     gs.cell_cycle_time[:] = data.get('cell_cycle_time', np.zeros(n_c))       # V3.2
     if 'fixed' in data:
         gs.fixed[:] = np.asarray(data['fixed'], dtype=bool)
@@ -7652,6 +7742,7 @@ def _snapshot_dict(gs, F, pf, pi, pv, contacts):
         'cell_age': gs.cell_age.copy(),
         'cell_generation': gs.cell_generation.copy(),
         'cell_layer': gs.cell_layer.copy(),            # V3.6
+        'cell_heading': gs.cell_heading.copy(),        # V3.8
         'cell_cycle_time': gs.cell_cycle_time.copy(),   # V3.2
         'fixed': gs.fixed.copy(),
         'n_divisions_cum': int(getattr(gs, 'n_divisions_cum', 0)),
