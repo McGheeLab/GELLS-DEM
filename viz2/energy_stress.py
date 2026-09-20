@@ -239,7 +239,15 @@ def compute_energy_field(snap, p, mode, Ngrid=30):
 
 
 def _compute_traction_field(snap, p, gx, gy, w):
-    """Cell traction energy: E = 0.5 * |F_cell| * bridge_length."""
+    """Cell strain energy, nN*um:  U = F^2 / 2k,  1/k = 1/k_cell + 1/k_sub.
+
+    V3.7. This used to be ``0.5 * |F_cell| * bridge_length`` -- the work of
+    dragging a granule the whole length of a bridge, which scales with how far
+    apart the granules happen to be rather than with how hard the cell pulls.
+    The engine has had the real quantity since V3.6, and it is the one traction
+    force microscopy reports (1 pJ = 1000 nN*um), so it is now shared rather
+    than re-invented here.
+    """
     Ngrid = len(gx)
     field = np.zeros((Ngrid, Ngrid))
 
@@ -248,36 +256,40 @@ def _compute_traction_field(snap, p, gx, gy, w):
     if n_cells == 0:
         return field
 
-    cell_fx = snap.get('cell_fx', np.zeros(n_cells))
-    cell_fy = snap.get('cell_fy', np.zeros(n_cells))
-    cell_bt = snap.get('cell_bridge_target', -np.ones(n_cells, dtype=int))
+    from gels.stress import snapshot_cell_strain_energy
+    U = snapshot_cell_strain_energy(snap, p)
+    if U.size != n_cells:
+        return field
 
     wx, wy = cell_world_positions(snap)
-    xs, ys, rs = snap['x'], snap['y'], snap['r']
-
-    src_x, src_y, vals = [], [], []
-    for ci in range(n_cells):
-        f_mag = np.sqrt(cell_fx[ci]**2 + cell_fy[ci]**2)
-        if f_mag < 1e-10:
-            continue
-        bt = int(cell_bt[ci])
-        if bt >= 0 and bt < len(xs):
-            bridge_len = np.sqrt((wx[ci] - xs[bt])**2 + (wy[ci] - ys[bt])**2)
-        else:
-            bridge_len = rs[int(snap['cell_granule_id'][ci])] if ci < len(snap.get('cell_granule_id', [])) else r_mean
-        energy = 0.5 * f_mag * bridge_len
-        src_x.append(wx[ci])
-        src_y.append(wy[ci])
-        vals.append(energy)
-
-    if src_x:
-        _gaussian_smear(field, gx, gy, np.array(src_x), np.array(src_y),
-                        np.array(vals), w)
+    loaded = U > 0
+    if not np.any(loaded):
+        return field
+    _gaussian_smear(field, gx, gy, np.asarray(wx)[loaded], np.asarray(wy)[loaded],
+                    U[loaded], w)
     return field
 
 
 def _compute_contact_field(snap, p, gx, gy, w):
-    """Hertz/JKR contact energy: E = (2/5)*E*sqrt(R_eff)*delta^(5/2)."""
+    """JKR contact energy, nN*um -- the engine's own, per pair.
+
+    V3.7. What stood here was ``(2/5) * E* * sqrt(R) * d^2.5`` with E* from the
+    GLOBAL ``p.E_modulus``, and it was wrong three ways that compounded to a
+    factor of 790 on a hydrogel bed:
+
+      * the engine's ``E_star`` is in Pa and every force expression that uses it
+        carries an explicit ``1e-3`` to reach nN/um^2. Omitting it is x1000.
+      * integrating ``F = (4/3) E* sqrt(R) d^{3/2}`` gives ``(8/15)``, not
+        ``(2/5)``. That is x0.75.
+      * the contact is JKR, not Hertz, and the adhesive terms matter most at
+        shallow overlap, where most contacts live.
+
+    and a fourth that is worse on a mixed bed: a global modulus ignores the
+    per-species value and ``contact.E_cap``, which on the PMMA preset is a
+    factor of 3e4. `gels.stress.snapshot_contact_energy` uses the per-pair
+    columns the snapshot has carried since V3.7, and falls back -- visibly --
+    for older runs.
+    """
     Ngrid = len(gx)
     field = np.zeros((Ngrid, Ngrid))
 
@@ -285,29 +297,15 @@ def _compute_contact_field(snap, p, gx, gy, w):
     if len(ci_arr) == 0:
         return field
 
-    cx = snap.get('contact_cx', np.zeros(len(ci_arr)))
-    cy = snap.get('contact_cy', np.zeros(len(ci_arr)))
-    overlap = snap.get('contact_overlap', np.zeros(len(ci_arr)))
-    R_eff = snap.get('contact_R_eff', np.ones(len(ci_arr)) * 20.0)
-    A_contact = snap.get('contact_A_contact', np.zeros(len(ci_arr)))
-
-    E_mod = getattr(p, 'E_modulus', 10.0) * 1e3  # kPa -> Pa, but we're in nN/um^2 = kPa
-    nu = getattr(p, 'poisson_ratio', 0.45)
-    E_star = E_mod / (2.0 * (1.0 - nu**2))  # kPa
-
-    src_x, src_y, vals = [], [], []
-    for k in range(len(ci_arr)):
-        if overlap[k] <= 0:
-            continue
-        # Hertz elastic energy: (2/5) * E* * sqrt(R_eff) * delta^(5/2) in nN*um
-        E_hertz = (2.0 / 5.0) * E_star * np.sqrt(R_eff[k]) * overlap[k]**2.5
-        src_x.append(cx[k])
-        src_y.append(cy[k])
-        vals.append(E_hertz)
-
-    if src_x:
-        _gaussian_smear(field, gx, gy, np.array(src_x), np.array(src_y),
-                        np.array(vals), w)
+    from gels.stress import snapshot_contact_energy
+    E_c, _exact = snapshot_contact_energy(snap, p)
+    cx = np.asarray(snap.get('contact_cx', np.zeros(len(ci_arr))))
+    cy = np.asarray(snap.get('contact_cy', np.zeros(len(ci_arr))))
+    overlap = np.asarray(snap.get('contact_overlap', np.zeros(len(ci_arr))))
+    keep = (overlap > 0) & np.isfinite(E_c)
+    if not np.any(keep):
+        return field
+    _gaussian_smear(field, gx, gy, cx[keep], cy[keep], E_c[keep], w)
     return field
 
 
@@ -382,7 +380,15 @@ def _compute_osmotic_field(snap, p, Ngrid, slice_3d=False):
 
 
 def _compute_frustration_field(snap, p, gx, gy, w):
-    """Inert frustration: F_normal * overlap at inert-functional contacts."""
+    """The share of the contact energy carried at inert-involving contacts.
+
+    V3.7. This was ``|F_normal| * overlap``, which is neither the stored energy
+    (for Hertz that is ``(2/5) F d``) nor independent of the contact panel: it
+    is the SAME contacts, scored differently. It is now literally the contact
+    energy restricted to inert-functional and inert-inert pairs, so the panel
+    is an honest subset of "JKR contact" rather than a sixth mode that
+    double-counts it. Read the two together, not as a sum.
+    """
     Ngrid = len(gx)
     field = np.zeros((Ngrid, Ngrid))
 
@@ -396,6 +402,8 @@ def _compute_frustration_field(snap, p, gx, gy, w):
     overlap = snap.get('contact_overlap', np.zeros(len(ci_arr)))
     F_normal = snap.get('contact_F_normal', np.zeros(len(ci_arr)))
     gt = snap['gtype']
+    from gels.stress import snapshot_contact_energy
+    E_contact, _exact = snapshot_contact_energy(snap, p)
 
     src_x, src_y, vals = [], [], []
     for k in range(len(ci_arr)):
@@ -409,7 +417,7 @@ def _compute_frustration_field(snap, p, gx, gy, w):
         is_ii = (ti == 1 and tj == 1)
 
         if is_mixed or is_ii:
-            E_frust = abs(F_normal[k]) * max(overlap[k], 0)
+            E_frust = E_contact[k]
             src_x.append(cx[k])
             src_y.append(cy[k])
             vals.append(E_frust)

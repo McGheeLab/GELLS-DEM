@@ -25,6 +25,7 @@ from gels.engine import (
 from gels.kernels import njit
 from gels.kernels.geometry2d import se2d_contact_k
 from gels.kernels.percolation import graph_percolation_metrics
+from gels.stress import stress_metrics                     # V3.7
 from gels.laguerre import laguerre_metrics
 from gels.pore import pore_metrics
 
@@ -452,6 +453,7 @@ def compute_metrics(gs, p, phi_f, phi_i, phi_v, t, forces, phi_s=None):
     m.update(projection_metrics(gs))            # V3.2: is the rail or the contact law in charge?
     m.update(energy_metrics(gs))                # V3.5: is the force law a gradient?
     m.update(substep_metrics(gs))               # V3.6: what the substep controller did
+    m.update(stress_metrics(gs))                # V3.7: the virial stress, in kPa
     m.update(traction_metrics(gs, p))           # V3.6: what the cells pull with, and store
     ar_mean = float(np.mean(np.maximum(gs.a, gs.b) /
                             np.minimum(gs.a, gs.b))) if N > 0 else 1.0

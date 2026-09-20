@@ -29,6 +29,7 @@ from gels.engine import *  # noqa: F401,F403  (public helpers, leaf njit functio
 from gels.materials import traction_gain, blocker_factor, law_code, rule_code  # noqa: E402
 from gels.kernels.percolation import graph_percolation_metrics  # noqa: E402
 from gels.laguerre import laguerre_metrics  # noqa: E402
+from gels.stress import stress_metrics  # noqa: E402  # V3.7
 from gels.pore import pore_metrics  # noqa: E402
 from gels.engine import (  # noqa: E402  private helpers used by the moved loops
     _angular_distance_to_target_2d,
@@ -3130,6 +3131,7 @@ def compute_metrics(gs, p, phi_f, phi_i, phi_v, t, forces, phi_s=None):
     m.update(projection_metrics(gs))            # V3.2: is the rail or the contact law in charge?
     m.update(energy_metrics(gs))                # V3.5: is the force law a gradient?
     m.update(substep_metrics(gs))               # V3.6: what the substep controller did
+    m.update(stress_metrics(gs))                # V3.7: the virial stress, in kPa
     m.update(traction_metrics(gs, p))           # V3.6: what the cells pull with, and store
     ar_mean = float(np.mean(np.maximum(gs.a, gs.b) /
                             np.minimum(gs.a, gs.b))) if gs.N > 0 else 1.0

@@ -55,6 +55,7 @@ import subprocess
 import sys
 
 from gels.kernels import HAS_NUMBA as _HAS_NUMBA
+from gels.stress import record_stress, stress_metrics  # V3.7
 
 # The engine prints Greek letters and micro signs in its progress output. On a
 # Windows console that is still cp1252 this used to raise UnicodeEncodeError
@@ -702,6 +703,18 @@ class GranuleSystem:
         self.energy_ascent_steps = 0
         self.energy_max_ascent_frac = 0.0
         self.energy_backtracks = 0
+
+        # V3.7 virial stress (set by `step` from the contact list the force
+        # evaluation just built; `stress_metrics` reads them back). Zero here
+        # so a gs that has never been stepped still reports the full key set.
+        self.stress_total = None
+        self.stress_contact = None
+        self.stress_active = None
+        self.stress_volume = 0.0
+        self.stress_n_contacts = 0
+        self.stress_n_bridges = 0
+        self.stress_skip = False      # set by `advance` on interior substeps
+        self.stress_fabric = None     # V3.7 SFF block, filled by `record_stress`
         self.energy_prev = None          # None until the first audited step
         self.energy_step_scale = 1.0     # 'damped' mode: gamma is divided by this
 
@@ -6791,6 +6804,13 @@ def step(gs: GranuleSystem, p: Params, rng, t: float):
     if _gf != 'off':
         _E0, _parts = system_energy(gs, p, contacts)
 
+    # V3.7 virial stress. Computed HERE, not at metrics time: the step moves the
+    # granules a few lines below, and a branch vector taken after that would no
+    # longer match the force it is paired with. Unconditional -- it is one
+    # vectorised pass over columns the contact list already carries.
+    if not getattr(gs, 'stress_skip', False):
+        record_stress(gs, p, contacts)
+
     # Integrate deformation DOFs (implicit Euler, after force computation)
     if p.deformable_enabled and gs.epsilon is not None:
         from gels.lsdem import integrate_deformation_implicit
@@ -6946,9 +6966,15 @@ def advance(gs: GranuleSystem, p: Params, rng, t: float):
         p.v_max = v0 * n_sub          # a displacement cap, not a speed cap
         F = contacts = None
         for k in range(n_sub):
+            # V3.7: the virial stress describes the END of the coupling
+            # interval, so only the last substep needs to record it. At 256x
+            # subdivision the other 255 would be pure waste -- measured ~6 % of
+            # a force evaluation each, half of it in `bed_surface`.
+            gs.stress_skip = (k < n_sub - 1)
             F, contacts = step(gs, p, rng, t0 + (k + 1) * p.dt)
     finally:
         p.dt, p.v_max = dt0, v0
+        gs.stress_skip = False
     return F, contacts
 
 
@@ -7154,25 +7180,38 @@ def save_snapshot_to_disk(snap_idx, gs, p, t, F, output_dir,
         data['phi_z_profile'] = _phi
 
     # V1.5.2: Per-contact data for stress visualization (V3.0: ContactSoA fast path)
+    #
+    # V3.7 added `a_contact`, `E_star`, `W` and `kappa`. Without them nothing
+    # downstream COULD compute the engine's own contact energy -- the JKR
+    # expression takes exactly (a, R*, E*, W) -- so `viz2/energy_stress.py`,
+    # `viz/stress.py` and `analysis/coarse_grain.py` each fell back to Hertz
+    # with the GLOBAL `p.E_modulus`. Measured, that made the energy field 790x
+    # too large on a hydrogel bed, and assumed an E* 3e4x off on a PMMA one,
+    # where the real per-pair value has been through `contact_E_cap`. Four more
+    # float64 columns on top of ten is about +2 % of a snapshot, since the
+    # contact block is ~5 % of the file.
+    _CONTACT_COLS = ('cx', 'cy', 'cz', 'nx', 'ny', 'nz', 'overlap', 'R_eff',
+                     'F_normal', 'A_contact', 'a_contact', 'E_star', 'W', 'kappa')
     if contacts is not None and len(contacts) > 0 and hasattr(contacts, 'column'):
         data['contact_i'] = np.asarray(contacts.column('i'), dtype=np.int32)
         data['contact_j'] = np.asarray(contacts.column('j'), dtype=np.int32)
-        for name in ('cx', 'cy', 'cz', 'nx', 'ny', 'nz', 'overlap', 'R_eff', 'F_normal', 'A_contact'):
-            data['contact_' + name] = np.asarray(contacts.column(name), dtype=np.float64)
+        for name in _CONTACT_COLS:
+            try:
+                col = contacts.column(name)
+            except (KeyError, TypeError):
+                continue
+            data['contact_' + name] = np.asarray(col, dtype=np.float64)
     elif contacts:
         n_c = len(contacts)
         data['contact_i'] = np.array([c['i'] for c in contacts], dtype=np.int32)
         data['contact_j'] = np.array([c['j'] for c in contacts], dtype=np.int32)
-        data['contact_cx'] = np.array([c['cx'] for c in contacts])
-        data['contact_cy'] = np.array([c['cy'] for c in contacts])
-        data['contact_cz'] = np.array([c.get('cz', 0.0) for c in contacts])
-        data['contact_nx'] = np.array([c['nx'] for c in contacts])
-        data['contact_ny'] = np.array([c['ny'] for c in contacts])
-        data['contact_nz'] = np.array([c.get('nz', 0.0) for c in contacts])
-        data['contact_overlap'] = np.array([c['overlap'] for c in contacts])
-        data['contact_R_eff'] = np.array([c['R_eff'] for c in contacts])
-        data['contact_F_normal'] = np.array([c['F_normal'] for c in contacts])
-        data['contact_A_contact'] = np.array([c['A_contact'] for c in contacts])
+        # The LS-DEM branch appends records without E_star / W / a_contact, and
+        # `kappa` only exists once the MC-DEM correction has run -- so every
+        # column is a `.get`, and kappa defaults to 1.0 (no correction), not 0.
+        for name in _CONTACT_COLS:
+            dflt = 1.0 if name == 'kappa' else 0.0
+            data['contact_' + name] = np.array(
+                [c.get(name, dflt) for c in contacts], dtype=np.float64)
 
     # V2.6: LS-DEM deformation state (needed for resume)
     if gs.epsilon is not None:
@@ -7841,6 +7880,7 @@ def run(p=None, seed=None, observer=None):
         if getattr(p, 'dynamics_gradient_flow', 'off') != 'off':   # V3.5
             _energy_audit(gs, p, p.dynamics_gradient_flow,
                           *system_energy(gs, p, contacts0), 0.0)
+        record_stress(gs, p, contacts0)        # V3.7: the t=0 row is a row too
         if p.save_data:
             save_params_metadata(p, gs, output_dir, seed)   # now carries the handoff
         m = save(0.0, F0, contacts0)
